@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/jhl-labs/vibe-terminal-public/security/advisories/new
+    about: Please report security vulnerabilities privately.
+  - name: Licensing or source-use permission
+    url: https://github.com/jhl-labs/vibe-terminal-public/discussions
+    about: Ask about written permission to copy, modify, or redistribute source code.

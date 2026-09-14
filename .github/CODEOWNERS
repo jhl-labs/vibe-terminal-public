@@ -1,0 +1,5 @@
+# Default owner for all changes. Replace or supplement with teams as access is granted.
+* @jhl-labs
+
+# Release pipeline and supply-chain controls
+/.github/ @jhl-labs
