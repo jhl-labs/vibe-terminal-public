@@ -1,0 +1,99 @@
+name: Release binaries
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          cache: true
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build libgtk-3-dev libsecret-1-dev
+      - run: flutter pub get
+      - run: flutter build linux --release
+      - name: Package
+        run: |
+          cd build/linux/x64/release/bundle
+          tar -czf "${GITHUB_WORKSPACE}/vibe-terminal-${TAG}-linux-x64.tar.gz" .
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-x64
+          path: vibe-terminal-*-linux-x64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter build windows --release
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath "vibe-terminal-$env:TAG-windows-x64.zip"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-x64
+          path: vibe-terminal-*-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter build macos --release
+      - name: Package
+        run: |
+          cd build/macos/Build/Products/Release
+          zip -r "${GITHUB_WORKSPACE}/vibe-terminal-${TAG}-macos.zip" *.app
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos
+          path: vibe-terminal-*-macos.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish GitHub Release
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Create release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --generate-notes
