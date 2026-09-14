@@ -101,10 +101,10 @@ packages:
     dependency: "direct main"
     description:
       name: dartssh2
-      sha256: c8fd1d8c047c0f7d18c4a26a8199d6928033c9f5117420a7368556e91cec7918
+      sha256: "39359aceafcf5940b868249e3c9c6d86e4e0f989eec7417d033c943157c84c51"
       url: "https://pub.dev"
     source: hosted
-    version: "2.22.3"
+    version: "4.1.0"
   dbus:
     dependency: transitive
     description:
