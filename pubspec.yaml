@@ -8,7 +8,7 @@ dependencies:
   flutter:
     sdk: flutter
   flutter_riverpod: ^3.4.3
-  dartssh2: ^2.22.3
+  dartssh2: ^4.1.0
   xterm: ^4.0.0
   drift: ^2.35.0
   flutter_secure_storage: ^10.3.1
