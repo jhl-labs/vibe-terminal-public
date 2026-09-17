@@ -55,6 +55,14 @@ typedef KeyboardInteractivePrompt =
       KeyboardInteractiveRequest request,
     );
 
+/// 최종 대상까지의 TCP 스트림을 여는 사용자 정의 전송.
+///
+/// 기본(null)은 직접 TCP 또는 직전 jump 홉의 `forwardLocal`이다. Kubernetes
+/// 릴레이처럼 Pod 안의 프로세스가 스트림을 대신 열어 주는 경우에 쓴다.
+/// [lastJumpClient]는 jump 체인의 마지막 클라이언트(없으면 null)다.
+typedef SshTargetSocketOpener =
+    Future<Result<SSHSocket>> Function(SSHClient? lastJumpClient);
+
 /// PTY 세션 핸들. TerminalEngine/TerminalPage가 소비한다.
 /// 체인 중간 홉의 실패에 "어느 홉이었는지"를 붙인다.
 ///
@@ -161,6 +169,40 @@ class SshSessionHandle implements TerminalSessionHandle {
   }
 }
 
+/// 셸 없이 인증만 마친 SSH 연결. 같은 연결 위에서 포워딩 채널을 연다.
+class SshClientConnection {
+  SshClientConnection(
+    this.client, {
+    this.jumpClients = const [],
+    this.cleanups = const [],
+  });
+
+  final SSHClient client;
+
+  /// 거쳐 온 중간 jump 클라이언트들(바깥쪽 먼저). 닫을 때 함께 닫는다.
+  final List<SSHClient> jumpClients;
+
+  /// 연결을 닫을 때 함께 정리할 부가 자원.
+  final List<Future<void> Function()> cleanups;
+
+  /// 전송이 끊기면 완료된다. 상대가 끊었든 [close]를 불렀든 같다.
+  Future<void> get done => client.done;
+
+  Future<void> close() async {
+    client.close();
+    for (final c in jumpClients.reversed) {
+      c.close();
+    }
+    for (final cleanup in cleanups) {
+      try {
+        await cleanup();
+      } catch (_) {
+        // 이미 정리된 자원은 무시한다.
+      }
+    }
+  }
+}
+
 /// SSH 연결 서비스.
 ///
 /// TOFU 정책(홉마다 독립 적용). 세 경우 모두 **인증 정보를 보내기 전에**,
@@ -191,10 +233,40 @@ class SshService {
   final RemoteTerminalLauncher tmuxTerminalLauncher;
   final RemoteTerminalFallbackPolicy remoteTerminalFallbackPolicy;
 
+  /// [host]에 셸 없이 인증만 마친 SSH 연결을 연다.
+  ///
+  /// Port Forward처럼 채널만 필요한 도구가 쓴다. jump 체인 규칙은 [connect]와
+  /// 같고, X11은 셸이 없으므로 요청하지 않는다.
+  Future<Result<SshClientConnection>> connectClient({
+    required Host host,
+    required HostKeyApproval onHostKey,
+    KeyboardInteractivePrompt? onKeyboardInteractive,
+    List<Host> jumpHosts = const [],
+    SshTargetSocketOpener? targetSocket,
+  }) async {
+    final chain = await _establishChain(
+      host: host,
+      jumpHosts: jumpHosts,
+      onHostKey: onHostKey,
+      onKeyboardInteractive: onKeyboardInteractive,
+      targetSocket: targetSocket,
+    );
+    return switch (chain) {
+      Ok(:final value) => Ok(
+        SshClientConnection(
+          value.last,
+          jumpClients: value.sublist(0, value.length - 1),
+        ),
+      ),
+      Err(:final failure) => Err(failure),
+    };
+  }
+
   /// [host]에 연결해 PTY 셸 세션을 연다.
   ///
   /// [jumpHosts]가 비어 있지 않으면 그 호스트들을 바깥쪽부터 차례로 중계해
   /// (폰 → jumpHosts[0] → … → host) 최종적으로 [host]의 셸을 연다.
+  /// [targetSocket]이 있으면 마지막 홉의 TCP 스트림을 그것으로 연다.
   Future<Result<SshSessionHandle>> connect({
     required Host host,
     required int cols,
@@ -202,57 +274,23 @@ class SshService {
     required HostKeyApproval onHostKey,
     KeyboardInteractivePrompt? onKeyboardInteractive,
     List<Host> jumpHosts = const [],
+    SshTargetSocketOpener? targetSocket,
     String? remoteSessionId,
   }) async {
-    final fullChain = [...jumpHosts, host];
-    final established = <SSHClient>[];
+    final List<SSHClient> established;
+    switch (await _establishChain(
+      host: host,
+      jumpHosts: jumpHosts,
+      onHostKey: onHostKey,
+      onKeyboardInteractive: onKeyboardInteractive,
+      targetSocket: targetSocket,
+    )) {
+      case Ok(:final value):
+        established = value;
+      case Err(:final failure):
+        return Err(failure);
+    }
     try {
-      for (var i = 0; i < fullChain.length; i++) {
-        final hop = fullChain[i];
-        final SSHSocket socket;
-        try {
-          if (i == 0) {
-            socket = await SSHSocket.connect(
-              hop.transportHostname ?? hop.hostname,
-              hop.transportPort ?? hop.port,
-              timeout: const Duration(seconds: 15),
-            );
-          } else {
-            // 직전 홉의 SSH 연결 위에서 다음 홉으로 TCP를 중계한다.
-            socket = await established[i - 1].forwardLocal(
-              hop.hostname,
-              hop.port,
-            );
-          }
-        } catch (e) {
-          await _closeAll(established);
-          final message = '${hop.alias} 연결 실패: $e';
-          return Err(
-            i == fullChain.length - 1
-                ? NetworkFailure(message)
-                : JumpChainFailure('jump 호스트 $message'),
-          );
-        }
-
-        final result = await _establishClient(
-          host: hop,
-          socket: socket,
-          onHostKey: onHostKey,
-          onKeyboardInteractive: onKeyboardInteractive,
-        );
-        switch (result) {
-          case Ok(:final value):
-            established.add(value);
-          case Err(:final failure):
-            await _closeAll(established);
-            return Err(
-              i == fullChain.length - 1
-                  ? failure
-                  : labelJumpHopFailure(hop, failure),
-            );
-        }
-      }
-
       final targetClient = established.last;
       final pty = SSHPtyConfig(
         type: 'xterm-256color',
@@ -304,6 +342,76 @@ class SshService {
           fellBackToDirectSsh: fellBackToDirectSsh,
         ),
       );
+    } catch (e) {
+      await _closeAll(established);
+      return Err(UnknownFailure(e.toString()));
+    }
+  }
+
+  /// jump 체인을 바깥쪽부터 차례로 인증해 (폰 → jumpHosts[0] → … → host)
+  /// 홉별 SSHClient 목록을 돌려준다. 마지막 원소가 [host]의 클라이언트다.
+  /// 어느 홉이든 실패하면 이미 연 연결을 모두 닫고 Err를 돌려준다.
+  Future<Result<List<SSHClient>>> _establishChain({
+    required Host host,
+    required List<Host> jumpHosts,
+    required HostKeyApproval onHostKey,
+    required KeyboardInteractivePrompt? onKeyboardInteractive,
+    SshTargetSocketOpener? targetSocket,
+  }) async {
+    final fullChain = [...jumpHosts, host];
+    final established = <SSHClient>[];
+    try {
+      for (var i = 0; i < fullChain.length; i++) {
+        final hop = fullChain[i];
+        final isTarget = i == fullChain.length - 1;
+        final SSHSocket socket;
+        try {
+          if (isTarget && targetSocket != null) {
+            switch (await targetSocket(established.lastOrNull)) {
+              case Ok(:final value):
+                socket = value;
+              case Err(:final failure):
+                await _closeAll(established);
+                return Err(failure);
+            }
+          } else if (i == 0) {
+            socket = await SSHSocket.connect(
+              hop.hostname,
+              hop.port,
+              timeout: const Duration(seconds: 15),
+            );
+          } else {
+            // 직전 홉의 SSH 연결 위에서 다음 홉으로 TCP를 중계한다.
+            socket = await established[i - 1].forwardLocal(
+              hop.hostname,
+              hop.port,
+            );
+          }
+        } catch (e) {
+          await _closeAll(established);
+          final message = '${hop.alias} 연결 실패: $e';
+          return Err(
+            isTarget
+                ? NetworkFailure(message)
+                : JumpChainFailure('jump 호스트 $message'),
+          );
+        }
+
+        final result = await _establishClient(
+          host: hop,
+          socket: socket,
+          onHostKey: onHostKey,
+          onKeyboardInteractive: onKeyboardInteractive,
+        );
+        switch (result) {
+          case Ok(:final value):
+            established.add(value);
+          case Err(:final failure):
+            await _closeAll(established);
+            return Err(isTarget ? failure : labelJumpHopFailure(hop, failure));
+        }
+      }
+      return Ok(established);
     } catch (e) {
       await _closeAll(established);
       return Err(UnknownFailure(e.toString()));

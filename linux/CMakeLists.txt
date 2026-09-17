@@ -121,6 +121,18 @@ install(CODE "
 install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
   DESTINATION "${INSTALL_BUNDLE_DATA_DIR}" COMPONENT Runtime)
 
+# Build the helper with the same Dart SDK as Flutter.
+get_directory_property(FLUTTER_ROOT DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/flutter"
+  DEFINITION FLUTTER_ROOT)
+add_custom_target(vibe_desktop_tools ALL
+  COMMAND "${FLUTTER_ROOT}/bin/cache/dart-sdk/bin/dart"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/build_desktop_tools.dart"
+    "${CMAKE_CURRENT_BINARY_DIR}/tools"
+  DEPENDS flutter_assemble
+  VERBATIM)
+install(PROGRAMS "${CMAKE_CURRENT_BINARY_DIR}/tools/vibe-daemon"
+  DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
+
 # Install the AOT library on non-Debug builds only.
 if(NOT CMAKE_BUILD_TYPE MATCHES "Debug")
   install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"

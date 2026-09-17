@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../app/theme.dart';
 import '../../data/models/host.dart';
+import '../../kubernetes/kubernetes_exec_relay.dart';
 import '../../ssh/ssh_credentials.dart';
 import '../../state/providers.dart';
 
@@ -35,24 +36,21 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
   final _kubernetesContext = TextEditingController();
   final _kubernetesNamespace = TextEditingController(text: 'default');
   final _kubernetesResource = TextEditingController();
-  final _kubernetesSshPort = TextEditingController(text: '22');
-  final _kubernetesUsername = TextEditingController();
-  final _kubernetesPassword = TextEditingController();
-  final _kubernetesPrivateKeyPem = TextEditingController();
-  final _kubernetesKeyPassphrase = TextEditingController();
+  final _kubernetesContainer = TextEditingController();
   HostConnectionType _connectionType = HostConnectionType.ssh;
   HostAuthType _authType = HostAuthType.password;
-  HostAuthType _kubernetesAuthType = HostAuthType.password;
   LocalShellType _localShellType = LocalShellType.powershell;
   String? _jumpHostId;
+  KubernetesGateway _kubernetesGateway = _supportsLocalKubectl
+      ? KubernetesGateway.local
+      : KubernetesGateway.sshHost;
+  String? _kubernetesGatewayHostId;
   bool _keepRemoteSession = false;
   bool _agentForwarding = false;
   bool _x11Forwarding = false;
   bool _saving = false;
   String? _privateKeyImportStatus;
   String? _privateKeyValidationError;
-  String? _kubernetesPrivateKeyImportStatus;
-  String? _kubernetesPrivateKeyValidationError;
 
   bool get _editing => widget.existing != null;
   bool get _isSsh => _connectionType != HostConnectionType.localShell;
@@ -66,11 +64,14 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
   // 생성 불가, Android는 빈약한 앱 셸)라 SSH만 노출한다.
   static final bool _supportsLocalShell =
       Platform.isWindows || Platform.isLinux || Platform.isMacOS;
+  // 이 기기에서 kubectl을 직접 실행하는 것도 데스크톱에서만 가능하다. 모바일은
+  // SSH 호스트를 게이트웨이로 삼아 그곳의 kubectl을 쓴다.
+  static final bool _supportsLocalKubectl = _supportsLocalShell;
   static final bool _platformSupportsX11Forwarding =
       Platform.isWindows || Platform.isLinux || Platform.isMacOS;
 
   String get _connectionProfileSubtitle {
-    if (!_supportsLocalShell) return 'SSH 접속 정보를 저장합니다.';
+    if (!_supportsLocalShell) return 'SSH 또는 Kubernetes Pod 경유 SSH 프로필을 저장합니다.';
     return _showShellPicker
         ? 'SSH, Kubernetes Pod 경유 SSH 또는 이 Windows PC의 로컬 셸 프로필을 저장합니다.'
         : 'SSH, Kubernetes Pod 경유 SSH 또는 이 기기의 로컬 셸 프로필을 저장합니다.';
@@ -95,12 +96,12 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
     _authType = existing.authType;
     _localShellType = existing.localShellType;
     _jumpHostId = existing.jumpHostId;
+    _kubernetesGateway = existing.kubernetesGateway;
+    _kubernetesGatewayHostId = existing.kubernetesGatewayHostId;
     _kubernetesContext.text = existing.kubernetesContext ?? '';
     _kubernetesNamespace.text = existing.kubernetesNamespace ?? 'default';
     _kubernetesResource.text = existing.kubernetesResource ?? '';
-    _kubernetesSshPort.text = existing.kubernetesSshPort.toString();
-    _kubernetesUsername.text = existing.kubernetesUsername ?? '';
-    _kubernetesAuthType = existing.kubernetesAuthType;
+    _kubernetesContainer.text = existing.kubernetesContainer ?? '';
     _keepRemoteSession = existing.keepsRemoteSession;
     _agentForwarding = existing.agentForwarding;
     _x11Forwarding = existing.x11Forwarding;
@@ -125,11 +126,7 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
       _kubernetesContext,
       _kubernetesNamespace,
       _kubernetesResource,
-      _kubernetesSshPort,
-      _kubernetesUsername,
-      _kubernetesPassword,
-      _kubernetesPrivateKeyPem,
-      _kubernetesKeyPassphrase,
+      _kubernetesContainer,
     ]) {
       c.dispose();
     }
@@ -145,7 +142,12 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
 
   String? _validateHostname(String? value) {
     if (!_isSsh) return null;
-    return _required(value, '주소를 입력하세요');
+    final required = _required(value, '주소를 입력하세요');
+    if (required != null) return required;
+    if (_isKubernetesSsh && !isValidRelayTargetHost(value!.trim())) {
+      return 'Pod에서 접속할 호스트명 또는 IP를 입력하세요';
+    }
+    return null;
   }
 
   String? _validatePort(String? value) {
@@ -182,54 +184,6 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
       SshCredentialPayload.validatePublicKey(
         privateKeyPem,
         passphrase: _keyPassphrase.text,
-      );
-    } catch (_) {
-      return _invalidPrivateKeyMessage;
-    }
-    return null;
-  }
-
-  bool get _canKeepKubernetesCredential =>
-      _editing &&
-      _isKubernetesSsh &&
-      widget.existing?.kubernetesAuthType == _kubernetesAuthType &&
-      widget.existing?.kubernetesCredentialRef != null;
-
-  String? _validateKubernetesPort(String? value) {
-    if (!_isKubernetesSsh) return null;
-    final required = _required(value, 'Pod SSH 포트를 입력하세요');
-    if (required != null) return required;
-    final port = int.tryParse(value!.trim());
-    if (port == null || port < 1 || port > 65535) {
-      return '포트는 1-65535 사이여야 합니다';
-    }
-    return null;
-  }
-
-  String? _validateKubernetesPassword(String? value) {
-    if (!_isKubernetesSsh ||
-        _kubernetesAuthType != HostAuthType.password ||
-        _canKeepKubernetesCredential) {
-      return null;
-    }
-    return value == null || value.isEmpty ? 'Pod SSH 비밀번호를 입력하세요' : null;
-  }
-
-  String? _validateKubernetesPrivateKey(String? value) {
-    if (!_isKubernetesSsh || _kubernetesAuthType != HostAuthType.publicKey) {
-      return null;
-    }
-    if (_kubernetesPrivateKeyValidationError != null) {
-      return _kubernetesPrivateKeyValidationError;
-    }
-    final privateKeyPem = value?.trim() ?? '';
-    if (privateKeyPem.isEmpty) {
-      return _canKeepKubernetesCredential ? null : 'Pod SSH 개인키 PEM을 입력하세요';
-    }
-    try {
-      SshCredentialPayload.validatePublicKey(
-        privateKeyPem,
-        passphrase: _kubernetesKeyPassphrase.text,
       );
     } catch (_) {
       return _invalidPrivateKeyMessage;
@@ -320,28 +274,6 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
     }
   }
 
-  Future<void> _importKubernetesPrivateKey() async {
-    try {
-      final pem = await (widget.privateKeyImporter ?? _pickPrivateKeyPem)
-          .call();
-      if (pem == null) return;
-      setState(() {
-        _kubernetesPrivateKeyPem.text = pem.trimRight();
-        _kubernetesPrivateKeyImportStatus = 'Pod SSH 개인키 파일을 불러왔습니다';
-        _kubernetesPrivateKeyValidationError = null;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _kubernetesPrivateKeyValidationError = _invalidPrivateKeyMessage;
-      });
-      _formKey.currentState?.validate();
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Pod SSH 개인키를 불러오지 못했습니다: $e')));
-    }
-  }
-
   Future<void> _save() async {
     FocusScope.of(context).unfocus();
     if (!_formKey.currentState!.validate()) return;
@@ -384,36 +316,6 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
         credRef = null;
       }
 
-      var kubernetesCredRef = existing?.kubernetesCredentialRef;
-      if (_isKubernetesSsh &&
-          _kubernetesAuthType != HostAuthType.keyboardInteractive) {
-        final shouldWriteCredential =
-            !_canKeepKubernetesCredential ||
-            _kubernetesPassword.text.isNotEmpty ||
-            _kubernetesPrivateKeyPem.text.trim().isNotEmpty;
-        if (shouldWriteCredential) {
-          kubernetesCredRef ??= 'kube-cred-$id';
-          final secret = switch (_kubernetesAuthType) {
-            HostAuthType.password => SshCredentialPayload.password(
-              _kubernetesPassword.text,
-            ),
-            HostAuthType.publicKey => SshCredentialPayload.publicKey(
-              privateKeyPem: _kubernetesPrivateKeyPem.text.trim(),
-              passphrase: _kubernetesKeyPassphrase.text,
-            ),
-            HostAuthType.keyboardInteractive => throw StateError(
-              'keyboard-interactive에는 저장 자격증명이 없습니다',
-            ),
-          };
-          await secureStore.writeSecret(kubernetesCredRef, secret);
-        }
-      } else {
-        if (kubernetesCredRef != null) {
-          await secureStore.deleteSecret(kubernetesCredRef);
-        }
-        kubernetesCredRef = null;
-      }
-
       final now = DateTime.now();
       final hostname = _isSsh ? _hostname.text.trim() : 'localhost';
       final alias = _alias.text.trim();
@@ -445,10 +347,16 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
               startupScript: startupScript,
               credentialRef: credRef,
               jumpHostId: _isDirectSsh ? _jumpHostId : null,
+              kubernetesGateway: _isKubernetesSsh
+                  ? _kubernetesGateway
+                  : KubernetesGateway.local,
+              kubernetesGatewayHostId:
+                  _isKubernetesSsh &&
+                      _kubernetesGateway == KubernetesGateway.sshHost
+                  ? _kubernetesGatewayHostId
+                  : null,
               kubernetesContext: _isKubernetesSsh
-                  ? (_kubernetesContext.text.trim().isEmpty
-                        ? null
-                        : _kubernetesContext.text.trim())
+                  ? _optionalText(_kubernetesContext)
                   : null,
               kubernetesNamespace: _isKubernetesSsh
                   ? _kubernetesNamespace.text.trim()
@@ -456,14 +364,9 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
               kubernetesResource: _isKubernetesSsh
                   ? _kubernetesResource.text.trim()
                   : null,
-              kubernetesSshPort: _isKubernetesSsh
-                  ? int.parse(_kubernetesSshPort.text.trim())
-                  : 22,
-              kubernetesUsername: _isKubernetesSsh
-                  ? _kubernetesUsername.text.trim()
+              kubernetesContainer: _isKubernetesSsh
+                  ? _optionalText(_kubernetesContainer)
                   : null,
-              kubernetesAuthType: _kubernetesAuthType,
-              kubernetesCredentialRef: kubernetesCredRef,
               remoteSessionPersistence: _isSsh && _keepRemoteSession
                   ? RemoteSessionPersistence.tmux
                   : RemoteSessionPersistence.none,
@@ -499,15 +402,25 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
     }
   }
 
-  Widget _buildJumpHostDropdown() {
+  static String? _optionalText(TextEditingController controller) {
+    final text = controller.text.trim();
+    return text.isEmpty ? null : text;
+  }
+
+  /// jump 또는 kubectl 게이트웨이 후보: 자기 자신을 제외한 SSH 프로필.
+  List<Host> _sshHostCandidates() {
     final hosts = ref.watch(hostListProvider).value ?? const <Host>[];
-    final candidates = hosts
+    return hosts
         .where(
           (h) =>
               h.connectionType == HostConnectionType.ssh &&
               h.id != widget.existing?.id,
         )
         .toList();
+  }
+
+  Widget _buildJumpHostDropdown() {
+    final candidates = _sshHostCandidates();
     // 참조하던 jump 호스트가 목록에 없으면(삭제 등) 선택을 비운다.
     final value = candidates.any((h) => h.id == _jumpHostId)
         ? _jumpHostId
@@ -590,6 +503,123 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
     );
   }
 
+  /// 최종 SSH 대상(주소·포트·사용자명). 일반 SSH에서는 폼 상단에, Kubernetes
+  /// 경유에서는 경로 카드의 마지막 단계 안에 놓인다.
+  List<Widget> _buildTargetFields() => [
+    TextFormField(
+      controller: _hostname,
+      decoration: InputDecoration(
+        labelText: _isKubernetesSsh ? '주소 (Pod 네트워크 기준)' : '주소',
+        prefixIcon: const Icon(Icons.dns_outlined),
+        helperText: _isKubernetesSsh ? 'Pod 안에서 접속 가능한 호스트명 또는 IP' : null,
+      ),
+      textInputAction: TextInputAction.next,
+      validator: _validateHostname,
+    ),
+    const SizedBox(height: 12),
+    Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: TextFormField(
+            controller: _port,
+            decoration: const InputDecoration(
+              labelText: '포트',
+              prefixIcon: Icon(Icons.numbers),
+            ),
+            keyboardType: TextInputType.number,
+            textInputAction: TextInputAction.next,
+            validator: _validatePort,
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          flex: 2,
+          child: TextFormField(
+            controller: _username,
+            decoration: const InputDecoration(
+              labelText: '사용자명',
+              prefixIcon: Icon(Icons.person_outline),
+            ),
+            textInputAction: TextInputAction.next,
+            validator: (value) =>
+                _isSsh ? _required(value, '사용자명을 입력하세요') : null,
+          ),
+        ),
+      ],
+    ),
+  ];
+
+  /// kubectl 실행 위치 드롭다운의 값. 로컬/WSL은 고정 키, SSH 호스트는 id.
+  static const _gatewayLocalKey = 'local';
+  static const _gatewayWslKey = 'wsl';
+  static String _gatewaySshKey(String hostId) => 'ssh:$hostId';
+
+  String? get _gatewayKey => switch (_kubernetesGateway) {
+    KubernetesGateway.local => _gatewayLocalKey,
+    KubernetesGateway.wsl => _gatewayWslKey,
+    KubernetesGateway.sshHost =>
+      _kubernetesGatewayHostId == null
+          ? null
+          : _gatewaySshKey(_kubernetesGatewayHostId!),
+  };
+
+  void _selectGateway(String? key) {
+    setState(() {
+      if (key == null || key == _gatewayLocalKey) {
+        _kubernetesGateway = KubernetesGateway.local;
+        _kubernetesGatewayHostId = null;
+      } else if (key == _gatewayWslKey) {
+        _kubernetesGateway = KubernetesGateway.wsl;
+        _kubernetesGatewayHostId = null;
+      } else {
+        _kubernetesGateway = KubernetesGateway.sshHost;
+        _kubernetesGatewayHostId = key.substring('ssh:'.length);
+      }
+    });
+  }
+
+  Widget _buildKubernetesGatewayDropdown() {
+    final candidates = _sshHostCandidates();
+    final items = <DropdownMenuItem<String?>>[
+      if (_supportsLocalKubectl)
+        const DropdownMenuItem(
+          value: _gatewayLocalKey,
+          child: Text('이 기기에서 kubectl 실행'),
+        ),
+      if (Platform.isWindows)
+        const DropdownMenuItem(
+          value: _gatewayWslKey,
+          child: Text('WSL에서 kubectl 실행'),
+        ),
+      for (final h in candidates)
+        DropdownMenuItem(
+          value: _gatewaySshKey(h.id),
+          child: Text('SSH 접속 후 실행: ${h.alias} (${h.endpointLabel})'),
+        ),
+    ];
+    // 참조하던 호스트가 삭제됐거나 이 플랫폼에서 못 쓰는 선택지면 비운다.
+    final current = _gatewayKey;
+    final value = items.any((item) => item.value == current) ? current : null;
+    return DropdownButtonFormField<String?>(
+      key: const ValueKey('kubernetes-gateway'),
+      initialValue: value,
+      isExpanded: true,
+      decoration: InputDecoration(
+        labelText: 'kubectl 실행 위치',
+        prefixIcon: const Icon(Icons.alt_route),
+        helperText: candidates.isEmpty && !_supportsLocalKubectl
+            ? 'kubectl이 설치된 SSH 호스트 프로필을 먼저 추가하세요'
+            : '선택한 곳의 kubectl과 kubeconfig로 Pod에 들어갑니다',
+      ),
+      hint: const Text('선택하세요'),
+      items: items,
+      validator: (v) =>
+          _isKubernetesSsh && v == null ? 'kubectl 실행 위치를 선택하세요' : null,
+      onChanged: _saving ? null : _selectGateway,
+    );
+  }
+
   Widget _buildKubernetesRouteFields() {
     return Container(
       padding: const EdgeInsets.all(14),
@@ -602,7 +632,7 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const Text(
-            'Kubernetes Pod SSH 게이트웨이',
+            'Kubernetes Pod 경유 연결 경로',
             style: TextStyle(
               color: VibeColors.onSurface,
               fontWeight: FontWeight.w700,
@@ -610,165 +640,97 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
           ),
           const SizedBox(height: 4),
           const Text(
-            '로컬 kubectl로 임시 포트 포워드를 만들고 Pod에 SSH로 접속한 뒤 최종 대상에 연결합니다.',
+            'kubectl exec로 Pod에 들어간 뒤, Pod 네트워크에서 최종 대상에 SSH로 접속합니다. '
+            'Pod에 sshd는 필요 없고 nc, socat 또는 bash 중 하나만 있으면 됩니다.',
             style: TextStyle(color: VibeColors.onSurfaceDim, fontSize: 12),
           ),
-          const SizedBox(height: 12),
-          TextFormField(
-            controller: _kubernetesContext,
-            decoration: const InputDecoration(
-              labelText: 'kubectl context (선택)',
-              prefixIcon: Icon(Icons.hub_outlined),
-              helperText: '비워두면 현재 kubectl context를 사용합니다',
-            ),
-            textInputAction: TextInputAction.next,
+          const SizedBox(height: 16),
+          _RouteStep(
+            index: 1,
+            title: 'kubectl 게이트웨이',
+            child: _buildKubernetesGatewayDropdown(),
           ),
-          const SizedBox(height: 12),
-          TextFormField(
-            controller: _kubernetesNamespace,
-            decoration: const InputDecoration(
-              labelText: 'Namespace',
-              prefixIcon: Icon(Icons.account_tree_outlined),
-            ),
-            validator: (value) =>
-                _isKubernetesSsh ? _required(value, 'Namespace를 입력하세요') : null,
-            textInputAction: TextInputAction.next,
-          ),
-          const SizedBox(height: 12),
-          TextFormField(
-            controller: _kubernetesResource,
-            decoration: const InputDecoration(
-              labelText: '포트 포워드 리소스',
-              prefixIcon: Icon(Icons.view_in_ar_outlined),
-              helperText: '예: pod/ssh-gateway 또는 deployment/ssh-gateway',
-            ),
-            validator: (value) =>
-                _isKubernetesSsh ? _required(value, '리소스를 입력하세요') : null,
-            textInputAction: TextInputAction.next,
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: TextFormField(
-                  controller: _kubernetesSshPort,
-                  decoration: const InputDecoration(
-                    labelText: 'Pod SSH 포트',
-                    prefixIcon: Icon(Icons.numbers),
-                  ),
-                  keyboardType: TextInputType.number,
-                  validator: _validateKubernetesPort,
-                  textInputAction: TextInputAction.next,
+          const SizedBox(height: 16),
+          _RouteStep(
+            index: 2,
+            title: '릴레이 Pod',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: _kubernetesContext,
+                        decoration: const InputDecoration(
+                          labelText: 'context (선택)',
+                          prefixIcon: Icon(Icons.hub_outlined),
+                          helperText: '비우면 현재 context',
+                        ),
+                        textInputAction: TextInputAction.next,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextFormField(
+                        controller: _kubernetesNamespace,
+                        decoration: const InputDecoration(
+                          labelText: 'namespace',
+                          prefixIcon: Icon(Icons.account_tree_outlined),
+                        ),
+                        validator: (value) => _isKubernetesSsh
+                            ? _required(value, 'namespace를 입력하세요')
+                            : null,
+                        textInputAction: TextInputAction.next,
+                      ),
+                    ),
+                  ],
                 ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: TextFormField(
-                  controller: _kubernetesUsername,
-                  decoration: const InputDecoration(
-                    labelText: 'Pod SSH 사용자명',
-                    prefixIcon: Icon(Icons.person_outline),
-                  ),
-                  validator: (value) => _isKubernetesSsh
-                      ? _required(value, 'Pod SSH 사용자명을 입력하세요')
-                      : null,
-                  textInputAction: TextInputAction.next,
+                const SizedBox(height: 12),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      flex: 2,
+                      child: TextFormField(
+                        controller: _kubernetesResource,
+                        decoration: const InputDecoration(
+                          labelText: 'Pod',
+                          prefixIcon: Icon(Icons.view_in_ar_outlined),
+                          helperText: 'Pod 이름 또는 deployment/이름',
+                        ),
+                        validator: (value) => _isKubernetesSsh
+                            ? _required(value, 'Pod를 입력하세요')
+                            : null,
+                        textInputAction: TextInputAction.next,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextFormField(
+                        controller: _kubernetesContainer,
+                        decoration: const InputDecoration(
+                          labelText: 'container (선택)',
+                          prefixIcon: Icon(Icons.inventory_2_outlined),
+                        ),
+                        textInputAction: TextInputAction.next,
+                      ),
+                    ),
+                  ],
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-          const SizedBox(height: 12),
-          DropdownButtonFormField<HostAuthType>(
-            initialValue: _kubernetesAuthType,
-            decoration: const InputDecoration(
-              labelText: 'Pod SSH 인증 방식',
-              prefixIcon: Icon(Icons.key_outlined),
+          const SizedBox(height: 16),
+          _RouteStep(
+            index: 3,
+            title: '최종 SSH 대상',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: _buildTargetFields(),
             ),
-            items: const [
-              DropdownMenuItem(
-                value: HostAuthType.password,
-                child: Text('비밀번호'),
-              ),
-              DropdownMenuItem(
-                value: HostAuthType.publicKey,
-                child: Text('공개키'),
-              ),
-              DropdownMenuItem(
-                value: HostAuthType.keyboardInteractive,
-                child: Text('키보드 인터랙티브 / 2FA'),
-              ),
-            ],
-            onChanged: _saving
-                ? null
-                : (value) {
-                    if (value == null) return;
-                    setState(() {
-                      _kubernetesAuthType = value;
-                      _kubernetesPrivateKeyValidationError = null;
-                      _kubernetesPrivateKeyImportStatus = null;
-                    });
-                  },
           ),
-          const SizedBox(height: 12),
-          if (_kubernetesAuthType == HostAuthType.password)
-            TextFormField(
-              controller: _kubernetesPassword,
-              decoration: InputDecoration(
-                labelText: 'Pod SSH 비밀번호',
-                prefixIcon: const Icon(Icons.lock_outline),
-                helperText: _canKeepKubernetesCredential
-                    ? '비워두면 기존 비밀번호를 유지합니다'
-                    : null,
-              ),
-              obscureText: true,
-              validator: _validateKubernetesPassword,
-              textInputAction: TextInputAction.next,
-            )
-          else if (_kubernetesAuthType == HostAuthType.publicKey) ...[
-            Align(
-              alignment: Alignment.centerLeft,
-              child: OutlinedButton.icon(
-                onPressed: _saving ? null : _importKubernetesPrivateKey,
-                icon: const Icon(Icons.file_open),
-                label: const Text('Pod SSH 키 파일 선택'),
-              ),
-            ),
-            TextFormField(
-              controller: _kubernetesPrivateKeyPem,
-              decoration: InputDecoration(
-                labelText: 'Pod SSH 개인키 PEM',
-                prefixIcon: const Icon(Icons.vpn_key_outlined),
-                helperText:
-                    _kubernetesPrivateKeyImportStatus ??
-                    (_canKeepKubernetesCredential
-                        ? '비워두면 기존 개인키를 유지합니다'
-                        : null),
-              ),
-              minLines: 4,
-              maxLines: 7,
-              validator: _validateKubernetesPrivateKey,
-              onChanged: (_) {
-                if (_kubernetesPrivateKeyValidationError == null &&
-                    _kubernetesPrivateKeyImportStatus == null) {
-                  return;
-                }
-                setState(() {
-                  _kubernetesPrivateKeyValidationError = null;
-                  _kubernetesPrivateKeyImportStatus = null;
-                });
-              },
-            ),
-            TextFormField(
-              controller: _kubernetesKeyPassphrase,
-              decoration: const InputDecoration(
-                labelText: 'Pod SSH 키 암호',
-                prefixIcon: Icon(Icons.password),
-              ),
-              obscureText: true,
-              textInputAction: TextInputAction.next,
-            ),
-          ] else
-            const _KeyboardInteractiveHint(),
         ],
       ),
     );
@@ -814,42 +776,41 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
                       ),
                     ),
                     const SizedBox(height: 18),
-                    if (_supportsLocalShell) ...[
-                      SegmentedButton<HostConnectionType>(
-                        segments: const [
-                          ButtonSegment(
-                            value: HostConnectionType.ssh,
-                            icon: Icon(Icons.dns_outlined),
-                            label: Text('SSH'),
-                          ),
-                          ButtonSegment(
-                            value: HostConnectionType.kubernetesSsh,
-                            icon: Icon(Icons.hub_outlined),
-                            label: Text('Kubernetes'),
-                          ),
-                          ButtonSegment(
+                    SegmentedButton<HostConnectionType>(
+                      segments: [
+                        const ButtonSegment(
+                          value: HostConnectionType.ssh,
+                          icon: Icon(Icons.dns_outlined),
+                          label: Text('SSH'),
+                        ),
+                        const ButtonSegment(
+                          value: HostConnectionType.kubernetesSsh,
+                          icon: Icon(Icons.hub_outlined),
+                          label: Text('Kubernetes'),
+                        ),
+                        if (_supportsLocalShell)
+                          const ButtonSegment(
                             value: HostConnectionType.localShell,
                             icon: Icon(Icons.terminal),
                             label: Text('로컬 셸'),
                           ),
-                        ],
-                        selected: {_connectionType},
-                        onSelectionChanged: _saving
-                            ? null
-                            : (values) {
-                                setState(() {
-                                  _connectionType = values.single;
-                                  _privateKeyValidationError = null;
-                                  _privateKeyImportStatus = null;
-                                  if (_connectionType ==
-                                      HostConnectionType.localShell) {
-                                    _fillDefaultWorkingDirectory();
-                                  }
-                                });
-                              },
-                      ),
-                      const SizedBox(height: 16),
-                    ],
+                      ],
+                      selected: {_connectionType},
+                      onSelectionChanged: _saving
+                          ? null
+                          : (values) {
+                              setState(() {
+                                _connectionType = values.single;
+                                _privateKeyValidationError = null;
+                                _privateKeyImportStatus = null;
+                                if (_connectionType ==
+                                    HostConnectionType.localShell) {
+                                  _fillDefaultWorkingDirectory();
+                                }
+                              });
+                            },
+                    ),
+                    const SizedBox(height: 16),
                     TextFormField(
                       controller: _alias,
                       decoration: const InputDecoration(
@@ -860,41 +821,11 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
                     ),
                     if (_isSsh) ...[
                       const SizedBox(height: 12),
-                      TextFormField(
-                        controller: _hostname,
-                        decoration: InputDecoration(
-                          labelText: _isKubernetesSsh ? '최종 SSH 주소' : '주소',
-                          prefixIcon: const Icon(Icons.dns_outlined),
-                        ),
-                        textInputAction: TextInputAction.next,
-                        validator: _validateHostname,
-                      ),
-                      const SizedBox(height: 12),
-                      TextFormField(
-                        controller: _port,
-                        decoration: InputDecoration(
-                          labelText: _isKubernetesSsh ? '최종 SSH 포트' : '포트',
-                          prefixIcon: const Icon(Icons.numbers),
-                        ),
-                        keyboardType: TextInputType.number,
-                        textInputAction: TextInputAction.next,
-                        validator: _validatePort,
-                      ),
-                      const SizedBox(height: 12),
-                      TextFormField(
-                        controller: _username,
-                        decoration: InputDecoration(
-                          labelText: _isKubernetesSsh ? '최종 SSH 사용자명' : '사용자명',
-                          prefixIcon: const Icon(Icons.person_outline),
-                        ),
-                        textInputAction: TextInputAction.next,
-                        validator: (value) =>
-                            _isSsh ? _required(value, '사용자명을 입력하세요') : null,
-                      ),
-                      const SizedBox(height: 12),
-                      if (_isDirectSsh)
-                        _buildJumpHostDropdown()
-                      else
+                      if (_isDirectSsh) ...[
+                        ..._buildTargetFields(),
+                        const SizedBox(height: 12),
+                        _buildJumpHostDropdown(),
+                      ] else
                         _buildKubernetesRouteFields(),
                       const SizedBox(height: 12),
                       _buildSessionContinuityTile(),
@@ -924,11 +855,9 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
                       const SizedBox(height: 12),
                       DropdownButtonFormField<HostAuthType>(
                         initialValue: _authType,
-                        decoration: InputDecoration(
-                          labelText: _isKubernetesSsh
-                              ? '최종 SSH 인증 방식'
-                              : '인증 방식',
-                          prefixIcon: const Icon(Icons.key_outlined),
+                        decoration: const InputDecoration(
+                          labelText: '인증 방식',
+                          prefixIcon: Icon(Icons.key_outlined),
                         ),
                         items: const [
                           DropdownMenuItem(
@@ -962,9 +891,7 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
                         TextFormField(
                           controller: _password,
                           decoration: InputDecoration(
-                            labelText: _isKubernetesSsh
-                                ? '최종 SSH 비밀번호'
-                                : '비밀번호',
+                            labelText: '비밀번호',
                             prefixIcon: const Icon(Icons.lock_outline),
                             helperText: _canKeepCredential
                                 ? '비워두면 기존 비밀번호를 유지합니다'
@@ -991,9 +918,7 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
                             TextFormField(
                               controller: _privateKeyPem,
                               decoration: InputDecoration(
-                                labelText: _isKubernetesSsh
-                                    ? '최종 SSH 개인키 PEM'
-                                    : '개인키 PEM',
+                                labelText: '개인키 PEM',
                                 prefixIcon: const Icon(Icons.vpn_key_outlined),
                                 helperText:
                                     _privateKeyImportStatus ??
@@ -1153,6 +1078,59 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Kubernetes 경로 카드의 번호 달린 단계.
+class _RouteStep extends StatelessWidget {
+  const _RouteStep({
+    required this.index,
+    required this.title,
+    required this.child,
+  });
+
+  final int index;
+  final String title;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Container(
+              width: 22,
+              height: 22,
+              alignment: Alignment.center,
+              decoration: const BoxDecoration(
+                color: VibeColors.accent,
+                shape: BoxShape.circle,
+              ),
+              child: Text(
+                '$index',
+                style: const TextStyle(
+                  color: VibeColors.bg,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              title,
+              style: const TextStyle(
+                color: VibeColors.onSurface,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        child,
+      ],
     );
   }
 }

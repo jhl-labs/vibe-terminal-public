@@ -38,6 +38,8 @@ class LocalSessionStateTracker {
   LocalShellType _shell;
   final _input = StringBuffer();
   final _shellStack = <LocalShellType>[];
+  bool _inputUncertain = false;
+  bool _directoryKnown = true;
   bool _escaping = false;
   bool _csiEscape = false;
   bool _oscEscape = false;
@@ -47,8 +49,22 @@ class LocalSessionStateTracker {
   LocalShellType get shellType => _shell;
 
   String? get workingDirectory {
+    if (!_directoryKnown) return null;
     if (_posixOnly) return _posixCwd;
     return _shell == LocalShellType.wsl ? _posixCwd : _nativeCwd;
+  }
+
+  /// OS에서 확인한 실제 작업 디렉터리로 추적 상태를 맞춘다.
+  ///
+  /// 자동완성 등으로 위치를 잃은 뒤에도 이후 상대 경로 `cd`를 다시 따라갈 수
+  /// 있게 된다. 네이티브 Windows 셸의 경로는 OS 조회 경로가 없으므로 POSIX
+  /// 경로만 받는다.
+  void syncWorkingDirectory(String path) {
+    final cleaned = _clean(path);
+    if (cleaned == null || !cleaned.startsWith('/')) return;
+    if (!_posixOnly && _shell != LocalShellType.wsl) return;
+    _posixCwd = cleaned;
+    _directoryKnown = true;
   }
 
   /// 터미널에서 셸로 나가는 입력을 반영한다.
@@ -72,12 +88,29 @@ class LocalSessionStateTracker {
         case '\n':
           final command = _input.toString();
           _input.clear();
-          changed = _applyCommand(command) || changed;
+          if (_inputUncertain) {
+            changed = _directoryKnown || changed;
+            _directoryKnown = false;
+          } else {
+            changed = _applyCommand(command) || changed;
+          }
+          _inputUncertain = false;
         case '\x7f':
         case '\b':
           _backspace();
         case '\x03':
           _input.clear();
+          _inputUncertain = false;
+        case '\t':
+        case '\x01':
+        case '\x05':
+        case '\x0b':
+        case '\x0e':
+        case '\x10':
+        case '\x12':
+        case '\x15':
+        case '\x17':
+          _inputUncertain = true;
         default:
           if (char.codeUnitAt(0) < 32) continue;
           _input.write(char);
@@ -108,15 +141,32 @@ class LocalSessionStateTracker {
     final target = _cdTarget(command);
     if (identical(target, _notCdCommand)) return false;
 
+    // 자동완성/히스토리 사용 뒤 상대 경로로는 현재 위치를 복구할 수 없다.
+    final path = target as String?;
+    final absolute =
+        path == null ||
+        path.isEmpty ||
+        path == '~' ||
+        path.startsWith('~/') ||
+        path.startsWith('/') ||
+        (!_posixOnly && _isNativeAbsolute(path));
+    if (!_directoryKnown && !absolute) return false;
+    final wasKnown = _directoryKnown;
+    _directoryKnown = true;
+
     if (_posixOnly || _shell == LocalShellType.wsl) {
-      final next = _resolvePosixDirectory(target as String?);
-      if (next == _posixCwd) return false;
+      final next = _resolvePosixDirectory(path);
+      if (next == _posixCwd) return !wasKnown;
       _posixCwd = next;
       return true;
     }
 
-    final next = _resolveNativeDirectory(target as String?);
-    if (next == null || next == _nativeCwd) return false;
+    final next = _resolveNativeDirectory(path);
+    if (next == null) {
+      _directoryKnown = wasKnown;
+      return false;
+    }
+    if (next == _nativeCwd) return !wasKnown;
     _nativeCwd = next;
     return true;
   }
@@ -241,7 +291,14 @@ class LocalSessionStateTracker {
       _oscEscape = true;
       return;
     }
-    if (_endsEscapeSequence(char)) _resetEscape();
+    if (_endsEscapeSequence(char)) {
+      // 커서 이동/히스토리/삭제는 입력 문자열만으로 재구성할 수 없다.
+      if ((_csiEscape && 'ABCDHF~'.contains(char)) ||
+          (!_csiEscape && 'bf'.contains(char))) {
+        _inputUncertain = true;
+      }
+      _resetEscape();
+    }
   }
 
   void _resetEscape() {

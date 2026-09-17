@@ -31,11 +31,6 @@ class CloudSyncSnapshotService {
         final secret = await secureStore.readSecret(ref);
         if (secret != null) hostSecrets[ref] = secret;
       }
-      final kubernetesRef = host.kubernetesCredentialRef;
-      if (kubernetesRef != null && kubernetesRef.isNotEmpty) {
-        final secret = await secureStore.readSecret(kubernetesRef);
-        if (secret != null) hostSecrets[kubernetesRef] = secret;
-      }
     }
 
     return {
@@ -79,13 +74,12 @@ class CloudSyncSnapshotService {
     'workingDirectory': host.workingDirectory,
     'credentialRef': host.credentialRef,
     'jumpHostId': host.jumpHostId,
+    'kubernetesGateway': host.kubernetesGateway.name,
+    'kubernetesGatewayHostId': host.kubernetesGatewayHostId,
     'kubernetesContext': host.kubernetesContext,
     'kubernetesNamespace': host.kubernetesNamespace,
     'kubernetesResource': host.kubernetesResource,
-    'kubernetesSshPort': host.kubernetesSshPort,
-    'kubernetesUsername': host.kubernetesUsername,
-    'kubernetesAuthType': host.kubernetesAuthType.name,
-    'kubernetesCredentialRef': host.kubernetesCredentialRef,
+    'kubernetesContainer': host.kubernetesContainer,
     'remoteSessionPersistence': host.remoteSessionPersistence.name,
     'agentForwarding': host.agentForwarding,
     'x11Forwarding': host.x11Forwarding,

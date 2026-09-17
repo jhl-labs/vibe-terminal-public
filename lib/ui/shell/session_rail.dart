@@ -1,9 +1,16 @@
+import 'session_close_dialog.dart';
+import '../../session/session_pane_layout.dart';
+import 'panes/pane_preset_icon.dart';
 import 'dart:async';
 
+import 'package:flutter/gestures.dart' show kTouchSlop;
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../agent/agent_launcher.dart';
+import '../../app/app_edition.dart';
+import '../../app/app_version.dart';
 import '../../app/theme.dart';
 import '../../session/session.dart';
 import '../../session/session_activity.dart';
@@ -153,54 +160,7 @@ class SessionRail extends ConsumerWidget {
       case _SessionAction.remoteSessions:
         await showRemoteSessionManagerDialog(context, session);
       case _SessionAction.close:
-        await _requestCloseSession(context, ref, session);
-    }
-  }
-
-  Future<void> _requestCloseSession(
-    BuildContext context,
-    WidgetRef ref,
-    SessionInfo session,
-  ) async {
-    final manager = ref.read(sessionManagerProvider.notifier);
-    if (!session.host.keepsRemoteSession) {
-      manager.closeSession(session.id);
-      return;
-    }
-
-    final connected = session.status == SessionStatus.connected;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text(connected ? '서버의 작업을 종료할까요?' : '탭을 닫을까요?'),
-        content: Text(
-          connected
-              ? '이 탭을 닫으면 서버에서 실행 중인 작업도 종료됩니다. 네트워크가 끊기거나 앱을 다시 시작할 때는 자동으로 이어집니다.'
-              : '현재는 서버에 종료 명령을 보낼 수 없습니다. 탭을 닫으면 종료 요청을 저장하고, 이 서버에 다시 연결될 때 안전하게 정리합니다.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('취소'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: VibeColors.statusError,
-            ),
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: Text(connected ? '작업 종료' : '탭 닫기'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !context.mounted) return;
-
-    final terminated = await manager.terminatePersistentSession(session.id);
-    manager.closeSession(session.id);
-    if (!terminated && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('종료 요청을 저장했습니다. 이 서버에 다시 연결하면 정리합니다.')),
-      );
+        await requestCloseSession(context, ref, session);
     }
   }
 
@@ -212,9 +172,17 @@ class SessionRail extends ConsumerWidget {
         if (session.groupId == groupId) session,
     ];
     if (groupSessions.any((session) => session.id == currentActiveId)) return;
+    final remembered = ref
+        .read(sessionPaneLayoutsProvider)[groupId]
+        ?.focused
+        .sessionId;
     ref
         .read(activeSessionIdProvider.notifier)
-        .set(groupSessions.isEmpty ? null : groupSessions.first.id);
+        .set(
+          groupSessions.any((s) => s.id == remembered)
+              ? remembered
+              : groupSessions.firstOrNull?.id,
+        );
   }
 
   void _activateNextAttentionSession(
@@ -368,8 +336,6 @@ class SessionRail extends ConsumerWidget {
         if (session.groupId == activeGroupId) session,
     ];
     final activeId = ref.watch(activeSessionIdProvider);
-    final activity = ref.watch(sessionActivityProvider);
-    final attention = ref.watch(sessionAttentionProvider);
     final mgr = ref.read(sessionManagerProvider.notifier);
     final sessionCounts = <String, int>{};
     for (final session in allSessions) {
@@ -379,18 +345,6 @@ class SessionRail extends ConsumerWidget {
         ifAbsent: () => 1,
       );
     }
-    final blockedCount = allSessions
-        .where(
-          (session) =>
-              attention[session.id]?.state == SessionAttentionState.blocked,
-        )
-        .length;
-    final doneCount = allSessions
-        .where(
-          (session) =>
-              attention[session.id]?.state == SessionAttentionState.done,
-        )
-        .length;
 
     return Container(
       width: width,
@@ -405,72 +359,92 @@ class SessionRail extends ConsumerWidget {
               onChanged: (groupId) => _activateGroup(ref, groupId),
               onAddGroup: () => _createGroup(context, ref),
             ),
-            if (blockedCount > 0 || doneCount > 0)
-              _AttentionSummary(
-                blockedCount: blockedCount,
-                doneCount: doneCount,
-                onTap: () =>
-                    _activateNextAttentionSession(ref, allSessions, attention),
-              ),
+            Consumer(
+              builder: (context, summaryRef, child) {
+                // 미리보기 변경은 목록이나 요약을 다시 만들 필요가 없다.
+                final counts = summaryRef.watch(
+                  sessionAttentionProvider.select(
+                    (attention) => (
+                      allSessions
+                          .where(
+                            (s) =>
+                                attention[s.id]?.state ==
+                                SessionAttentionState.blocked,
+                          )
+                          .length,
+                      allSessions
+                          .where(
+                            (s) =>
+                                attention[s.id]?.state ==
+                                SessionAttentionState.done,
+                          )
+                          .length,
+                    ),
+                  ),
+                );
+                if (counts.$1 == 0 && counts.$2 == 0) {
+                  return const SizedBox.shrink();
+                }
+                return _AttentionSummary(
+                  blockedCount: counts.$1,
+                  doneCount: counts.$2,
+                  onTap: () => _activateNextAttentionSession(
+                    ref,
+                    allSessions,
+                    ref.read(sessionAttentionProvider),
+                  ),
+                );
+              },
+            ),
             const Divider(height: 1, color: VibeColors.borderSoft),
             Expanded(
               child: sessions.isEmpty
                   ? const _EmptyRail()
-                  : ReorderableListView.builder(
-                      padding: const EdgeInsets.all(10),
-                      buildDefaultDragHandles: false,
-                      itemCount: sessions.length,
-                      onReorderItem: (oldIndex, targetIndex) =>
-                          mgr.moveSessionInGroup(
-                            activeGroupId,
-                            oldIndex,
-                            targetIndex,
-                          ),
-                      proxyDecorator: (child, _, animation) => AnimatedBuilder(
-                        animation: animation,
-                        builder: (context, child) {
-                          final t = Curves.easeOut.transform(animation.value);
-                          return Material(
-                            color: Colors.transparent,
-                            elevation: 8 * t,
-                            borderRadius: BorderRadius.circular(8),
-                            shadowColor: Colors.black.withValues(alpha: 0.45),
-                            child: child,
-                          );
-                        },
-                        child: child,
+                  : _SessionList(
+                      groupId: activeGroupId,
+                      sessions: sessions,
+                      onReorder: (oldIndex, slot) => mgr.moveSessionInGroup(
+                        activeGroupId,
+                        oldIndex,
+                        slot > oldIndex ? slot - 1 : slot,
                       ),
-                      itemBuilder: (context, index) {
-                        final s = sessions[index];
-                        return Padding(
-                          key: ValueKey(s.id),
-                          padding: EdgeInsets.only(
-                            bottom: index == sessions.length - 1 ? 0 : 8,
-                          ),
-                          child: _SessionTile(
-                            session: s,
-                            selected: s.id == activeId,
-                            statusColor: _statusColor(s.status),
-                            busy: activity[s.id] ?? false,
-                            attention: attention[s.id],
-                            onTap: () {
-                              ref
-                                  .read(activeSessionIdProvider.notifier)
-                                  .set(s.id);
-                              onSessionSelected?.call();
-                            },
-                            onShowMenu: (position) =>
-                                _showSessionMenu(context, ref, s, position),
-                            dragHandle: ReorderableDragStartListener(
-                              index: index,
-                              child: const _DragHandle(),
-                            ),
-                            onClose: () => unawaited(
-                              _requestCloseSession(context, ref, s),
+                      tileBuilder: (context, s) => Consumer(
+                        builder: (context, tileRef, child) => _SessionTile(
+                          session: s,
+                          paneNumber: tileRef.watch(
+                            sessionPaneLayoutsProvider.select(
+                              (layouts) =>
+                                  (layouts[activeGroupId]?.panes.indexWhere(
+                                        (p) => p.sessionId == s.id,
+                                      ) ??
+                                      -1) +
+                                  1,
                             ),
                           ),
-                        );
-                      },
+                          selected: s.id == activeId,
+                          statusColor: _statusColor(s.status),
+                          busy: tileRef.watch(
+                            sessionActivityProvider.select(
+                              (activity) => activity[s.id] ?? false,
+                            ),
+                          ),
+                          attention: tileRef.watch(
+                            sessionAttentionProvider.select(
+                              (attention) => attention[s.id],
+                            ),
+                          ),
+                          onTap: () {
+                            ref
+                                .read(activeSessionIdProvider.notifier)
+                                .set(s.id);
+                            onSessionSelected?.call();
+                          },
+                          onShowMenu: (position) =>
+                              _showSessionMenu(context, ref, s, position),
+                          onClose: () =>
+                              unawaited(requestCloseSession(context, ref, s)),
+                        ),
+                      ),
                     ),
             ),
             Padding(
@@ -721,12 +695,11 @@ class _RailHeader extends StatelessWidget {
         children: [
           const Icon(Icons.terminal, color: VibeColors.accent, size: 22),
           const SizedBox(width: 10),
-          const Expanded(
+          Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // 헤더에는 제품 이름만 둔다. 버전은 설정 > About에서 확인한다.
-                Text(
+                const Text(
                   'Vibe Terminal',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -736,10 +709,11 @@ class _RailHeader extends StatelessWidget {
                     fontSize: 15,
                   ),
                 ),
-                SizedBox(height: 2),
+                const SizedBox(height: 2),
+                // 에디션(Core/Pro)과 버전. 빌드 번호 등 상세는 설정 > About.
                 Text(
-                  'SSH workspace',
-                  style: TextStyle(
+                  appEditionLabel(AppEdition.current, kAppVersion),
+                  style: const TextStyle(
                     color: VibeColors.onSurfaceDim,
                     fontFamily: kMonoFontFamily,
                     fontFamilyFallback: kMonoFontFallback,
@@ -901,16 +875,17 @@ class _AttentionCount extends StatelessWidget {
 class _SessionTile extends StatefulWidget {
   const _SessionTile({
     required this.session,
+    this.paneNumber = 0,
     required this.selected,
     required this.statusColor,
     required this.busy,
     required this.attention,
     required this.onTap,
     required this.onShowMenu,
-    required this.dragHandle,
     required this.onClose,
   });
 
+  final int paneNumber;
   final SessionInfo session;
   final bool selected;
   final Color statusColor;
@@ -923,7 +898,6 @@ class _SessionTile extends StatefulWidget {
 
   final VoidCallback onTap;
   final Future<void> Function(Offset position) onShowMenu;
-  final Widget dragHandle;
   final VoidCallback onClose;
 
   @override
@@ -933,7 +907,7 @@ class _SessionTile extends StatefulWidget {
 class _SessionTileState extends State<_SessionTile> {
   bool _expanded = false;
 
-  void _showMenuAtCenter() {
+  void showMenuAtCenter() {
     final box = context.findRenderObject();
     if (box is! RenderBox) return;
     unawaited(
@@ -946,8 +920,9 @@ class _SessionTileState extends State<_SessionTile> {
     return _buildCompact();
   }
 
-  /// 세션 레일: 화면 크기와 무관하게 항상 한 줄(세션명 + 드래그 핸들 + ▾ + ✕).
-  /// 세션명 탭=바로 열기, ▾ 탭=정보(endpoint) 펼침, 드래그 핸들=순서 변경.
+  /// 세션 레일: 화면 크기와 무관하게 항상 한 줄(세션명 + ▾ + ✕).
+  /// 세션명 탭=바로 열기, ▾ 탭=정보(endpoint) 펼침. 행 전체는 길게 눌러
+  /// 드래그하면 레일 안에서 순서 변경, 터미널 칸에서 분할 배치를 한다([_SessionList]).
   Widget _buildCompact() {
     final host = widget.session.host;
     return Material(
@@ -960,7 +935,6 @@ class _SessionTileState extends State<_SessionTile> {
         onTap: widget.onTap,
         onSecondaryTapDown: (details) =>
             unawaited(widget.onShowMenu(details.globalPosition)),
-        onLongPress: _showMenuAtCenter,
         child: Container(
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(8),
@@ -988,7 +962,7 @@ class _SessionTileState extends State<_SessionTile> {
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      widget.session.displayName,
+                      '${widget.paneNumber > 0 ? '[${widget.paneNumber}] ' : ''}${widget.session.displayName}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
@@ -1002,7 +976,6 @@ class _SessionTileState extends State<_SessionTile> {
                     _AgentAttentionIndicator(attention: attention)
                   else if (widget.busy)
                     const _BusyIndicator(),
-                  widget.dragHandle,
                   _MiniTileButton(
                     icon: _expanded ? Icons.expand_less : Icons.expand_more,
                     tooltip: '세션 정보',
@@ -1159,9 +1132,11 @@ class _BusyIndicator extends StatelessWidget {
         child: SizedBox(
           width: 13,
           height: 13,
-          child: CircularProgressIndicator(
-            strokeWidth: 1.8,
-            color: VibeColors.accent,
+          child: RepaintBoundary(
+            child: CircularProgressIndicator(
+              strokeWidth: 1.8,
+              color: VibeColors.accent,
+            ),
           ),
         ),
       ),
@@ -1216,23 +1191,259 @@ extension on SessionAttentionState {
   };
 }
 
-class _DragHandle extends StatelessWidget {
-  const _DragHandle();
+/// 세션 행 하나를 통째로 드래그하는 목록. 전용 핸들 없이 행을 끌어
+/// 레일 안의 다른 행 위·아래에 놓으면 순서가 바뀌고, 터미널 칸
+/// ([SessionPaneDeck]의 [DragTarget]) 위에 놓으면 그 칸에 배치된다.
+///
+/// 클릭/탭은 세션 선택으로 남기고, 행 드래그는 모든 입력 장치에서 길게 눌러
+/// 시작한다. 길게 누른 뒤 움직이지 않고 떼면 컨텍스트 메뉴를 연다.
+class _SessionList extends StatefulWidget {
+  const _SessionList({
+    required this.groupId,
+    required this.sessions,
+    required this.tileBuilder,
+    required this.onReorder,
+  });
+
+  final String groupId;
+  final List<SessionInfo> sessions;
+
+  final Widget Function(BuildContext context, SessionInfo session) tileBuilder;
+
+  /// [oldIndex]의 세션을 원래 목록 기준 삽입 위치 [slot](0..length) 앞으로 옮긴다.
+  final void Function(int oldIndex, int slot) onReorder;
+
+  @override
+  State<_SessionList> createState() => _SessionListState();
+}
+
+class _SessionListState extends State<_SessionList>
+    with SingleTickerProviderStateMixin {
+  static const _gap = 8.0;
+  static const _autoScrollEdge = 48.0;
+  static const _autoScrollStep = 6.0;
+
+  final _scroll = ScrollController();
+  late final Ticker _ticker;
+
+  /// 드롭 시 삽입될 위치(0..length). null이면 레일 위에 드래그 중이 아님.
+  int? _dropSlot;
+
+  /// 이 목록에서 시작한 드래그의 원래 인덱스. 칸에서 끌어온 드래그면 null.
+  int? _draggedIndex;
+  double _autoScrollDirection = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = createTicker(_onTick);
+  }
+
+  @override
+  void dispose() {
+    _ticker.dispose();
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  bool _accepts(PaneSessionDrag drag) =>
+      drag.groupId == widget.groupId &&
+      widget.sessions.any((s) => s.id == drag.sessionId);
+
+  int _indexOf(String sessionId) =>
+      widget.sessions.indexWhere((s) => s.id == sessionId);
+
+  void _setSlot(int? slot) {
+    if (_dropSlot == slot) return;
+    setState(() => _dropSlot = slot);
+  }
+
+  void _drop(PaneSessionDrag drag, int slot) {
+    _setSlot(null);
+    final oldIndex = _indexOf(drag.sessionId);
+    if (oldIndex < 0 || slot == oldIndex || slot == oldIndex + 1) return;
+    widget.onReorder(oldIndex, slot);
+  }
+
+  // ── 가장자리 자동 스크롤 ───────────────────────────────────────────────
+
+  void _updateAutoScroll(Offset globalPosition) {
+    final box = context.findRenderObject();
+    if (box is! RenderBox || !_scroll.hasClients) return;
+    final dy = box.globalToLocal(globalPosition).dy;
+    final direction = dy < _autoScrollEdge
+        ? -1.0
+        : dy > box.size.height - _autoScrollEdge
+        ? 1.0
+        : 0.0;
+    _autoScrollDirection = direction;
+    if (direction == 0) {
+      if (_ticker.isActive) _ticker.stop();
+    } else if (!_ticker.isActive) {
+      _ticker.start();
+    }
+  }
+
+  void _stopAutoScroll() {
+    _autoScrollDirection = 0;
+    if (_ticker.isActive) _ticker.stop();
+  }
+
+  void _onTick(Duration _) {
+    if (!_scroll.hasClients || _autoScrollDirection == 0) return;
+    final position = _scroll.position;
+    final next = (position.pixels + _autoScrollDirection * _autoScrollStep)
+        .clamp(position.minScrollExtent, position.maxScrollExtent);
+    if (next != position.pixels) _scroll.jumpTo(next);
+  }
+
+  // ── 위젯 ───────────────────────────────────────────────────────────────
+
+  Widget _feedback(SessionInfo session) {
+    return Material(
+      elevation: 8,
+      color: VibeColors.surfaceHigh,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 240),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: VibeColors.accent),
+        ),
+        child: Text(
+          session.displayName,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: VibeColors.onSurface,
+            fontWeight: FontWeight.w700,
+            fontSize: 13,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _draggableRow(SessionInfo session, Widget tile, GlobalKey tileKey) {
+    final data = PaneSessionDrag(session.id, widget.groupId);
+    final feedback = _feedback(session);
+    final whenDragging = Opacity(opacity: .35, child: tile);
+    Offset? dragStart;
+    return LongPressDraggable<PaneSessionDrag>(
+      data: data,
+      dragAnchorStrategy: pointerDragAnchorStrategy,
+      hapticFeedbackOnStart: true,
+      feedback: feedback,
+      childWhenDragging: whenDragging,
+      onDragStarted: () {
+        dragStart = null;
+        _draggedIndex = _indexOf(session.id);
+      },
+      onDragUpdate: (details) {
+        dragStart ??= details.globalPosition;
+        _updateAutoScroll(details.globalPosition);
+      },
+      onDragEnd: (details) {
+        _draggedIndex = null;
+        _stopAutoScroll();
+        _setSlot(null);
+        // 길게 누른 뒤 거의 움직이지 않고 떼면 메뉴로 취급한다.
+        // 제자리 드롭은 자기 행이 받아 no-op이므로 wasAccepted는 보지 않는다.
+        final start = dragStart;
+        final moved = start == null ? 0.0 : (details.offset - start).distance;
+        if (moved < kTouchSlop) {
+          (tileKey.currentState as _SessionTileState?)?.showMenuAtCenter();
+        }
+      },
+      child: tile,
+    );
+  }
+
+  /// 행 하나 = 드롭 대상. 포인터가 위쪽 절반이면 이 행 앞, 아래쪽이면 뒤에 삽입.
+  Widget _row(BuildContext _, int index) {
+    final session = widget.sessions[index];
+    final last = index == widget.sessions.length - 1;
+    final tileKey = GlobalKey<_SessionTileState>();
+    // Builder의 context로 이 행(RenderBox)의 위치를 얻는다. ListView builder의
+    // context는 sliver 자체라 행 좌표로 쓸 수 없다.
+    return Builder(
+      key: ValueKey('session-row-${session.id}'),
+      builder: (rowContext) => DragTarget<PaneSessionDrag>(
+        onWillAcceptWithDetails: (details) => _accepts(details.data),
+        onMove: (details) {
+          final box = rowContext.findRenderObject();
+          if (box is! RenderBox) return;
+          final local = box.globalToLocal(details.offset);
+          _setSlot(local.dy < box.size.height / 2 ? index : index + 1);
+        },
+        onLeave: (_) => _setSlot(null),
+        onAcceptWithDetails: (details) =>
+            _drop(details.data, _dropSlot ?? index),
+        builder: (context, _, _) {
+          final slot = _dropSlot;
+          final showTop = slot == index && !_isOwnSlot(index);
+          final showBottom =
+              last && slot == index + 1 && !_isOwnSlot(index + 1);
+          final tile = KeyedSubtree(
+            key: tileKey,
+            child: widget.tileBuilder(context, session),
+          );
+          return Padding(
+            padding: EdgeInsets.only(bottom: last ? 0 : _gap),
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                _draggableRow(session, tile, tileKey),
+                if (showTop) _insertionLine(top: -(_gap / 2 + 1)),
+                if (showBottom) _insertionLine(bottom: -(_gap / 2 + 1)),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// 드래그 중인 세션 자신의 바로 앞/뒤 슬롯은 순서가 바뀌지 않으므로 표시하지 않는다.
+  /// 터미널 칸에서 끌어온 드래그([_draggedIndex]가 null)는 항상 표시한다.
+  bool _isOwnSlot(int slot) {
+    final dragged = _draggedIndex;
+    return dragged != null && (slot == dragged || slot == dragged + 1);
+  }
+
+  Widget _insertionLine({double? top, double? bottom}) {
+    return Positioned(
+      left: 0,
+      right: 0,
+      top: top,
+      bottom: bottom,
+      child: IgnorePointer(
+        child: Container(
+          height: 2,
+          decoration: BoxDecoration(
+            color: VibeColors.accent,
+            borderRadius: BorderRadius.circular(1),
+          ),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Tooltip(
-      message: '드래그로 순서 변경',
-      child: MouseRegion(
-        cursor: SystemMouseCursors.grab,
-        child: SizedBox.square(
-          dimension: 28,
-          child: Icon(
-            Icons.drag_indicator,
-            color: VibeColors.onSurfaceDim.withValues(alpha: 0.75),
-            size: 18,
-          ),
-        ),
+    // 목록 아래 빈 공간에 놓으면 맨 끝으로 이동.
+    return DragTarget<PaneSessionDrag>(
+      onWillAcceptWithDetails: (details) => _accepts(details.data),
+      onMove: (_) => _setSlot(widget.sessions.length),
+      onLeave: (_) => _setSlot(null),
+      onAcceptWithDetails: (details) =>
+          _drop(details.data, widget.sessions.length),
+      builder: (context, _, _) => ListView.builder(
+        controller: _scroll,
+        padding: const EdgeInsets.all(10),
+        itemCount: widget.sessions.length,
+        itemBuilder: _row,
       ),
     );
   }

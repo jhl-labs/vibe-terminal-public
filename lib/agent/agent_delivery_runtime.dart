@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../data/models/host.dart';
+import '../local/managed_process.dart';
 import 'agent_delivery.dart';
 import 'agent_worktree.dart';
 
@@ -44,6 +45,23 @@ class AgentDeliveryRuntime {
 
   final RemoteAgentDeliveryExecutor _remoteExecutor;
 
+  void _requireExpected(
+    AgentDeliveryPreview current,
+    AgentDeliveryPreview? expected,
+  ) {
+    if (expected == null) return;
+    if (current.headSha != expected.headSha ||
+        current.baseSha != expected.baseSha ||
+        current.branchName != expected.branchName ||
+        current.baseRef != expected.baseRef ||
+        current.remoteName != expected.remoteName ||
+        current.remoteUrl != expected.remoteUrl) {
+      throw const AgentDeliveryRuntimeException(
+        '확인 이후 전달 대상이 변경되었습니다. 다시 검토해 주세요.',
+      );
+    }
+  }
+
   Future<AgentDeliveryPreview> preview({
     required AgentWorktreeRecord entry,
     required Host host,
@@ -76,12 +94,7 @@ class AgentDeliveryRuntime {
     final counts = await _git(
       entry: entry,
       host: host,
-      arguments: [
-        'rev-list',
-        '--left-right',
-        '--count',
-        '${entry.baseRef}...${entry.branchName}',
-      ],
+      arguments: ['rev-list', '--left-right', '--count', '$baseSha...$headSha'],
       directory: entry.repositoryRoot,
     );
     _requireSuccess(counts, '기준 브랜치와 Agent 브랜치의 차이를 읽지 못했습니다.');
@@ -95,12 +108,7 @@ class AgentDeliveryRuntime {
     final names = await _git(
       entry: entry,
       host: host,
-      arguments: [
-        'diff',
-        '--name-only',
-        '-z',
-        '${entry.baseRef}...${entry.branchName}',
-      ],
+      arguments: ['diff', '--name-only', '-z', '$baseSha...$headSha'],
       directory: entry.repositoryRoot,
     );
     _requireSuccess(names, '전달할 파일 목록을 읽지 못했습니다.');
@@ -112,11 +120,7 @@ class AgentDeliveryRuntime {
     final numstat = await _git(
       entry: entry,
       host: host,
-      arguments: [
-        'diff',
-        '--numstat',
-        '${entry.baseRef}...${entry.branchName}',
-      ],
+      arguments: ['diff', '--numstat', '$baseSha...$headSha'],
       directory: entry.repositoryRoot,
     );
     _requireSuccess(numstat, '변경 통계를 읽지 못했습니다.');
@@ -136,7 +140,7 @@ class AgentDeliveryRuntime {
         'log',
         '--reverse',
         '--format=%H%x00%h%x00%s%x00%an%x00%aI%x1e',
-        '${entry.baseRef}..${entry.branchName}',
+        '$baseSha..$headSha',
       ],
       directory: entry.repositoryRoot,
     );
@@ -182,8 +186,8 @@ class AgentDeliveryRuntime {
     return AgentDeliveryPreview(
       branchName: entry.branchName,
       baseRef: entry.baseRef,
-      headSha: _shortSha(headSha),
-      baseSha: _shortSha(baseSha),
+      headSha: headSha,
+      baseSha: baseSha,
       aheadCount: ahead,
       behindCount: behind,
       changedFiles: changedFiles,
@@ -258,11 +262,82 @@ class AgentDeliveryRuntime {
     return records.toSet().toList()..sort();
   }
 
-  Future<AgentDeliveryResult> mergeFastForward({
+  /// 기준 commit을 격리된 Agent worktree에 합쳐 검토한다. 원본 checkout은 유지한다.
+  Future<List<Map<String, dynamic>>> issues({
     required AgentWorktreeRecord entry,
     required Host host,
   }) async {
+    final result = await _run(
+      entry: entry,
+      host: host,
+      executable: 'gh',
+      arguments: const [
+        'issue',
+        'list',
+        '--state',
+        'open',
+        '--limit',
+        '100',
+        '--json',
+        'number,title,body,url,labels,assignees',
+      ],
+      directory: entry.worktreePath,
+      timeout: const Duration(seconds: 45),
+    );
+    _requireSuccess(
+      result,
+      'GitHub 이슈를 읽지 못했습니다. 실행 호스트의 gh 로그인과 저장소 연결을 확인하세요.',
+    );
+    final rows = jsonDecode(result.stdout) as List;
+    return rows.map((row) => Map<String, dynamic>.from(row as Map)).toList();
+  }
+
+  Future<AgentDeliveryResult> integrateBase({
+    required AgentWorktreeRecord entry,
+    required Host host,
+    required AgentDeliveryPreview expected,
+  }) async {
     final current = await preview(entry: entry, host: host);
+    _requireExpected(current, expected);
+    if (current.mergeReadiness == AgentDeliveryMergeReadiness.worktreeDirty) {
+      throw const AgentDeliveryRuntimeException('변경을 먼저 커밋한 뒤 기준 브랜치를 병합하세요.');
+    }
+    if (current.behindCount == 0) {
+      throw const AgentDeliveryRuntimeException('이미 현재 기준 commit을 포함합니다.');
+    }
+    final result = await _git(
+      entry: entry,
+      host: host,
+      arguments: ['merge', '--no-ff', '--no-commit', current.baseSha],
+      directory: entry.worktreePath,
+      timeout: const Duration(minutes: 2),
+    );
+    final mergeHead = await _git(
+      entry: entry,
+      host: host,
+      arguments: const ['rev-parse', '--verify', 'MERGE_HEAD'],
+      directory: entry.worktreePath,
+    );
+    if (mergeHead.exitCode != 0 || mergeHead.stdout.trim() != current.baseSha) {
+      throw AgentDeliveryRuntimeException(
+        '병합 상태를 확인하지 못했습니다: ${result.stderr}',
+      );
+    }
+    return AgentDeliveryResult(
+      summary: result.exitCode == 0
+          ? '기준 브랜치를 작업공간에 합쳤습니다. 변경을 검토하고 커밋하세요.'
+          : '병합 충돌이 있습니다. 파일 편집 후 해결로 표시하고 전체 변경을 커밋하세요.',
+      detail: result.stdout + result.stderr,
+    );
+  }
+
+  Future<AgentDeliveryResult> mergeFastForward({
+    required AgentWorktreeRecord entry,
+    required Host host,
+    AgentDeliveryPreview? expected,
+  }) async {
+    final current = await preview(entry: entry, host: host);
+    _requireExpected(current, expected);
     if (!current.canMerge) {
       throw AgentDeliveryRuntimeException(
         _mergeBlockedMessage(current.mergeReadiness),
@@ -271,7 +346,7 @@ class AgentDeliveryRuntime {
     final merged = await _git(
       entry: entry,
       host: host,
-      arguments: ['merge', '--ff-only', entry.branchName],
+      arguments: ['merge', '--ff-only', current.headSha],
       directory: entry.repositoryRoot,
       timeout: const Duration(minutes: 2),
     );
@@ -286,8 +361,10 @@ class AgentDeliveryRuntime {
   Future<AgentDeliveryResult> pushBranch({
     required AgentWorktreeRecord entry,
     required Host host,
+    AgentDeliveryPreview? expected,
   }) async {
     final current = await preview(entry: entry, host: host);
+    _requireExpected(current, expected);
     if (!current.canPush || current.remoteName == null) {
       throw const AgentDeliveryRuntimeException(
         'push할 remote 또는 commit이 없습니다.',
@@ -301,17 +378,27 @@ class AgentDeliveryRuntime {
       host: host,
       arguments: [
         'push',
-        '--set-upstream',
         current.remoteName!,
-        'refs/heads/${entry.branchName}:refs/heads/${entry.branchName}',
+        '${current.headSha}:refs/heads/${entry.branchName}',
       ],
       directory: entry.worktreePath,
       timeout: const Duration(minutes: 5),
     );
     _requireSuccess(pushed, '브랜치를 push하지 못했습니다. force push는 자동으로 수행하지 않습니다.');
+    final upstream = await _git(
+      entry: entry,
+      host: host,
+      arguments: [
+        'branch',
+        '--set-upstream-to=${current.remoteName}/${entry.branchName}',
+        entry.branchName,
+      ],
+      directory: entry.worktreePath,
+    );
     return AgentDeliveryResult(
       summary: '${entry.branchName} 브랜치를 push했습니다.',
-      detail: '${current.remoteName}/${entry.branchName} · ${current.headSha}',
+      detail:
+          '${current.remoteName}/${entry.branchName} · ${current.headSha}${upstream.exitCode == 0 ? '' : ' · push 완료, upstream 설정 실패'}',
       url: current.compareUrl,
     );
   }
@@ -320,6 +407,7 @@ class AgentDeliveryRuntime {
     required AgentWorktreeRecord entry,
     required Host host,
     required AgentPullRequestDraft draft,
+    AgentDeliveryPreview? expected,
   }) async {
     final title = draft.title.trim();
     final body = draft.body.trim();
@@ -330,6 +418,7 @@ class AgentDeliveryRuntime {
       throw const AgentDeliveryRuntimeException('PR 본문은 65,536자 이하여야 합니다.');
     }
     final current = await preview(entry: entry, host: host);
+    _requireExpected(current, expected);
     if (current.existingPullRequestUrl != null) {
       return AgentDeliveryResult(
         summary: '이미 열린 Pull Request가 있습니다.',
@@ -341,6 +430,26 @@ class AgentDeliveryRuntime {
     if (!current.canCreatePullRequest || repository == null) {
       throw const AgentDeliveryRuntimeException(
         '먼저 GitHub remote에 Agent 브랜치를 push해 주세요.',
+      );
+    }
+    final remoteHead = await _git(
+      entry: entry,
+      host: host,
+      arguments: [
+        'ls-remote',
+        '--exit-code',
+        '--heads',
+        current.remoteName!,
+        'refs/heads/${entry.branchName}',
+      ],
+      directory: entry.worktreePath,
+      timeout: const Duration(seconds: 45),
+    );
+    _requireSuccess(remoteHead, '원격 브랜치의 commit을 확인하지 못했습니다.');
+    final remoteSha = remoteHead.stdout.trim().split(RegExp(r'\s+')).first;
+    if (remoteSha != current.headSha) {
+      throw const AgentDeliveryRuntimeException(
+        '원격 브랜치와 검토한 commit이 다릅니다. 검토한 변경을 먼저 push한 뒤 다시 확인하세요.',
       );
     }
     final created = await _run(
@@ -384,7 +493,7 @@ class AgentDeliveryRuntime {
     final result = await _git(
       entry: entry,
       host: host,
-      arguments: ['rev-parse', ref],
+      arguments: ['rev-parse', '--verify', '$ref^{commit}'],
       directory: entry.repositoryRoot,
     );
     _requireSuccess(result, '$ref commit을 확인하지 못했습니다.');
@@ -506,19 +615,19 @@ class AgentDeliveryRuntime {
         executable,
         for (final argument in arguments) _quotePosix(argument),
       ].join(' ');
-      result = await Process.run('wsl.exe', [
+      result = await runManagedCommand('wsl.exe', [
         '--',
         'sh',
         '-lc',
-        'cd ${_quotePosix(directory!)} && $command',
-      ], runInShell: false).timeout(timeout);
+        managedPosixCommand(command, directory: directory),
+      ], timeout: timeout);
     } else {
-      result = await Process.run(
+      result = await runManagedCommand(
         executable,
         arguments,
         workingDirectory: directory,
-        runInShell: false,
-      ).timeout(timeout);
+        timeout: timeout,
+      );
     }
     return AgentDeliveryProcessResult(
       exitCode: result.exitCode,

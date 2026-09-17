@@ -6,9 +6,13 @@ import '../../agent/agent_worktree.dart';
 import '../../app/theme.dart';
 
 typedef AgentDeliveryPreviewLoader = Future<AgentDeliveryPreview> Function();
-typedef AgentDeliveryAction = Future<AgentDeliveryResult> Function();
+typedef AgentDeliveryAction =
+    Future<AgentDeliveryResult> Function(AgentDeliveryPreview expected);
 typedef AgentPullRequestCreator =
-    Future<AgentDeliveryResult> Function(AgentPullRequestDraft draft);
+    Future<AgentDeliveryResult> Function(
+      AgentPullRequestDraft draft,
+      AgentDeliveryPreview expected,
+    );
 typedef AgentDeliveryUrlOpener = Future<bool> Function(Uri uri);
 typedef AgentConflictInspector = Future<void> Function();
 
@@ -208,7 +212,7 @@ class _AgentDeliveryDialogState extends State<_AgentDeliveryDialog> {
       buttonLabel: 'Fast-forward 병합',
       buttonKey: const ValueKey('confirm-agent-merge'),
     );
-    if (confirmed) await _runAction(widget.merge);
+    if (confirmed) await _runAction(() => widget.merge(preview));
   }
 
   Future<void> _push(_DeliverySnapshot state) async {
@@ -221,7 +225,7 @@ class _AgentDeliveryDialogState extends State<_AgentDeliveryDialog> {
       buttonLabel: preview.remoteBranchExists ? '브랜치 업데이트' : '브랜치 게시',
       buttonKey: const ValueKey('confirm-agent-push'),
     );
-    if (confirmed) await _runAction(widget.push);
+    if (confirmed) await _runAction(() => widget.push(preview));
   }
 
   Future<void> _createPullRequest(_DeliverySnapshot state) async {
@@ -244,6 +248,7 @@ class _AgentDeliveryDialogState extends State<_AgentDeliveryDialog> {
     await _runAction(
       () => widget.createPullRequest(
         AgentPullRequestDraft(title: title, body: _bodyController.text),
+        preview,
       ),
     );
   }

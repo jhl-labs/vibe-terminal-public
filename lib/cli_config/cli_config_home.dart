@@ -22,8 +22,15 @@ enum CliConfigApp {
 
   /// 각 CLI가 쓰는 규칙으로 홈 위치를 정한다. 환경변수 override를 먼저 보고,
   /// 없으면 `HOME`/`USERPROFILE` 기준 기본 위치를 쓴다.
-  String? resolveRootPath({Map<String, String>? environment}) {
+  ///
+  /// [paths]는 경로를 이어 붙일 때 쓰는 규칙이다. 기본은 현재 플랫폼이며,
+  /// Windows에서 WSL 안의 POSIX 환경을 해석할 때는 [p.posix]를 넘긴다.
+  String? resolveRootPath({
+    Map<String, String>? environment,
+    p.Context? paths,
+  }) {
     final env = environment ?? Platform.environment;
+    final ctx = paths ?? p.context;
     String? override(String key) {
       final value = env[key]?.trim();
       return value == null || value.isEmpty ? null : value;
@@ -34,16 +41,16 @@ enum CliConfigApp {
     switch (this) {
       case CliConfigApp.claude:
         return override('CLAUDE_CONFIG_DIR') ??
-            (hasHome ? p.join(home, '.claude') : null);
+            (hasHome ? ctx.join(home, '.claude') : null);
       case CliConfigApp.codex:
         return override('CODEX_HOME') ??
-            (hasHome ? p.join(home, '.codex') : null);
+            (hasHome ? ctx.join(home, '.codex') : null);
       case CliConfigApp.opencode:
         final explicit = override('OPENCODE_CONFIG_DIR');
         if (explicit != null) return explicit;
         final xdg = override('XDG_CONFIG_HOME');
-        if (xdg != null) return p.join(xdg, 'opencode');
-        return hasHome ? p.join(home, '.config', 'opencode') : null;
+        if (xdg != null) return ctx.join(xdg, 'opencode');
+        return hasHome ? ctx.join(home, '.config', 'opencode') : null;
     }
   }
 

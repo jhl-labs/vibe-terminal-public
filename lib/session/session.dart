@@ -83,6 +83,7 @@ class SessionInfo {
     this.restoredContext,
     this.groupId = defaultSessionGroupId,
     this.remoteSessionId,
+    this.localSessionId,
     this.fellBackToDirectSsh = false,
     this.agentWorkspace,
   });
@@ -104,6 +105,7 @@ class SessionInfo {
   /// 앱 재시작 뒤에도 같은 원격 tmux 세션을 찾기 위한 영속 식별자.
   /// 살아 있는 SSH/PTY 핸들이 아니라 복원 스냅샷에 저장 가능한 문자열이다.
   final String? remoteSessionId;
+  final String? localSessionId;
 
   /// 작업 이어가기를 요청했지만 서버에 tmux가 없어 이번 연결만 일반 SSH로
   /// 동작하는 상태. 호스트 설정이 아니라 현재 연결의 실제 기능 상태다.
@@ -127,6 +129,7 @@ class SessionInfo {
     Object? restoredContext = _unchanged,
     String? groupId,
     Object? remoteSessionId = _unchanged,
+    Object? localSessionId = _unchanged,
     bool? fellBackToDirectSsh,
     Object? agentWorkspace = _unchanged,
   }) => SessionInfo(
@@ -144,6 +147,9 @@ class SessionInfo {
         ? this.restoredContext
         : restoredContext as RestoredSessionContext?,
     groupId: groupId ?? this.groupId,
+    localSessionId: identical(localSessionId, _unchanged)
+        ? this.localSessionId
+        : localSessionId as String?,
     remoteSessionId: identical(remoteSessionId, _unchanged)
         ? this.remoteSessionId
         : remoteSessionId as String?,

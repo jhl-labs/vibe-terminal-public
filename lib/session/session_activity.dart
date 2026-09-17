@@ -21,6 +21,11 @@ class SessionActivityTracker extends Notifier<Map<String, bool>> {
   final Map<String, Timer> _timers = {};
   final Map<String, DateTime> _busySince = {};
   final Map<String, String> _latestScreens = {};
+  final Map<String, String Function()> _screenReaders = {};
+  final Map<String, DateTime> _lastInspectedAt = {};
+
+  /// 출력 활동 중 화면을 다시 읽어 Agent 상태를 분류하는 최소 간격.
+  static const screenInspectInterval = Duration(milliseconds: 250);
   final Set<String> _notifiedTaskIds = {};
 
   @override
@@ -45,22 +50,52 @@ class SessionActivityTracker extends Notifier<Map<String, bool>> {
   }
 
   /// 세션 [id]에 출력 활동이 있었음을 알린다(매 출력마다 호출돼도 가볍다).
-  void markActivity(String id, {String screen = ''}) {
-    if (screen.isNotEmpty) _latestScreens[id] = screen;
-    if (!(state[id] ?? false)) {
+  ///
+  /// 화면은 [screen]으로 직접 주거나 [readScreen]으로 지연 제공한다. 화면
+  /// 추출(80줄 getText)과 Agent 분류(정규식)는 비싸므로 [screenInspectInterval]
+  /// 마다 한 번만 수행한다. 출력 flush는 세션마다 16ms 간격으로 오기 때문에
+  /// 매번 분류하면 세션 수 × 60Hz 의 문자열·정규식 작업이 UI 아이솔레이트를
+  /// 점유해 세션이 많을 때 입력이 밀린다. idle 판정([_toIdle])에서는 그 시점의
+  /// 최신 화면을 다시 읽어 마지막 프롬프트 줄을 놓치지 않는다.
+  void markActivity(
+    String id, {
+    String screen = '',
+    String Function()? readScreen,
+  }) {
+    final wasBusy = state[id] ?? false;
+    if (!wasBusy) {
       _busySince[id] = _now();
       state = {...state, id: true};
     }
-    ref
-        .read(sessionAttentionProvider.notifier)
-        .markWorking(id, _latestScreens[id] ?? screen);
+    if (readScreen != null) _screenReaders[id] = readScreen;
     _timers[id]?.cancel();
     _timers[id] = Timer(idleDelay, () => _toIdle(id));
+
+    final now = _now();
+    final lastInspected = _lastInspectedAt[id];
+    final eager = screen.isNotEmpty;
+    if (!eager &&
+        lastInspected != null &&
+        now.difference(lastInspected) < screenInspectInterval) {
+      return;
+    }
+    final latest = eager ? screen : (readScreen?.call() ?? '');
+    _lastInspectedAt[id] = now;
+    // 커서 깜빡임·TUI 재그리기는 출력이 있어도 텍스트가 그대로다.
+    // busy로 새로 전환했을 때는 같은 화면이라도 working을 반영한다.
+    final unchanged = latest == _latestScreens[id];
+    if (latest.isNotEmpty) _latestScreens[id] = latest;
+    if (unchanged && wasBusy) return;
+    ref
+        .read(sessionAttentionProvider.notifier)
+        .markWorking(id, _latestScreens[id] ?? latest);
   }
 
   void _toIdle(String id) {
     _timers.remove(id);
     if (!(state[id] ?? false)) return;
+    final latest = _screenReaders[id]?.call();
+    if (latest != null && latest.isNotEmpty) _latestScreens[id] = latest;
     final since = _busySince.remove(id);
     state = {...state, id: false};
     final busyFor = since == null ? Duration.zero : _now().difference(since);
@@ -111,6 +146,8 @@ class SessionActivityTracker extends Notifier<Map<String, bool>> {
     _timers.remove(id)?.cancel();
     _busySince.remove(id);
     _latestScreens.remove(id);
+    _screenReaders.remove(id);
+    _lastInspectedAt.remove(id);
     _notifiedTaskIds.remove(id);
     ref.read(sessionAttentionProvider.notifier).remove(id);
     if (state.containsKey(id)) {

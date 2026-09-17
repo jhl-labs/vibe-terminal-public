@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../agent/agent_attention.dart';
 import '../agent/agent_semantic_event.dart';
+import '../agent/agent_session_inspector.dart';
 import '../state/providers.dart';
 
 enum SessionAttentionState { idle, working, done, blocked }
@@ -33,6 +34,14 @@ class SessionAttention {
   final String message;
   final DateTime updatedAt;
   final SessionAttentionSource source;
+
+  /// [updatedAt]을 제외한 모든 필드가 같은지.
+  bool sameAs(SessionAttention other) =>
+      sessionId == other.sessionId &&
+      state == other.state &&
+      agentHint == other.agentHint &&
+      message == other.message &&
+      source == other.source;
 
   bool get needsAttention =>
       state == SessionAttentionState.blocked ||
@@ -66,6 +75,10 @@ class SessionAttentionTracker extends Notifier<Map<String, SessionAttention>> {
   final Map<String, Map<String, String>> _externalBlocks = {};
   final Map<String, AgentSemanticEvent> _semanticSignals = {};
 
+  /// 터미널 제목으로 알아낸 Agent. 화면 문구는 스크롤·재그리기로 사라지지만
+  /// 제목은 Agent가 살아 있는 동안 유지되므로 화면 판별을 보완한다.
+  final Map<String, AgentSessionInspection> _titleHints = {};
+
   @override
   Map<String, SessionAttention> build() {
     ref.listen<String?>(activeSessionIdProvider, (_, next) {
@@ -79,10 +92,75 @@ class SessionAttentionTracker extends Notifier<Map<String, SessionAttention>> {
     return const {};
   }
 
+  /// 터미널 제목(OSC 0/2)이 바뀌었다.
+  ///
+  /// Agent 제목이면 이후 화면 판별에서 Agent로 취급한다. Agent 제목이었다가
+  /// 셸 제목(`user@host: ~`)으로 돌아오면 Agent가 종료된 것이므로, hook이나
+  /// 외부 차단이 없는 화면 기반 상태는 지운다 — 그래야 `claude`를 한 번 띄운
+  /// 셸이 영원히 Agent 세션으로 남지 않는다.
+  void markTitle(String sessionId, String title) {
+    final inspection = AgentSessionInspector.inspectTitle(title);
+    if (inspection.isPossibleAgent) {
+      _titleHints[sessionId] = inspection;
+      final current = state[sessionId];
+      if (current == null) {
+        _set(
+          SessionAttention(
+            sessionId: sessionId,
+            state: SessionAttentionState.idle,
+            agentHint: inspection.agentHint,
+            message: inspection.preview,
+            updatedAt: clock.now(),
+          ),
+        );
+      } else if (current.source == SessionAttentionSource.screen &&
+          current.agentHint != inspection.agentHint &&
+          _outranksScreenHint(current, inspection)) {
+        _set(current.copyWith(agentHint: inspection.agentHint));
+      }
+      return;
+    }
+    if (_titleHints.remove(sessionId) == null) return;
+    final current = state[sessionId];
+    if (current == null ||
+        current.source != SessionAttentionSource.screen ||
+        _externalBlocks.containsKey(sessionId) ||
+        _semanticSignals.containsKey(sessionId)) {
+      return;
+    }
+    state = {...state}..remove(sessionId);
+  }
+
+  bool _outranksScreenHint(
+    SessionAttention current,
+    AgentSessionInspection title,
+  ) =>
+      title.isConfirmedAgent ||
+      current.agentHint == 'agent' ||
+      current.agentHint == 'unknown';
+
+  /// 화면 판별과 제목 판별을 합쳐 Agent 이름을 정한다. 확정 근거를 우선하고,
+  /// 둘 다 느슨하면 제목(셸 제목이 아닌 TUI 제목)을 믿는다.
+  String? _resolveHint(
+    String sessionId,
+    AgentAttentionAssessment assessment,
+    SessionAttention? previous,
+  ) {
+    final title = _titleHints[sessionId];
+    if (assessment.confidence == AgentDetectionConfidence.confirmed) {
+      return assessment.agentHint;
+    }
+    if (title != null) return title.agentHint;
+    // 느슨한 화면 근거('agent', 우연히 지나간 단어)로 이미 정한 이름을 바꾸지 않는다.
+    if (previous != null) return previous.agentHint;
+    return assessment.isAgent ? assessment.agentHint : null;
+  }
+
   void markWorking(String sessionId, String screen) {
     final assessment = _classifier.inspect(screen);
     final previous = state[sessionId];
-    if (!assessment.isAgent && previous == null) return;
+    final agentHint = _resolveHint(sessionId, assessment, previous);
+    if (agentHint == null) return;
     final externalMessage = _externalBlockMessage(sessionId);
     final semantic = _semanticSignals[sessionId];
     if (externalMessage == null && semantic != null) {
@@ -95,9 +173,7 @@ class SessionAttentionTracker extends Notifier<Map<String, SessionAttention>> {
         state: externalMessage == null
             ? SessionAttentionState.working
             : SessionAttentionState.blocked,
-        agentHint: assessment.isAgent
-            ? assessment.agentHint
-            : previous!.agentHint,
+        agentHint: agentHint,
         message: externalMessage ?? assessment.preview,
         updatedAt: clock.now(),
         source: externalMessage == null
@@ -115,7 +191,8 @@ class SessionAttentionTracker extends Notifier<Map<String, SessionAttention>> {
   }) {
     final assessment = _classifier.inspect(screen);
     final previous = state[sessionId];
-    if (!assessment.isAgent && previous == null) return null;
+    final agentHint = _resolveHint(sessionId, assessment, previous);
+    if (agentHint == null) return null;
 
     final externalMessage = _externalBlockMessage(sessionId);
     final semantic = _semanticSignals[sessionId];
@@ -139,9 +216,7 @@ class SessionAttentionTracker extends Notifier<Map<String, SessionAttention>> {
     final next = SessionAttention(
       sessionId: sessionId,
       state: nextState,
-      agentHint: assessment.isAgent
-          ? assessment.agentHint
-          : previous!.agentHint,
+      agentHint: agentHint,
       message:
           externalMessage ??
           assessment.evidence ??
@@ -264,6 +339,7 @@ class SessionAttentionTracker extends Notifier<Map<String, SessionAttention>> {
   void remove(String sessionId) {
     _externalBlocks.remove(sessionId);
     _semanticSignals.remove(sessionId);
+    _titleHints.remove(sessionId);
     if (!state.containsKey(sessionId)) return;
     state = {...state}..remove(sessionId);
   }
@@ -317,7 +393,15 @@ class SessionAttentionTracker extends Notifier<Map<String, SessionAttention>> {
     AgentSemanticPhase.stopped => 'Agent 세션이 종료되었습니다.',
   };
 
+  /// 상태·이름·메시지·출처가 그대로면 갱신하지 않는다.
+  ///
+  /// [markWorking]은 세션 출력 flush마다(최대 16ms 간격) 호출된다. 그때마다
+  /// `updatedAt`만 다른 새 객체로 state를 바꾸면 이 provider를 watch 하는
+  /// 앱 셸 중앙(모든 터미널 칸)과 세션 레일이 세션 수 × 60Hz 로 다시 빌드돼
+  /// 세션이 많을 때 앱 전체가 느려지고 IME(한글 조합) 이벤트가 밀린다.
   void _set(SessionAttention attention) {
+    final previous = state[attention.sessionId];
+    if (previous != null && previous.sameAs(attention)) return;
     state = {...state, attention.sessionId: attention};
   }
 }

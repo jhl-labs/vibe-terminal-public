@@ -18,7 +18,7 @@ import '../data/repositories/memo_repository.dart';
 import '../data/repositories/session_log_repository.dart';
 import '../data/repositories/snippet_repository.dart';
 import '../local/local_terminal_service.dart';
-import '../kubernetes/kubernetes_port_forward_service.dart';
+import '../kubernetes/kubernetes_exec_relay.dart';
 import '../notifications/notification_service.dart';
 import '../security/host_key_store.dart';
 import '../security/secure_store.dart';
@@ -83,10 +83,9 @@ final localTerminalServiceProvider = Provider<LocalTerminalService>(
   (ref) => LocalTerminalService(),
 );
 
-final kubernetesPortForwardServiceProvider =
-    Provider<KubernetesPortForwardService>(
-      (ref) => ProcessKubernetesPortForwardService(),
-    );
+final kubernetesRelayServiceProvider = Provider<KubernetesRelayService>(
+  (ref) => ProcessKubernetesRelayService(),
+);
 
 final aiChatServiceProvider = Provider<AiChatService>((ref) => AiChatService());
 
@@ -565,11 +564,15 @@ class AppSettingsController extends Notifier<AppSettings> {
   }
 
   void setShortcutBinding(String action, List<String> bindings) {
-    final next = {
+    final next = <String, List<String>>{
       ...state.shortcutBindings,
-      action: List.unmodifiable(bindings),
+      action: List<String>.unmodifiable(bindings),
     };
-    update(state.copyWith(shortcutBindings: Map.unmodifiable(next)));
+    update(
+      state.copyWith(
+        shortcutBindings: Map<String, List<String>>.unmodifiable(next),
+      ),
+    );
   }
 
   void setNotificationsEnabled(bool enabled) {

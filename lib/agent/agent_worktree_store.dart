@@ -3,8 +3,9 @@ import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
 
-import '../core/atomic_file.dart';
+import '../core/recoverable_json_file.dart';
 import 'agent_worktree.dart';
+import 'agent_native_session.dart';
 
 typedef WorktreeApplicationSupportDirectory = Future<Directory> Function();
 
@@ -20,12 +21,11 @@ class AgentWorktreeStore {
   Future<void> _pendingWrite = Future<void>.value();
 
   Future<List<AgentWorktreeRecord>> all() async {
+    // 읽기 자체는 재시도하되 실패한 쓰기가 빈 registry로 바뀌지는 않게 한다.
     try {
       await _pendingWrite;
-      return await _readWithoutWaiting();
-    } catch (_) {
-      return const [];
-    }
+    } catch (_) {}
+    return _readWithoutWaiting();
   }
 
   Future<AgentWorktreeRecord?> find(String id) async {
@@ -42,6 +42,28 @@ class AgentWorktreeStore {
 
   Future<void> remove(String id) =>
       _mutate((entries) => entries.removeWhere((entry) => entry.id == id));
+
+  Future<void> recordNativeSession(
+    String workspaceId,
+    String sessionId,
+    String provider,
+    String nativeId, {
+    String? localSessionId,
+  }) {
+    if (!isValidNativeAgentSessionId(nativeId)) return Future.value();
+    return _mutate((entries) {
+      final index = entries.indexWhere(
+        (entry) =>
+            entry.id == workspaceId &&
+            (entry.sessionId == sessionId ||
+                (localSessionId != null &&
+                    entry.localSessionId == localSessionId)) &&
+            entry.cli.name == provider,
+      );
+      if (index < 0 || entries[index].nativeSessionId == nativeId) return;
+      entries[index] = entries[index].copyWith(nativeSessionId: nativeId);
+    });
+  }
 
   /// 이전 앱 실행에서 active/provisioning으로 남은 항목은 현재 프로세스에서
   /// 실행 중임을 보장할 수 없으므로 일단 stranded로 내린다.
@@ -70,13 +92,21 @@ class AgentWorktreeStore {
     _pendingWrite = _pendingWrite.then(
       (_) async {
         final entries = await _readWithoutWaiting();
+        final before = jsonEncode(entries.map((e) => e.toJson()).toList());
         change(entries);
+        if (before == jsonEncode(entries.map((e) => e.toJson()).toList())) {
+          return;
+        }
         entries.sort((a, b) => b.createdAt.compareTo(a.createdAt));
         await _write(entries);
       },
       onError: (_) async {
         final entries = await _readWithoutWaiting();
+        final before = jsonEncode(entries.map((e) => e.toJson()).toList());
         change(entries);
+        if (before == jsonEncode(entries.map((e) => e.toJson()).toList())) {
+          return;
+        }
         entries.sort((a, b) => b.createdAt.compareTo(a.createdAt));
         await _write(entries);
       },
@@ -85,27 +115,29 @@ class AgentWorktreeStore {
   }
 
   Future<List<AgentWorktreeRecord>> _readWithoutWaiting() async {
-    try {
-      final file = await _file();
-      if (!file.existsSync()) return [];
-      final decoded = jsonDecode(await file.readAsString());
-      if (decoded is! Map || decoded['entries'] is! List) return [];
-      return (decoded['entries'] as List)
-          .map(AgentWorktreeRecord.fromJson)
-          .whereType<AgentWorktreeRecord>()
-          .toList();
-    } catch (_) {
-      return [];
-    }
+    final file = await _file();
+    final decoded = await readRecoverableJson(
+      file,
+      validate: (value) {
+        if (value is! Map ||
+            value['version'] != 1 ||
+            value['entries'] is! List) {
+          return false;
+        }
+        return (value['entries'] as List).every(
+          (row) => AgentWorktreeRecord.fromJson(row) != null,
+        );
+      },
+    );
+    if (decoded == null) return [];
+    return ((decoded as Map)['entries'] as List)
+        .map((row) => AgentWorktreeRecord.fromJson(row)!)
+        .toList();
   }
 
   Future<void> _write(List<AgentWorktreeRecord> entries) async {
     final file = await _file();
-    if (entries.isEmpty) {
-      if (file.existsSync()) await file.delete();
-      return;
-    }
-    await writeFileAtomically(
+    await writeRecoverableJson(
       file,
       const JsonEncoder.withIndent('  ').convert({
         'version': 1,

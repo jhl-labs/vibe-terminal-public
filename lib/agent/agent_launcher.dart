@@ -22,18 +22,24 @@ class AgentLaunchSpec {
     this.isolatedWorktree = false,
     this.branchName,
     this.arguments = const [],
+    this.executable,
+    this.initialGoal,
   });
 
   final AgentCli cli;
   final bool isolatedWorktree;
   final String? branchName;
   final List<String> arguments;
+  final String? executable;
+  final String? initialGoal;
 
   AgentWorkspaceContext toWorkspaceContext() => AgentWorkspaceContext(
     cli: cli,
     isolatedWorktree: isolatedWorktree,
     branchName: isolatedWorktree ? branchName?.trim() : null,
     arguments: List.unmodifiable(arguments),
+    executable: executable,
+    initialGoal: initialGoal,
   );
 }
 
@@ -43,6 +49,8 @@ class AgentWorkspaceContext {
     required this.isolatedWorktree,
     this.branchName,
     this.arguments = const [],
+    this.executable,
+    this.initialGoal,
     this.workspaceId,
     this.repositoryRoot,
     this.worktreePath,
@@ -53,6 +61,8 @@ class AgentWorkspaceContext {
   final bool isolatedWorktree;
   final String? branchName;
   final List<String> arguments;
+  final String? executable;
+  final String? initialGoal;
   final String? workspaceId;
   final String? repositoryRoot;
   final String? worktreePath;
@@ -60,6 +70,8 @@ class AgentWorkspaceContext {
 
   Map<String, Object?> toJson() => {
     'cli': cli.name,
+    if (executable != null) 'executable': executable,
+    if (initialGoal != null) 'initialGoal': initialGoal,
     'isolatedWorktree': isolatedWorktree,
     if (branchName != null && branchName!.isNotEmpty) 'branchName': branchName,
     if (arguments.isNotEmpty) 'arguments': arguments,
@@ -83,6 +95,8 @@ class AgentWorkspaceContext {
     final rawArguments = value['arguments'];
     return AgentWorkspaceContext(
       cli: cli,
+      executable: _optionalString(value['executable']),
+      initialGoal: _optionalString(value['initialGoal']),
       isolatedWorktree: value['isolatedWorktree'] == true,
       branchName: value['branchName'] is String
           ? (value['branchName'] as String).trim()
@@ -221,15 +235,36 @@ class AgentLaunchCommandBuilder {
   }
 
   String _agentInvocation(AgentLaunchSpec spec, AgentShellFlavor shell) {
+    final arguments = [
+      ...spec.arguments,
+      if (spec.initialGoal?.isNotEmpty == true) ...[
+        if (spec.cli == AgentCli.opencode)
+          '--prompt=${spec.initialGoal!}'
+        else ...[
+          '--',
+          spec.initialGoal!,
+        ],
+      ],
+    ];
+    _validateArguments(arguments, shell);
+    final executable = spec.executable?.trim();
+    if (executable != null) _validateArguments([executable], shell);
+    final command = executable == null
+        ? spec.cli.command
+        : switch (shell) {
+            AgentShellFlavor.posix => _quotePosix(executable),
+            AgentShellFlavor.powershell => '& ${_quotePowerShell(executable)}',
+            AgentShellFlavor.cmd => _quoteCmd(executable),
+          };
     final quotedArguments = [
-      for (final argument in spec.arguments)
+      for (final argument in arguments)
         switch (shell) {
           AgentShellFlavor.posix => _quotePosix(argument),
           AgentShellFlavor.powershell => _quotePowerShell(argument),
           AgentShellFlavor.cmd => _quoteCmd(argument),
         },
     ];
-    return [spec.cli.command, ...quotedArguments].join(' ');
+    return [command, ...quotedArguments].join(' ');
   }
 
   void _validateArguments(List<String> arguments, AgentShellFlavor shell) {

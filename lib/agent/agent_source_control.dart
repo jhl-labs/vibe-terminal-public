@@ -36,11 +36,13 @@ class AgentSourceControlSnapshot {
     required this.branchName,
     required this.headSha,
     required this.files,
+    this.reviewedTreeSha,
   });
 
   final String branchName;
   final String headSha;
   final List<AgentFileChange> files;
+  final String? reviewedTreeSha;
 
   bool get isClean => files.isEmpty;
 }

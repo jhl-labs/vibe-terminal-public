@@ -5,6 +5,8 @@ import 'dart:typed_data';
 
 import 'package:flutter_pty/flutter_pty.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'daemon/client.dart';
 
 import '../core/result.dart';
 import '../data/models/host.dart';
@@ -12,6 +14,81 @@ import '../terminal/terminal_session_handle.dart';
 import 'local_shell_paths.dart';
 
 class LocalTerminalService {
+  String get daemonExecutable => p.join(
+    p.dirname(Platform.resolvedExecutable),
+    Platform.isWindows ? 'vibe-daemon.exe' : 'vibe-daemon',
+  );
+  bool get persistentAvailable =>
+      (Platform.isMacOS || Platform.isLinux || Platform.isWindows) &&
+      File(daemonExecutable).existsSync();
+  Future<LocalDaemonClient> daemonClient() async {
+    final support = await getApplicationSupportDirectory();
+    final library = Platform.isMacOS
+        ? p.normalize(
+            p.join(
+              p.dirname(Platform.resolvedExecutable),
+              '../Frameworks/flutter_pty.framework/flutter_pty',
+            ),
+          )
+        : Platform.isWindows
+        ? p.join(p.dirname(Platform.resolvedExecutable), 'flutter_pty.dll')
+        : p.join(
+            p.dirname(Platform.resolvedExecutable),
+            'lib/libflutter_pty.so',
+          );
+    return LocalDaemonClient(
+      Directory(p.join(support.path, 'local-daemon')),
+      executable: daemonExecutable,
+      library: library,
+    );
+  }
+
+  Map<String, Object?> backgroundCommand(Host host, String command) {
+    if (command.trim().isEmpty ||
+        command.length > 32768 ||
+        command.contains('\x00')) {
+      throw ArgumentError('실행 명령은 1~32,768자여야 합니다.');
+    }
+    final spec = _resolveShell(host);
+    return {
+      'hostId': host.id,
+      'directory': spec.workingDirectory,
+      'executable': Platform.isWindows ? spec.executable : '/bin/sh',
+      'arguments': !Platform.isWindows
+          ? ['-lc', command]
+          : host.localShellType == LocalShellType.wsl
+          ? [...spec.arguments, '--', 'sh', '-lc', command]
+          : host.localShellType == LocalShellType.cmd
+          ? ['/d', '/s', '/c', command]
+          : ['-NoLogo', '-NoProfile', '-Command', command],
+    };
+  }
+
+  Future<Result<TerminalSessionHandle>> startPersistent({
+    required Host host,
+    required int cols,
+    required int rows,
+    required String id,
+    required bool create,
+  }) async {
+    try {
+      final spec = _resolveShell(host);
+      final handle = await (await daemonClient()).open(
+        id: id,
+        hostId: host.id,
+        command: spec.executable,
+        arguments: spec.arguments,
+        workingDirectory: spec.workingDirectory,
+        cols: cols,
+        rows: rows,
+        create: create,
+      );
+      return Ok(handle);
+    } catch (error) {
+      return Err(UnknownFailure('로컬 작업 복구 실패: $error'));
+    }
+  }
+
   Future<Result<TerminalSessionHandle>> start({
     required Host host,
     required int cols,
@@ -250,11 +327,14 @@ class LocalTerminalService {
   }
 }
 
-class LocalTerminalSessionHandle implements TerminalSessionHandle {
+class LocalTerminalSessionHandle implements LocalProcessSessionHandle {
   LocalTerminalSessionHandle(this._pty);
 
   final Pty _pty;
   bool _closed = false;
+
+  @override
+  int? get pid => _closed ? null : _pty.pid;
 
   @override
   Stream<List<int>> get output => _pty.output.cast<List<int>>();
@@ -720,10 +800,10 @@ class LocalLineSessionHandle implements TerminalSessionHandle {
       await process.exitCode;
       // 종료 직후 파이프에 남은 출력을 마저 받는다. 백그라운드 손자 프로세스가
       // 파이프를 계속 쥐고 있을 수 있으므로 무한정 기다리지는 않는다.
-      await Future.wait([stdoutDone.future, stderrDone.future]).timeout(
-        const Duration(milliseconds: 500),
-        onTimeout: () => const [],
-      );
+      await Future.wait([
+        stdoutDone.future,
+        stderrDone.future,
+      ]).timeout(const Duration(milliseconds: 500), onTimeout: () => const []);
       await stdoutSub.cancel();
       await stderrSub.cancel();
       stdoutSink.close();

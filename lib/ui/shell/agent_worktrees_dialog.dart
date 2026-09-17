@@ -14,6 +14,10 @@ Future<void> showAgentWorktreesDialog(
   required AgentWorktreeAction onReview,
   required AgentWorktreeAction onResume,
   required AgentWorktreeAction onCleanup,
+  AgentWorktreeAction? onIntegration,
+  AgentWorktreeAction? onFiles,
+  AgentWorktreeAction? onMergeBase,
+  AgentWorktreeAction? onAbortMerge,
 }) => showDialog<void>(
   context: context,
   builder: (_) => _AgentWorktreesDialog(
@@ -22,6 +26,10 @@ Future<void> showAgentWorktreesDialog(
     onReview: onReview,
     onResume: onResume,
     onCleanup: onCleanup,
+    onIntegration: onIntegration,
+    onFiles: onFiles,
+    onMergeBase: onMergeBase,
+    onAbortMerge: onAbortMerge,
   ),
 );
 
@@ -32,6 +40,10 @@ class _AgentWorktreesDialog extends StatefulWidget {
     required this.onReview,
     required this.onResume,
     required this.onCleanup,
+    this.onIntegration,
+    this.onFiles,
+    this.onMergeBase,
+    this.onAbortMerge,
   });
 
   final Future<List<AgentWorktreeRecord>> Function() load;
@@ -39,6 +51,10 @@ class _AgentWorktreesDialog extends StatefulWidget {
   final AgentWorktreeAction onReview;
   final AgentWorktreeAction onResume;
   final AgentWorktreeAction onCleanup;
+  final AgentWorktreeAction? onIntegration;
+  final AgentWorktreeAction? onFiles;
+  final AgentWorktreeAction? onMergeBase;
+  final AgentWorktreeAction? onAbortMerge;
 
   @override
   State<_AgentWorktreesDialog> createState() => _AgentWorktreesDialogState();
@@ -191,7 +207,19 @@ class _AgentWorktreesDialogState extends State<_AgentWorktreesDialog> {
                         onInspect: () => _run(worktree, widget.onInspect),
                         onReview: () => _run(worktree, widget.onReview),
                         onResume: () => _run(worktree, widget.onResume),
+                        onAbortMerge: widget.onAbortMerge == null
+                            ? null
+                            : () => _run(worktree, widget.onAbortMerge!),
+                        onMergeBase: widget.onMergeBase == null
+                            ? null
+                            : () => _run(worktree, widget.onMergeBase!),
                         onCleanup: () => _confirmCleanup(worktree),
+                        onFiles: widget.onFiles == null
+                            ? null
+                            : () => _run(worktree, widget.onFiles!),
+                        onIntegration: widget.onIntegration == null
+                            ? null
+                            : () => _run(worktree, widget.onIntegration!),
                       );
                     },
                   );
@@ -214,6 +242,10 @@ class _WorktreeCard extends StatelessWidget {
     required this.onReview,
     required this.onResume,
     required this.onCleanup,
+    this.onIntegration,
+    this.onFiles,
+    this.onMergeBase,
+    this.onAbortMerge,
   });
 
   final AgentWorktreeRecord worktree;
@@ -222,6 +254,10 @@ class _WorktreeCard extends StatelessWidget {
   final VoidCallback onReview;
   final VoidCallback onResume;
   final VoidCallback onCleanup;
+  final VoidCallback? onIntegration;
+  final VoidCallback? onFiles;
+  final VoidCallback? onMergeBase;
+  final VoidCallback? onAbortMerge;
 
   @override
   Widget build(BuildContext context) {
@@ -277,6 +313,11 @@ class _WorktreeCard extends StatelessWidget {
                 fontSize: 11,
               ),
             ),
+            if (worktree.nativeSessionId != null)
+              SelectableText(
+                '대화 복구 ID: ${worktree.nativeSessionId}',
+                style: const TextStyle(fontSize: 11),
+              ),
             if (worktree.lastError case final error?) ...[
               const SizedBox(height: 7),
               Text(
@@ -290,8 +331,8 @@ class _WorktreeCard extends StatelessWidget {
               ),
             ],
             const SizedBox(height: 10),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
+            Wrap(
+              alignment: WrapAlignment.end,
               children: [
                 if (busy)
                   const Padding(
@@ -300,6 +341,30 @@ class _WorktreeCard extends StatelessWidget {
                       dimension: 18,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     ),
+                  ),
+                if (onAbortMerge != null)
+                  IconButton(
+                    tooltip: '진행 중인 병합 취소',
+                    onPressed: busy ? null : onAbortMerge,
+                    icon: const Icon(Icons.undo),
+                  ),
+                if (onMergeBase != null)
+                  IconButton(
+                    tooltip: '기준 브랜치를 작업공간에 병합',
+                    onPressed: busy ? null : onMergeBase,
+                    icon: const Icon(Icons.merge),
+                  ),
+                if (onFiles != null)
+                  IconButton(
+                    tooltip: '작업공간 파일',
+                    onPressed: busy ? null : onFiles,
+                    icon: const Icon(Icons.folder_open),
+                  ),
+                if (onIntegration != null)
+                  IconButton(
+                    tooltip: 'CLI 연동 설치·진단·제거',
+                    onPressed: busy ? null : onIntegration,
+                    icon: const Icon(Icons.extension_outlined),
                   ),
                 TextButton.icon(
                   key: ValueKey('inspect-${worktree.id}'),

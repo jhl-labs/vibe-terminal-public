@@ -618,6 +618,15 @@ const Map<String, List<String>> kDefaultShortcutBindings = {
   'zoomReset': ['Ctrl+0'],
   'sessionPrevious': ['Ctrl+Tab'],
   'commandPalette': ['Ctrl+K', 'Cmd+K'],
+  // Terminal/OS shortcuts vary; opt in through the existing binding editor.
+  'paneLayout': [],
+  'paneSplitRight': [],
+  'paneSplitDown': [],
+  'paneZoom': [],
+  'paneLeft': [],
+  'paneRight': [],
+  'paneUp': [],
+  'paneDown': [],
 };
 
 class NotificationSettings {
@@ -729,6 +738,8 @@ class AgentLaunchProfile {
     required this.cliName,
     required this.arguments,
     required this.isolateWorktree,
+    this.executable,
+    this.initialGoal,
   });
 
   final String id;
@@ -736,11 +747,15 @@ class AgentLaunchProfile {
   final String cliName;
   final List<String> arguments;
   final bool isolateWorktree;
+  final String? executable;
+  final String? initialGoal;
 
   Map<String, Object?> toJson() => {
     'id': id,
     'name': name,
     'cliName': cliName,
+    if (executable != null) 'executable': executable,
+    if (initialGoal != null) 'initialGoal': initialGoal,
     'arguments': arguments,
     'isolateWorktree': isolateWorktree,
   };
@@ -771,6 +786,8 @@ class AgentLaunchProfile {
       id: id,
       name: name,
       cliName: cliName,
+      executable: _profileString(value['executable'], 1000),
+      initialGoal: _profileString(value['initialGoal'], 8000),
       arguments: List.unmodifiable(arguments),
       isolateWorktree: value['isolateWorktree'] != false,
     );

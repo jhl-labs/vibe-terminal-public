@@ -284,6 +284,7 @@ static void start_read_thread(HANDLE fd, Dart_Port port, HANDLE mutex, BOOL ackR
 typedef struct WaitExitOptions
 {
     HANDLE pid;
+    HANDLE job;
 
     Dart_Port port;
 
@@ -300,19 +301,21 @@ static DWORD WINAPI wait_exit_thread(LPVOID arg)
 
     GetExitCodeProcess(options->pid, &exit_code);
 
+    CloseHandle(options->job); /* KILL_ON_JOB_CLOSE also terminates descendants. */
     CloseHandle(options->pid);
     CloseHandle(options->hMutex);
 
     Dart_PostInteger_DL(options->port, exit_code);
-
+    free(options);
     return 0;
 }
 
-static void start_wait_exit_thread(HANDLE pid, Dart_Port port, HANDLE mutex)
+static void start_wait_exit_thread(HANDLE pid, Dart_Port port, HANDLE mutex, HANDLE job)
 {
     WaitExitOptions *options = malloc(sizeof(WaitExitOptions));
 
     options->pid = pid;
+    options->job = job;
     options->port = port;
     options->hMutex = mutex;
 
@@ -431,7 +434,7 @@ FFI_PLUGIN_EXPORT PtyHandle *pty_create(PtyOptions *options)
                         NULL,
                         NULL,
                         FALSE,
-                        EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                        EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
                         environment_block,
                         working_directory,
                         &startupInfo.StartupInfo,
@@ -460,9 +463,30 @@ FFI_PLUGIN_EXPORT PtyHandle *pty_create(PtyOptions *options)
         return NULL;
     }
 
-    // free(startupInfo.lpAttributeList);
-
-    // CloseHandle(processInfo.hThread);
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+    ZeroMemory(&limits, sizeof(limits));
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (job == NULL ||
+        !SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) ||
+        !AssignProcessToJobObject(job, processInfo.hProcess))
+    {
+        TerminateProcess(processInfo.hProcess, 1);
+        CloseHandle(processInfo.hThread);
+        CloseHandle(processInfo.hProcess);
+        if (job != NULL) CloseHandle(job);
+        error_message = "Failed to assign PTY process to owned Job Object";
+        return NULL;
+    }
+    if (ResumeThread(processInfo.hThread) == (DWORD)-1)
+    {
+        CloseHandle(job);
+        CloseHandle(processInfo.hThread);
+        CloseHandle(processInfo.hProcess);
+        error_message = "Failed to resume owned PTY process";
+        return NULL;
+    }
+    CloseHandle(processInfo.hThread);
 
     HANDLE mutex = CreateSemaphore(
         NULL, // default security attributes
@@ -472,7 +496,7 @@ FFI_PLUGIN_EXPORT PtyHandle *pty_create(PtyOptions *options)
 
     start_read_thread(outputReadSide, options->stdout_port, mutex, options->ackRead);
 
-    start_wait_exit_thread(processInfo.hProcess, options->exit_port, mutex);
+    start_wait_exit_thread(processInfo.hProcess, options->exit_port, mutex, job);
 
     PtyHandle *pty = malloc(sizeof(PtyHandle));
 

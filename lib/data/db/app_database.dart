@@ -20,15 +20,15 @@ class Hosts extends Table {
   TextColumn get workingDirectory => text().nullable()();
   TextColumn get credentialRef => text().nullable()();
   TextColumn get jumpHostId => text().nullable()();
+  IntColumn get kubernetesGateway => integer().withDefault(const Constant(0))();
+  TextColumn get kubernetesGatewayHostId => text().nullable()();
   TextColumn get kubernetesContext => text().nullable()();
   TextColumn get kubernetesNamespace => text().nullable()();
   TextColumn get kubernetesResource => text().nullable()();
-  IntColumn get kubernetesSshPort =>
-      integer().withDefault(const Constant(22))();
-  TextColumn get kubernetesUsername => text().nullable()();
-  IntColumn get kubernetesAuthType =>
-      integer().withDefault(const Constant(0))();
-  TextColumn get kubernetesCredentialRef => text().nullable()();
+  TextColumn get kubernetesContainer => text().nullable()();
+  // v10~v12에서 쓰던 Pod sshd 인증 컬럼(kubernetes_ssh_port, kubernetes_username,
+  // kubernetes_auth_type, kubernetes_credential_ref)은 더 이상 읽지 않는다.
+  // SQLite에서 컬럼 삭제는 테이블 재생성이 필요하므로 기존 DB에는 그대로 둔다.
   IntColumn get remoteSessionPersistence =>
       integer().withDefault(const Constant(0))();
   BoolColumn get agentForwarding =>
@@ -106,7 +106,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase([QueryExecutor? executor]) : super(executor ?? _open());
 
   @override
-  int get schemaVersion => 12;
+  int get schemaVersion => 13;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -139,16 +139,17 @@ class AppDatabase extends _$AppDatabase {
         await _addColumnIfMissing(m, hosts, hosts.kubernetesContext);
         await _addColumnIfMissing(m, hosts, hosts.kubernetesNamespace);
         await _addColumnIfMissing(m, hosts, hosts.kubernetesResource);
-        await _addColumnIfMissing(m, hosts, hosts.kubernetesSshPort);
-        await _addColumnIfMissing(m, hosts, hosts.kubernetesUsername);
-        await _addColumnIfMissing(m, hosts, hosts.kubernetesAuthType);
-        await _addColumnIfMissing(m, hosts, hosts.kubernetesCredentialRef);
       }
       if (from < 11) {
         await _addColumnIfMissing(m, hosts, hosts.remoteSessionPersistence);
       }
       if (from < 12) {
         await _addColumnIfMissing(m, hosts, hosts.agentForwarding);
+      }
+      if (from < 13) {
+        await _addColumnIfMissing(m, hosts, hosts.kubernetesGateway);
+        await _addColumnIfMissing(m, hosts, hosts.kubernetesGatewayHostId);
+        await _addColumnIfMissing(m, hosts, hosts.kubernetesContainer);
       }
     },
   );

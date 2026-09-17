@@ -17,6 +17,29 @@ enum LocalShellType { powershell, cmd, wsl }
 /// 백엔드를 추가해도 Host/SessionManager가 구체 구현에 묶이지 않게 한다.
 enum RemoteSessionPersistence { none, tmux }
 
+/// Kubernetes 경유 SSH에서 `kubectl`을 실행하는 위치.
+///
+/// Pod 안에서 최종 대상까지 TCP를 중계하므로, kubectl과 클러스터 자격증명이
+/// 있는 곳이면 어디든 게이트웨이가 될 수 있다.
+enum KubernetesGateway {
+  /// 이 기기에서 kubectl을 직접 실행한다.
+  local,
+
+  /// Windows의 기본 WSL 배포판 안에서 kubectl을 실행한다.
+  wsl,
+
+  /// 저장된 SSH 호스트에 접속한 뒤 그곳에서 kubectl을 실행한다.
+  sshHost,
+}
+
+extension KubernetesGatewayLabel on KubernetesGateway {
+  String get label => switch (this) {
+    KubernetesGateway.local => '이 기기',
+    KubernetesGateway.wsl => 'WSL',
+    KubernetesGateway.sshHost => 'SSH 호스트',
+  };
+}
+
 extension HostConnectionTypeLabel on HostConnectionType {
   String get label => switch (this) {
     HostConnectionType.ssh => 'SSH',
@@ -63,17 +86,18 @@ abstract class Host with _$Host {
     String? workingDirectory,
     String? credentialRef,
     String? jumpHostId,
+
+    /// kubectl을 실행할 위치. [KubernetesGateway.sshHost]면
+    /// [kubernetesGatewayHostId]의 SSH 프로필을 먼저 연결한다.
+    @Default(KubernetesGateway.local) KubernetesGateway kubernetesGateway,
+    String? kubernetesGatewayHostId,
     String? kubernetesContext,
     String? kubernetesNamespace,
+
+    /// 릴레이를 실행할 Pod. `pod-name` 또는 `deployment/name`처럼
+    /// `kubectl exec`가 받는 리소스 표기를 그대로 쓴다.
     String? kubernetesResource,
-    @Default(22) int kubernetesSshPort,
-    String? kubernetesUsername,
-    @Default(HostAuthType.password) HostAuthType kubernetesAuthType,
-    String? kubernetesCredentialRef,
-    // 런타임 전용 SSH 접속 주소. kubectl이 만든 임시 로컬 포트로 연결하되
-    // 호스트키는 안정적인 Kubernetes 리소스 식별자로 검증하기 위해 사용한다.
-    String? transportHostname,
-    int? transportPort,
+    String? kubernetesContainer,
     @Default(RemoteSessionPersistence.none)
     RemoteSessionPersistence remoteSessionPersistence,
 
@@ -116,16 +140,21 @@ abstract class Host with _$Host {
       return '$localShellLabel · $directory';
     }
     if (isKubernetesSsh) {
-      final resource = kubernetesResource?.trim();
-      final namespace = kubernetesNamespace?.trim();
-      final route = [
-        if (namespace != null && namespace.isNotEmpty) namespace,
-        if (resource != null && resource.isNotEmpty) resource,
-      ].join('/');
+      final route = kubernetesPodLabel;
       return route.isEmpty
           ? '$username@$hostname:$port'
           : '$username@$hostname:$port · $route 경유';
     }
     return '$username@$hostname:$port';
+  }
+
+  /// `namespace/pod` 형태의 릴레이 Pod 표기. 비어 있으면 빈 문자열.
+  String get kubernetesPodLabel {
+    final resource = kubernetesResource?.trim();
+    final namespace = kubernetesNamespace?.trim();
+    return [
+      if (namespace != null && namespace.isNotEmpty) namespace,
+      if (resource != null && resource.isNotEmpty) resource,
+    ].join('/');
   }
 }

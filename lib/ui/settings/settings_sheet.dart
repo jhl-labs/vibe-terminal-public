@@ -516,6 +516,30 @@ class _ShortcutSettingsTab extends ConsumerWidget {
               onChanged: controller.setShortcutBinding,
             ),
             const SizedBox(height: 8),
+            const Padding(
+              padding: EdgeInsets.only(bottom: 12),
+              child: Text('분할 단축키는 기본 미지정입니다. OS·셸 단축키와 겹치지 않는 키를 지정해 주세요.'),
+            ),
+            for (final action in const {
+              'paneLayout': '터미널 배치 선택',
+              'paneSplitRight': '오른쪽에 나누기',
+              'paneSplitDown': '아래에 나누기',
+              'paneZoom': '칸 확대 / 복귀',
+              'paneLeft': '왼쪽 칸 이동',
+              'paneRight': '오른쪽 칸 이동',
+              'paneUp': '위쪽 칸 이동',
+              'paneDown': '아래쪽 칸 이동',
+            }.entries)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: _ShortcutBindingField(
+                  actionId: action.key,
+                  label: action.value,
+                  bindings: settings.shortcutBindings[action.key] ?? const [],
+                  defaultBindings: kDefaultShortcutBindings[action.key]!,
+                  onChanged: controller.setShortcutBinding,
+                ),
+              ),
             const _ShortcutRow(action: '인터럽트', keys: 'Ctrl+C'),
           ],
         ),

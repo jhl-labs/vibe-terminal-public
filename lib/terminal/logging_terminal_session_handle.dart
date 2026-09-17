@@ -3,7 +3,7 @@ import 'dart:async';
 import '../data/repositories/session_log_repository.dart';
 import 'terminal_session_handle.dart';
 
-class LoggingTerminalSessionHandle implements TerminalSessionHandle {
+class LoggingTerminalSessionHandle implements TerminalReplaySessionHandle {
   LoggingTerminalSessionHandle({required this.inner, required this.writer}) {
     _output = _loggedOutput();
   }
@@ -16,6 +16,34 @@ class LoggingTerminalSessionHandle implements TerminalSessionHandle {
 
   @override
   Stream<List<int>> get output => _output;
+
+  @override
+  bool get handlesTerminalQueries =>
+      inner is TerminalReplaySessionHandle &&
+      (inner as TerminalReplaySessionHandle).handlesTerminalQueries;
+  @override
+  Stream<TerminalReplayFrame> get frames async* {
+    final source = inner;
+    if (source is! TerminalReplaySessionHandle) {
+      await for (final data in _output) {
+        yield TerminalReplayFrame('output', data: data);
+      }
+      return;
+    }
+    var replaying = false;
+    try {
+      await for (final frame in source.frames) {
+        if (frame.type == 'replayStart') replaying = true;
+        if (frame.type == 'ready') replaying = false;
+        if (!replaying && frame.type == 'output') writer.write(frame.data);
+        yield frame;
+      }
+      await writer.finish(_closing ? 'closed' : 'disconnected');
+    } catch (error, stack) {
+      await writer.finish('error');
+      Error.throwWithStackTrace(error, stack);
+    }
+  }
 
   @override
   void write(List<int> data) {

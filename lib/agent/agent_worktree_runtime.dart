@@ -6,12 +6,17 @@ import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
 import '../data/models/host.dart';
+import '../local/managed_process.dart';
 import 'agent_conflict.dart';
+import 'agent_integration.dart';
+import 'agent_integration_script.dart';
 import 'agent_launcher.dart';
 import 'agent_source_control.dart';
 import 'agent_workspace_test.dart';
+import 'agent_workspace_files.dart';
 import 'agent_workspace_run.dart';
 import 'agent_worktree.dart';
+import 'reviewed_git_transaction.dart';
 
 class AgentGitResult {
   const AgentGitResult({
@@ -75,6 +80,83 @@ class AgentWorktreeRuntime {
 
   static const int _maximumDiffCharacters = 400000;
 
+  Future<Object?> workspaceFiles({
+    required AgentWorktreeRecord entry,
+    required Host host,
+    required Map<String, Object?> request,
+  }) async {
+    final result = await _runGit(
+      host: host,
+      preferredSessionId: entry.sessionId,
+      workingDirectory: entry.worktreePath,
+      arguments: gitTransaction(r'exec node -e "$1" "$2"', [
+        agentWorkspaceFilesScript,
+        jsonEncode(request),
+      ]),
+    );
+    if (result.exitCode != 0) {
+      throw AgentWorktreeRuntimeException(
+        '파일 작업에 실패했습니다. 호스트에 Node.js가 필요합니다. ${result.stderr.trim()}',
+      );
+    }
+    return jsonDecode(result.stdout);
+  }
+
+  Future<AgentIntegrationPlan> configureIntegration({
+    required AgentWorktreeRecord entry,
+    required Host host,
+    bool remove = false,
+    String? expectedRevision,
+  }) async {
+    final result = await _runGit(
+      host: host,
+      preferredSessionId: entry.sessionId,
+      workingDirectory: entry.worktreePath,
+      arguments: gitTransaction(r'exec node -e "$1" "$2"', [
+        agentIntegrationScript,
+        jsonEncode({
+          'provider': entry.cli.name,
+          'emitter': agentHookEmitter(entry.cli.name),
+          'remove': remove,
+          'expected': ?expectedRevision,
+        }),
+      ]),
+    );
+    if (result.exitCode != 0) {
+      throw AgentWorktreeRuntimeException(
+        'CLI 연동 설정을 처리하지 못했습니다. 실행 호스트에 Node.js가 필요합니다. ${result.stderr.trim()}',
+      );
+    }
+    return AgentIntegrationPlan.fromJson(
+      jsonDecode(result.stdout) as Map<String, dynamic>,
+      remove: remove,
+    );
+  }
+
+  Future<void> abortMerge({
+    required AgentWorktreeRecord entry,
+    required Host host,
+    required String expectedFingerprint,
+  }) async {
+    final current = await workspaceTestContext(entry: entry, host: host);
+    if (current.workspaceFingerprint != expectedFingerprint) {
+      throw const AgentWorktreeRuntimeException(
+        '검토 이후 작업공간이 변경되었습니다. 다시 확인하세요.',
+      );
+    }
+    final result = await _runGit(
+      host: host,
+      preferredSessionId: entry.sessionId,
+      arguments: const ['merge', '--abort'],
+      workingDirectory: entry.worktreePath,
+    );
+    if (result.exitCode != 0) {
+      throw AgentWorktreeRuntimeException(
+        _failureMessage(result, '진행 중인 병합을 취소하지 못했습니다.'),
+      );
+    }
+  }
+
   Future<AgentWorkspaceRunContext> workspaceRunContext({
     required AgentWorktreeRecord entry,
     required Host host,
@@ -117,7 +199,11 @@ class AgentWorktreeRuntime {
     required AgentWorktreeRecord entry,
     required Host host,
   }) async {
-    final snapshot = await sourceControlSnapshot(entry: entry, host: host);
+    final snapshot = await sourceControlSnapshot(
+      entry: entry,
+      host: host,
+      captureReview: true,
+    );
     if (snapshot.branchName != entry.branchName) {
       throw AgentWorktreeRuntimeException(
         'worktree의 현재 브랜치(${snapshot.branchName})가 기록된 브랜치'
@@ -177,7 +263,11 @@ class AgentWorktreeRuntime {
       );
     }
     final fingerprint = sha256
-        .convert(utf8.encode(contentHashes.toString()))
+        .convert(
+          utf8.encode(
+            '${snapshot.reviewedTreeSha ?? "conflicted"}\u0000$contentHashes',
+          ),
+        )
         .toString();
     return AgentWorkspaceTestContext(
       headSha: snapshot.headSha,
@@ -244,6 +334,7 @@ class AgentWorktreeRuntime {
   Future<AgentSourceControlSnapshot> sourceControlSnapshot({
     required AgentWorktreeRecord entry,
     required Host host,
+    bool captureReview = false,
   }) async {
     final status = await _runGit(
       host: host,
@@ -283,10 +374,32 @@ class AgentWorktreeRuntime {
         _failureMessage(head, '현재 commit을 확인하지 못했습니다.'),
       );
     }
+    String? reviewedTree;
+    var headSha = head.stdout.trim();
+    final files = parseAgentGitStatus(status.stdout);
+    if (captureReview && !files.any((file) => file.isConflicted)) {
+      final captured = await _runGit(
+        host: host,
+        preferredSessionId: entry.sessionId,
+        arguments: gitTransaction(captureReviewedTreeScript, const []),
+        workingDirectory: entry.worktreePath,
+      );
+      final ids = captured.stdout.trim().split('\n');
+      if (captured.exitCode != 0 ||
+          ids.length != 2 ||
+          ids.any((id) => !RegExp(r'^[a-f0-9]{40,64}$').hasMatch(id))) {
+        throw AgentWorktreeRuntimeException(
+          _failureMessage(captured, '검토할 내용을 고정하지 못했습니다.'),
+        );
+      }
+      headSha = ids[0];
+      reviewedTree = ids[1];
+    }
     return AgentSourceControlSnapshot(
       branchName: branch.stdout.trim(),
-      headSha: head.stdout.trim(),
-      files: parseAgentGitStatus(status.stdout),
+      headSha: headSha,
+      files: files,
+      reviewedTreeSha: reviewedTree,
     );
   }
 
@@ -360,9 +473,27 @@ class AgentWorktreeRuntime {
     required AgentWorktreeRecord entry,
     required Host host,
     required AgentFileChange change,
+    AgentSourceControlSnapshot? reviewedSnapshot,
   }) async {
     final paths = [?change.originalPath, change.path];
-    final result = change.kind == AgentFileChangeKind.untracked
+    final tree = reviewedSnapshot?.reviewedTreeSha;
+    final result = tree != null
+        ? await _runGit(
+            host: host,
+            preferredSessionId: entry.sessionId,
+            arguments: [
+              'diff',
+              '--no-ext-diff',
+              '--no-color',
+              '--unified=3',
+              reviewedSnapshot!.headSha,
+              tree,
+              '--',
+              ...paths,
+            ],
+            workingDirectory: entry.worktreePath,
+          )
+        : change.kind == AgentFileChangeKind.untracked
         ? await _runGit(
             host: host,
             preferredSessionId: entry.sessionId,
@@ -419,6 +550,7 @@ class AgentWorktreeRuntime {
     required Host host,
     required Set<String> selectedPaths,
     required String message,
+    AgentSourceControlSnapshot? reviewedSnapshot,
   }) async {
     final normalizedMessage = message.trim();
     if (normalizedMessage.isEmpty) {
@@ -431,7 +563,20 @@ class AgentWorktreeRuntime {
       throw const AgentWorktreeRuntimeException('커밋할 파일을 선택해 주세요.');
     }
 
-    final snapshot = await sourceControlSnapshot(entry: entry, host: host);
+    final snapshot = await sourceControlSnapshot(
+      entry: entry,
+      host: host,
+      captureReview: true,
+    );
+    final reviewed = reviewedSnapshot ?? snapshot;
+    if (reviewed.reviewedTreeSha == null ||
+        snapshot.reviewedTreeSha != reviewed.reviewedTreeSha ||
+        snapshot.headSha != reviewed.headSha ||
+        snapshot.branchName != reviewed.branchName) {
+      throw const AgentWorktreeRuntimeException(
+        '검토 이후 작업공간이 변경되었습니다. 새로고침하고 다시 검토하세요.',
+      );
+    }
     if (snapshot.branchName != entry.branchName) {
       throw AgentWorktreeRuntimeException(
         'worktree의 현재 브랜치(${snapshot.branchName})가 기록된 브랜치'
@@ -453,67 +598,46 @@ class AgentWorktreeRuntime {
     final gitPaths = <String>{
       for (final change in selected) ...change.gitPaths,
     };
+    final indexHash = await _runGit(
+      host: host,
+      preferredSessionId: entry.sessionId,
+      arguments: gitTransaction(
+        r'git hash-object -- "$(git rev-parse --path-format=absolute --git-path index)"',
+        const [],
+      ),
+      workingDirectory: entry.worktreePath,
+    );
+    if (indexHash.exitCode != 0) {
+      throw const AgentWorktreeRuntimeException('Git index를 확인하지 못했습니다.');
+    }
     await _ensureNoStagedPathsOutside(
       entry: entry,
       host: host,
       allowedPaths: gitPaths,
     );
-
-    final staged = await _runGit(
-      host: host,
-      preferredSessionId: entry.sessionId,
-      arguments: ['add', '-A', '--', ...gitPaths],
-      workingDirectory: entry.worktreePath,
-    );
-    if (staged.exitCode != 0) {
-      throw AgentWorktreeRuntimeException(
-        _failureMessage(staged, '선택한 파일을 stage하지 못했습니다.'),
-      );
-    }
-    await _ensureNoStagedPathsOutside(
-      entry: entry,
-      host: host,
-      allowedPaths: gitPaths,
-    );
-    final stagedDiff = await _runGit(
-      host: host,
-      preferredSessionId: entry.sessionId,
-      arguments: const ['diff', '--cached', '--quiet'],
-      workingDirectory: entry.worktreePath,
-    );
-    if (stagedDiff.exitCode == 0) {
-      throw const AgentWorktreeRuntimeException('선택한 파일에 커밋할 변경이 없습니다.');
-    }
-    if (stagedDiff.exitCode != 1) {
-      throw AgentWorktreeRuntimeException(
-        _failureMessage(stagedDiff, 'stage 상태를 확인하지 못했습니다.'),
-      );
-    }
 
     final committed = await _runGit(
       host: host,
       preferredSessionId: entry.sessionId,
-      arguments: ['commit', '--message', normalizedMessage],
+      arguments: gitTransaction(commitReviewedTreeScript, [
+        reviewed.headSha,
+        reviewed.reviewedTreeSha!,
+        'refs/heads/${entry.branchName}',
+        normalizedMessage,
+        indexHash.stdout.trim(),
+        ...gitPaths,
+      ]),
       workingDirectory: entry.worktreePath,
     );
-    if (committed.exitCode != 0) {
+    final sha = committed.stdout.trim().split('\n').last;
+    if (committed.exitCode != 0 ||
+        !RegExp(r'^[a-f0-9]{40,64}$').hasMatch(sha)) {
       throw AgentWorktreeRuntimeException(
-        _failureMessage(committed, '커밋하지 못했습니다. 선택한 파일은 stage 상태로 보존됩니다.'),
-      );
-    }
-    final head = await _runGit(
-      host: host,
-      preferredSessionId: entry.sessionId,
-      arguments: const ['rev-parse', '--short=10', 'HEAD'],
-      workingDirectory: entry.worktreePath,
-    );
-    if (head.exitCode != 0) {
-      throw AgentWorktreeRuntimeException(
-        _failureMessage(head, '생성된 commit ID를 읽지 못했습니다.'),
+        _failureMessage(committed, '검토한 내용을 커밋하지 못했습니다.'),
       );
     }
     return AgentCommitResult(
-      shortSha: head.stdout.trim(),
+      shortSha: sha.substring(0, 10),
       subject: normalizedMessage.split('\n').first,
     );
   }
@@ -721,17 +845,17 @@ class AgentWorktreeRuntime {
         ],
         for (final argument in arguments) _quotePosix(argument),
       ].join(' ');
-      result = await Process.run('wsl.exe', [
+      result = await runManagedCommand('wsl.exe', [
         '--',
         'sh',
         '-lc',
-        command,
-      ], runInShell: false).timeout(const Duration(seconds: 45));
+        managedPosixCommand(command),
+      ]);
     } else {
-      result = await Process.run('git', [
+      result = await runManagedCommand('git', [
         if (directory != null && directory.isNotEmpty) ...['-C', directory],
         ...arguments,
-      ], runInShell: false).timeout(const Duration(seconds: 45));
+      ]);
     }
     return AgentGitResult(
       exitCode: result.exitCode,

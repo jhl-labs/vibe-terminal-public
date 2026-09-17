@@ -127,6 +127,29 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _kubernetesGatewayMeta = const VerificationMeta(
+    'kubernetesGateway',
+  );
+  @override
+  late final GeneratedColumn<int> kubernetesGateway = GeneratedColumn<int>(
+    'kubernetes_gateway',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _kubernetesGatewayHostIdMeta =
+      const VerificationMeta('kubernetesGatewayHostId');
+  @override
+  late final GeneratedColumn<String> kubernetesGatewayHostId =
+      GeneratedColumn<String>(
+        'kubernetes_gateway_host_id',
+        aliasedName,
+        true,
+        type: DriftSqlType.string,
+        requiredDuringInsert: false,
+      );
   static const VerificationMeta _kubernetesContextMeta = const VerificationMeta(
     'kubernetesContext',
   );
@@ -161,46 +184,12 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
         type: DriftSqlType.string,
         requiredDuringInsert: false,
       );
-  static const VerificationMeta _kubernetesSshPortMeta = const VerificationMeta(
-    'kubernetesSshPort',
-  );
+  static const VerificationMeta _kubernetesContainerMeta =
+      const VerificationMeta('kubernetesContainer');
   @override
-  late final GeneratedColumn<int> kubernetesSshPort = GeneratedColumn<int>(
-    'kubernetes_ssh_port',
-    aliasedName,
-    false,
-    type: DriftSqlType.int,
-    requiredDuringInsert: false,
-    defaultValue: const Constant(22),
-  );
-  static const VerificationMeta _kubernetesUsernameMeta =
-      const VerificationMeta('kubernetesUsername');
-  @override
-  late final GeneratedColumn<String> kubernetesUsername =
+  late final GeneratedColumn<String> kubernetesContainer =
       GeneratedColumn<String>(
-        'kubernetes_username',
-        aliasedName,
-        true,
-        type: DriftSqlType.string,
-        requiredDuringInsert: false,
-      );
-  static const VerificationMeta _kubernetesAuthTypeMeta =
-      const VerificationMeta('kubernetesAuthType');
-  @override
-  late final GeneratedColumn<int> kubernetesAuthType = GeneratedColumn<int>(
-    'kubernetes_auth_type',
-    aliasedName,
-    false,
-    type: DriftSqlType.int,
-    requiredDuringInsert: false,
-    defaultValue: const Constant(0),
-  );
-  static const VerificationMeta _kubernetesCredentialRefMeta =
-      const VerificationMeta('kubernetesCredentialRef');
-  @override
-  late final GeneratedColumn<String> kubernetesCredentialRef =
-      GeneratedColumn<String>(
-        'kubernetes_credential_ref',
+        'kubernetes_container',
         aliasedName,
         true,
         type: DriftSqlType.string,
@@ -294,13 +283,12 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
     workingDirectory,
     credentialRef,
     jumpHostId,
+    kubernetesGateway,
+    kubernetesGatewayHostId,
     kubernetesContext,
     kubernetesNamespace,
     kubernetesResource,
-    kubernetesSshPort,
-    kubernetesUsername,
-    kubernetesAuthType,
-    kubernetesCredentialRef,
+    kubernetesContainer,
     remoteSessionPersistence,
     agentForwarding,
     x11Forwarding,
@@ -406,6 +394,24 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
         ),
       );
     }
+    if (data.containsKey('kubernetes_gateway')) {
+      context.handle(
+        _kubernetesGatewayMeta,
+        kubernetesGateway.isAcceptableOrUnknown(
+          data['kubernetes_gateway']!,
+          _kubernetesGatewayMeta,
+        ),
+      );
+    }
+    if (data.containsKey('kubernetes_gateway_host_id')) {
+      context.handle(
+        _kubernetesGatewayHostIdMeta,
+        kubernetesGatewayHostId.isAcceptableOrUnknown(
+          data['kubernetes_gateway_host_id']!,
+          _kubernetesGatewayHostIdMeta,
+        ),
+      );
+    }
     if (data.containsKey('kubernetes_context')) {
       context.handle(
         _kubernetesContextMeta,
@@ -433,39 +439,12 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
         ),
       );
     }
-    if (data.containsKey('kubernetes_ssh_port')) {
+    if (data.containsKey('kubernetes_container')) {
       context.handle(
-        _kubernetesSshPortMeta,
-        kubernetesSshPort.isAcceptableOrUnknown(
-          data['kubernetes_ssh_port']!,
-          _kubernetesSshPortMeta,
-        ),
-      );
-    }
-    if (data.containsKey('kubernetes_username')) {
-      context.handle(
-        _kubernetesUsernameMeta,
-        kubernetesUsername.isAcceptableOrUnknown(
-          data['kubernetes_username']!,
-          _kubernetesUsernameMeta,
-        ),
-      );
-    }
-    if (data.containsKey('kubernetes_auth_type')) {
-      context.handle(
-        _kubernetesAuthTypeMeta,
-        kubernetesAuthType.isAcceptableOrUnknown(
-          data['kubernetes_auth_type']!,
-          _kubernetesAuthTypeMeta,
-        ),
-      );
-    }
-    if (data.containsKey('kubernetes_credential_ref')) {
-      context.handle(
-        _kubernetesCredentialRefMeta,
-        kubernetesCredentialRef.isAcceptableOrUnknown(
-          data['kubernetes_credential_ref']!,
-          _kubernetesCredentialRefMeta,
+        _kubernetesContainerMeta,
+        kubernetesContainer.isAcceptableOrUnknown(
+          data['kubernetes_container']!,
+          _kubernetesContainerMeta,
         ),
       );
     }
@@ -574,6 +553,14 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
         DriftSqlType.string,
         data['${effectivePrefix}jump_host_id'],
       ),
+      kubernetesGateway: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}kubernetes_gateway'],
+      )!,
+      kubernetesGatewayHostId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}kubernetes_gateway_host_id'],
+      ),
       kubernetesContext: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}kubernetes_context'],
@@ -586,21 +573,9 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
         DriftSqlType.string,
         data['${effectivePrefix}kubernetes_resource'],
       ),
-      kubernetesSshPort: attachedDatabase.typeMapping.read(
-        DriftSqlType.int,
-        data['${effectivePrefix}kubernetes_ssh_port'],
-      )!,
-      kubernetesUsername: attachedDatabase.typeMapping.read(
+      kubernetesContainer: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
-        data['${effectivePrefix}kubernetes_username'],
-      ),
-      kubernetesAuthType: attachedDatabase.typeMapping.read(
-        DriftSqlType.int,
-        data['${effectivePrefix}kubernetes_auth_type'],
-      )!,
-      kubernetesCredentialRef: attachedDatabase.typeMapping.read(
-        DriftSqlType.string,
-        data['${effectivePrefix}kubernetes_credential_ref'],
+        data['${effectivePrefix}kubernetes_container'],
       ),
       remoteSessionPersistence: attachedDatabase.typeMapping.read(
         DriftSqlType.int,
@@ -647,13 +622,12 @@ class HostRow extends DataClass implements Insertable<HostRow> {
   final String? workingDirectory;
   final String? credentialRef;
   final String? jumpHostId;
+  final int kubernetesGateway;
+  final String? kubernetesGatewayHostId;
   final String? kubernetesContext;
   final String? kubernetesNamespace;
   final String? kubernetesResource;
-  final int kubernetesSshPort;
-  final String? kubernetesUsername;
-  final int kubernetesAuthType;
-  final String? kubernetesCredentialRef;
+  final String? kubernetesContainer;
   final int remoteSessionPersistence;
   final bool agentForwarding;
   final bool x11Forwarding;
@@ -672,13 +646,12 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     this.workingDirectory,
     this.credentialRef,
     this.jumpHostId,
+    required this.kubernetesGateway,
+    this.kubernetesGatewayHostId,
     this.kubernetesContext,
     this.kubernetesNamespace,
     this.kubernetesResource,
-    required this.kubernetesSshPort,
-    this.kubernetesUsername,
-    required this.kubernetesAuthType,
-    this.kubernetesCredentialRef,
+    this.kubernetesContainer,
     required this.remoteSessionPersistence,
     required this.agentForwarding,
     required this.x11Forwarding,
@@ -706,6 +679,12 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     if (!nullToAbsent || jumpHostId != null) {
       map['jump_host_id'] = Variable<String>(jumpHostId);
     }
+    map['kubernetes_gateway'] = Variable<int>(kubernetesGateway);
+    if (!nullToAbsent || kubernetesGatewayHostId != null) {
+      map['kubernetes_gateway_host_id'] = Variable<String>(
+        kubernetesGatewayHostId,
+      );
+    }
     if (!nullToAbsent || kubernetesContext != null) {
       map['kubernetes_context'] = Variable<String>(kubernetesContext);
     }
@@ -715,15 +694,8 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     if (!nullToAbsent || kubernetesResource != null) {
       map['kubernetes_resource'] = Variable<String>(kubernetesResource);
     }
-    map['kubernetes_ssh_port'] = Variable<int>(kubernetesSshPort);
-    if (!nullToAbsent || kubernetesUsername != null) {
-      map['kubernetes_username'] = Variable<String>(kubernetesUsername);
-    }
-    map['kubernetes_auth_type'] = Variable<int>(kubernetesAuthType);
-    if (!nullToAbsent || kubernetesCredentialRef != null) {
-      map['kubernetes_credential_ref'] = Variable<String>(
-        kubernetesCredentialRef,
-      );
+    if (!nullToAbsent || kubernetesContainer != null) {
+      map['kubernetes_container'] = Variable<String>(kubernetesContainer);
     }
     map['remote_session_persistence'] = Variable<int>(remoteSessionPersistence);
     map['agent_forwarding'] = Variable<bool>(agentForwarding);
@@ -755,6 +727,10 @@ class HostRow extends DataClass implements Insertable<HostRow> {
       jumpHostId: jumpHostId == null && nullToAbsent
           ? const Value.absent()
           : Value(jumpHostId),
+      kubernetesGateway: Value(kubernetesGateway),
+      kubernetesGatewayHostId: kubernetesGatewayHostId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(kubernetesGatewayHostId),
       kubernetesContext: kubernetesContext == null && nullToAbsent
           ? const Value.absent()
           : Value(kubernetesContext),
@@ -764,14 +740,9 @@ class HostRow extends DataClass implements Insertable<HostRow> {
       kubernetesResource: kubernetesResource == null && nullToAbsent
           ? const Value.absent()
           : Value(kubernetesResource),
-      kubernetesSshPort: Value(kubernetesSshPort),
-      kubernetesUsername: kubernetesUsername == null && nullToAbsent
+      kubernetesContainer: kubernetesContainer == null && nullToAbsent
           ? const Value.absent()
-          : Value(kubernetesUsername),
-      kubernetesAuthType: Value(kubernetesAuthType),
-      kubernetesCredentialRef: kubernetesCredentialRef == null && nullToAbsent
-          ? const Value.absent()
-          : Value(kubernetesCredentialRef),
+          : Value(kubernetesContainer),
       remoteSessionPersistence: Value(remoteSessionPersistence),
       agentForwarding: Value(agentForwarding),
       x11Forwarding: Value(x11Forwarding),
@@ -800,6 +771,10 @@ class HostRow extends DataClass implements Insertable<HostRow> {
       workingDirectory: serializer.fromJson<String?>(json['workingDirectory']),
       credentialRef: serializer.fromJson<String?>(json['credentialRef']),
       jumpHostId: serializer.fromJson<String?>(json['jumpHostId']),
+      kubernetesGateway: serializer.fromJson<int>(json['kubernetesGateway']),
+      kubernetesGatewayHostId: serializer.fromJson<String?>(
+        json['kubernetesGatewayHostId'],
+      ),
       kubernetesContext: serializer.fromJson<String?>(
         json['kubernetesContext'],
       ),
@@ -809,13 +784,8 @@ class HostRow extends DataClass implements Insertable<HostRow> {
       kubernetesResource: serializer.fromJson<String?>(
         json['kubernetesResource'],
       ),
-      kubernetesSshPort: serializer.fromJson<int>(json['kubernetesSshPort']),
-      kubernetesUsername: serializer.fromJson<String?>(
-        json['kubernetesUsername'],
-      ),
-      kubernetesAuthType: serializer.fromJson<int>(json['kubernetesAuthType']),
-      kubernetesCredentialRef: serializer.fromJson<String?>(
-        json['kubernetesCredentialRef'],
+      kubernetesContainer: serializer.fromJson<String?>(
+        json['kubernetesContainer'],
       ),
       remoteSessionPersistence: serializer.fromJson<int>(
         json['remoteSessionPersistence'],
@@ -842,15 +812,14 @@ class HostRow extends DataClass implements Insertable<HostRow> {
       'workingDirectory': serializer.toJson<String?>(workingDirectory),
       'credentialRef': serializer.toJson<String?>(credentialRef),
       'jumpHostId': serializer.toJson<String?>(jumpHostId),
+      'kubernetesGateway': serializer.toJson<int>(kubernetesGateway),
+      'kubernetesGatewayHostId': serializer.toJson<String?>(
+        kubernetesGatewayHostId,
+      ),
       'kubernetesContext': serializer.toJson<String?>(kubernetesContext),
       'kubernetesNamespace': serializer.toJson<String?>(kubernetesNamespace),
       'kubernetesResource': serializer.toJson<String?>(kubernetesResource),
-      'kubernetesSshPort': serializer.toJson<int>(kubernetesSshPort),
-      'kubernetesUsername': serializer.toJson<String?>(kubernetesUsername),
-      'kubernetesAuthType': serializer.toJson<int>(kubernetesAuthType),
-      'kubernetesCredentialRef': serializer.toJson<String?>(
-        kubernetesCredentialRef,
-      ),
+      'kubernetesContainer': serializer.toJson<String?>(kubernetesContainer),
       'remoteSessionPersistence': serializer.toJson<int>(
         remoteSessionPersistence,
       ),
@@ -874,13 +843,12 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     Value<String?> workingDirectory = const Value.absent(),
     Value<String?> credentialRef = const Value.absent(),
     Value<String?> jumpHostId = const Value.absent(),
+    int? kubernetesGateway,
+    Value<String?> kubernetesGatewayHostId = const Value.absent(),
     Value<String?> kubernetesContext = const Value.absent(),
     Value<String?> kubernetesNamespace = const Value.absent(),
     Value<String?> kubernetesResource = const Value.absent(),
-    int? kubernetesSshPort,
-    Value<String?> kubernetesUsername = const Value.absent(),
-    int? kubernetesAuthType,
-    Value<String?> kubernetesCredentialRef = const Value.absent(),
+    Value<String?> kubernetesContainer = const Value.absent(),
     int? remoteSessionPersistence,
     bool? agentForwarding,
     bool? x11Forwarding,
@@ -903,6 +871,10 @@ class HostRow extends DataClass implements Insertable<HostRow> {
         ? credentialRef.value
         : this.credentialRef,
     jumpHostId: jumpHostId.present ? jumpHostId.value : this.jumpHostId,
+    kubernetesGateway: kubernetesGateway ?? this.kubernetesGateway,
+    kubernetesGatewayHostId: kubernetesGatewayHostId.present
+        ? kubernetesGatewayHostId.value
+        : this.kubernetesGatewayHostId,
     kubernetesContext: kubernetesContext.present
         ? kubernetesContext.value
         : this.kubernetesContext,
@@ -912,14 +884,9 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     kubernetesResource: kubernetesResource.present
         ? kubernetesResource.value
         : this.kubernetesResource,
-    kubernetesSshPort: kubernetesSshPort ?? this.kubernetesSshPort,
-    kubernetesUsername: kubernetesUsername.present
-        ? kubernetesUsername.value
-        : this.kubernetesUsername,
-    kubernetesAuthType: kubernetesAuthType ?? this.kubernetesAuthType,
-    kubernetesCredentialRef: kubernetesCredentialRef.present
-        ? kubernetesCredentialRef.value
-        : this.kubernetesCredentialRef,
+    kubernetesContainer: kubernetesContainer.present
+        ? kubernetesContainer.value
+        : this.kubernetesContainer,
     remoteSessionPersistence:
         remoteSessionPersistence ?? this.remoteSessionPersistence,
     agentForwarding: agentForwarding ?? this.agentForwarding,
@@ -953,6 +920,12 @@ class HostRow extends DataClass implements Insertable<HostRow> {
       jumpHostId: data.jumpHostId.present
           ? data.jumpHostId.value
           : this.jumpHostId,
+      kubernetesGateway: data.kubernetesGateway.present
+          ? data.kubernetesGateway.value
+          : this.kubernetesGateway,
+      kubernetesGatewayHostId: data.kubernetesGatewayHostId.present
+          ? data.kubernetesGatewayHostId.value
+          : this.kubernetesGatewayHostId,
       kubernetesContext: data.kubernetesContext.present
           ? data.kubernetesContext.value
           : this.kubernetesContext,
@@ -962,18 +935,9 @@ class HostRow extends DataClass implements Insertable<HostRow> {
       kubernetesResource: data.kubernetesResource.present
           ? data.kubernetesResource.value
           : this.kubernetesResource,
-      kubernetesSshPort: data.kubernetesSshPort.present
-          ? data.kubernetesSshPort.value
-          : this.kubernetesSshPort,
-      kubernetesUsername: data.kubernetesUsername.present
-          ? data.kubernetesUsername.value
-          : this.kubernetesUsername,
-      kubernetesAuthType: data.kubernetesAuthType.present
-          ? data.kubernetesAuthType.value
-          : this.kubernetesAuthType,
-      kubernetesCredentialRef: data.kubernetesCredentialRef.present
-          ? data.kubernetesCredentialRef.value
-          : this.kubernetesCredentialRef,
+      kubernetesContainer: data.kubernetesContainer.present
+          ? data.kubernetesContainer.value
+          : this.kubernetesContainer,
       remoteSessionPersistence: data.remoteSessionPersistence.present
           ? data.remoteSessionPersistence.value
           : this.remoteSessionPersistence,
@@ -1005,13 +969,12 @@ class HostRow extends DataClass implements Insertable<HostRow> {
           ..write('workingDirectory: $workingDirectory, ')
           ..write('credentialRef: $credentialRef, ')
           ..write('jumpHostId: $jumpHostId, ')
+          ..write('kubernetesGateway: $kubernetesGateway, ')
+          ..write('kubernetesGatewayHostId: $kubernetesGatewayHostId, ')
           ..write('kubernetesContext: $kubernetesContext, ')
           ..write('kubernetesNamespace: $kubernetesNamespace, ')
           ..write('kubernetesResource: $kubernetesResource, ')
-          ..write('kubernetesSshPort: $kubernetesSshPort, ')
-          ..write('kubernetesUsername: $kubernetesUsername, ')
-          ..write('kubernetesAuthType: $kubernetesAuthType, ')
-          ..write('kubernetesCredentialRef: $kubernetesCredentialRef, ')
+          ..write('kubernetesContainer: $kubernetesContainer, ')
           ..write('remoteSessionPersistence: $remoteSessionPersistence, ')
           ..write('agentForwarding: $agentForwarding, ')
           ..write('x11Forwarding: $x11Forwarding, ')
@@ -1035,13 +998,12 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     workingDirectory,
     credentialRef,
     jumpHostId,
+    kubernetesGateway,
+    kubernetesGatewayHostId,
     kubernetesContext,
     kubernetesNamespace,
     kubernetesResource,
-    kubernetesSshPort,
-    kubernetesUsername,
-    kubernetesAuthType,
-    kubernetesCredentialRef,
+    kubernetesContainer,
     remoteSessionPersistence,
     agentForwarding,
     x11Forwarding,
@@ -1064,13 +1026,12 @@ class HostRow extends DataClass implements Insertable<HostRow> {
           other.workingDirectory == this.workingDirectory &&
           other.credentialRef == this.credentialRef &&
           other.jumpHostId == this.jumpHostId &&
+          other.kubernetesGateway == this.kubernetesGateway &&
+          other.kubernetesGatewayHostId == this.kubernetesGatewayHostId &&
           other.kubernetesContext == this.kubernetesContext &&
           other.kubernetesNamespace == this.kubernetesNamespace &&
           other.kubernetesResource == this.kubernetesResource &&
-          other.kubernetesSshPort == this.kubernetesSshPort &&
-          other.kubernetesUsername == this.kubernetesUsername &&
-          other.kubernetesAuthType == this.kubernetesAuthType &&
-          other.kubernetesCredentialRef == this.kubernetesCredentialRef &&
+          other.kubernetesContainer == this.kubernetesContainer &&
           other.remoteSessionPersistence == this.remoteSessionPersistence &&
           other.agentForwarding == this.agentForwarding &&
           other.x11Forwarding == this.x11Forwarding &&
@@ -1091,13 +1052,12 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
   final Value<String?> workingDirectory;
   final Value<String?> credentialRef;
   final Value<String?> jumpHostId;
+  final Value<int> kubernetesGateway;
+  final Value<String?> kubernetesGatewayHostId;
   final Value<String?> kubernetesContext;
   final Value<String?> kubernetesNamespace;
   final Value<String?> kubernetesResource;
-  final Value<int> kubernetesSshPort;
-  final Value<String?> kubernetesUsername;
-  final Value<int> kubernetesAuthType;
-  final Value<String?> kubernetesCredentialRef;
+  final Value<String?> kubernetesContainer;
   final Value<int> remoteSessionPersistence;
   final Value<bool> agentForwarding;
   final Value<bool> x11Forwarding;
@@ -1117,13 +1077,12 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     this.workingDirectory = const Value.absent(),
     this.credentialRef = const Value.absent(),
     this.jumpHostId = const Value.absent(),
+    this.kubernetesGateway = const Value.absent(),
+    this.kubernetesGatewayHostId = const Value.absent(),
     this.kubernetesContext = const Value.absent(),
     this.kubernetesNamespace = const Value.absent(),
     this.kubernetesResource = const Value.absent(),
-    this.kubernetesSshPort = const Value.absent(),
-    this.kubernetesUsername = const Value.absent(),
-    this.kubernetesAuthType = const Value.absent(),
-    this.kubernetesCredentialRef = const Value.absent(),
+    this.kubernetesContainer = const Value.absent(),
     this.remoteSessionPersistence = const Value.absent(),
     this.agentForwarding = const Value.absent(),
     this.x11Forwarding = const Value.absent(),
@@ -1144,13 +1103,12 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     this.workingDirectory = const Value.absent(),
     this.credentialRef = const Value.absent(),
     this.jumpHostId = const Value.absent(),
+    this.kubernetesGateway = const Value.absent(),
+    this.kubernetesGatewayHostId = const Value.absent(),
     this.kubernetesContext = const Value.absent(),
     this.kubernetesNamespace = const Value.absent(),
     this.kubernetesResource = const Value.absent(),
-    this.kubernetesSshPort = const Value.absent(),
-    this.kubernetesUsername = const Value.absent(),
-    this.kubernetesAuthType = const Value.absent(),
-    this.kubernetesCredentialRef = const Value.absent(),
+    this.kubernetesContainer = const Value.absent(),
     this.remoteSessionPersistence = const Value.absent(),
     this.agentForwarding = const Value.absent(),
     this.x11Forwarding = const Value.absent(),
@@ -1176,13 +1134,12 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     Expression<String>? workingDirectory,
     Expression<String>? credentialRef,
     Expression<String>? jumpHostId,
+    Expression<int>? kubernetesGateway,
+    Expression<String>? kubernetesGatewayHostId,
     Expression<String>? kubernetesContext,
     Expression<String>? kubernetesNamespace,
     Expression<String>? kubernetesResource,
-    Expression<int>? kubernetesSshPort,
-    Expression<String>? kubernetesUsername,
-    Expression<int>? kubernetesAuthType,
-    Expression<String>? kubernetesCredentialRef,
+    Expression<String>? kubernetesContainer,
     Expression<int>? remoteSessionPersistence,
     Expression<bool>? agentForwarding,
     Expression<bool>? x11Forwarding,
@@ -1203,16 +1160,15 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
       if (workingDirectory != null) 'working_directory': workingDirectory,
       if (credentialRef != null) 'credential_ref': credentialRef,
       if (jumpHostId != null) 'jump_host_id': jumpHostId,
+      if (kubernetesGateway != null) 'kubernetes_gateway': kubernetesGateway,
+      if (kubernetesGatewayHostId != null)
+        'kubernetes_gateway_host_id': kubernetesGatewayHostId,
       if (kubernetesContext != null) 'kubernetes_context': kubernetesContext,
       if (kubernetesNamespace != null)
         'kubernetes_namespace': kubernetesNamespace,
       if (kubernetesResource != null) 'kubernetes_resource': kubernetesResource,
-      if (kubernetesSshPort != null) 'kubernetes_ssh_port': kubernetesSshPort,
-      if (kubernetesUsername != null) 'kubernetes_username': kubernetesUsername,
-      if (kubernetesAuthType != null)
-        'kubernetes_auth_type': kubernetesAuthType,
-      if (kubernetesCredentialRef != null)
-        'kubernetes_credential_ref': kubernetesCredentialRef,
+      if (kubernetesContainer != null)
+        'kubernetes_container': kubernetesContainer,
       if (remoteSessionPersistence != null)
         'remote_session_persistence': remoteSessionPersistence,
       if (agentForwarding != null) 'agent_forwarding': agentForwarding,
@@ -1236,13 +1192,12 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     Value<String?>? workingDirectory,
     Value<String?>? credentialRef,
     Value<String?>? jumpHostId,
+    Value<int>? kubernetesGateway,
+    Value<String?>? kubernetesGatewayHostId,
     Value<String?>? kubernetesContext,
     Value<String?>? kubernetesNamespace,
     Value<String?>? kubernetesResource,
-    Value<int>? kubernetesSshPort,
-    Value<String?>? kubernetesUsername,
-    Value<int>? kubernetesAuthType,
-    Value<String?>? kubernetesCredentialRef,
+    Value<String?>? kubernetesContainer,
     Value<int>? remoteSessionPersistence,
     Value<bool>? agentForwarding,
     Value<bool>? x11Forwarding,
@@ -1263,14 +1218,13 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
       workingDirectory: workingDirectory ?? this.workingDirectory,
       credentialRef: credentialRef ?? this.credentialRef,
       jumpHostId: jumpHostId ?? this.jumpHostId,
+      kubernetesGateway: kubernetesGateway ?? this.kubernetesGateway,
+      kubernetesGatewayHostId:
+          kubernetesGatewayHostId ?? this.kubernetesGatewayHostId,
       kubernetesContext: kubernetesContext ?? this.kubernetesContext,
       kubernetesNamespace: kubernetesNamespace ?? this.kubernetesNamespace,
       kubernetesResource: kubernetesResource ?? this.kubernetesResource,
-      kubernetesSshPort: kubernetesSshPort ?? this.kubernetesSshPort,
-      kubernetesUsername: kubernetesUsername ?? this.kubernetesUsername,
-      kubernetesAuthType: kubernetesAuthType ?? this.kubernetesAuthType,
-      kubernetesCredentialRef:
-          kubernetesCredentialRef ?? this.kubernetesCredentialRef,
+      kubernetesContainer: kubernetesContainer ?? this.kubernetesContainer,
       remoteSessionPersistence:
           remoteSessionPersistence ?? this.remoteSessionPersistence,
       agentForwarding: agentForwarding ?? this.agentForwarding,
@@ -1318,6 +1272,14 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     if (jumpHostId.present) {
       map['jump_host_id'] = Variable<String>(jumpHostId.value);
     }
+    if (kubernetesGateway.present) {
+      map['kubernetes_gateway'] = Variable<int>(kubernetesGateway.value);
+    }
+    if (kubernetesGatewayHostId.present) {
+      map['kubernetes_gateway_host_id'] = Variable<String>(
+        kubernetesGatewayHostId.value,
+      );
+    }
     if (kubernetesContext.present) {
       map['kubernetes_context'] = Variable<String>(kubernetesContext.value);
     }
@@ -1327,19 +1289,8 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     if (kubernetesResource.present) {
       map['kubernetes_resource'] = Variable<String>(kubernetesResource.value);
     }
-    if (kubernetesSshPort.present) {
-      map['kubernetes_ssh_port'] = Variable<int>(kubernetesSshPort.value);
-    }
-    if (kubernetesUsername.present) {
-      map['kubernetes_username'] = Variable<String>(kubernetesUsername.value);
-    }
-    if (kubernetesAuthType.present) {
-      map['kubernetes_auth_type'] = Variable<int>(kubernetesAuthType.value);
-    }
-    if (kubernetesCredentialRef.present) {
-      map['kubernetes_credential_ref'] = Variable<String>(
-        kubernetesCredentialRef.value,
-      );
+    if (kubernetesContainer.present) {
+      map['kubernetes_container'] = Variable<String>(kubernetesContainer.value);
     }
     if (remoteSessionPersistence.present) {
       map['remote_session_persistence'] = Variable<int>(
@@ -1381,13 +1332,12 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
           ..write('workingDirectory: $workingDirectory, ')
           ..write('credentialRef: $credentialRef, ')
           ..write('jumpHostId: $jumpHostId, ')
+          ..write('kubernetesGateway: $kubernetesGateway, ')
+          ..write('kubernetesGatewayHostId: $kubernetesGatewayHostId, ')
           ..write('kubernetesContext: $kubernetesContext, ')
           ..write('kubernetesNamespace: $kubernetesNamespace, ')
           ..write('kubernetesResource: $kubernetesResource, ')
-          ..write('kubernetesSshPort: $kubernetesSshPort, ')
-          ..write('kubernetesUsername: $kubernetesUsername, ')
-          ..write('kubernetesAuthType: $kubernetesAuthType, ')
-          ..write('kubernetesCredentialRef: $kubernetesCredentialRef, ')
+          ..write('kubernetesContainer: $kubernetesContainer, ')
           ..write('remoteSessionPersistence: $remoteSessionPersistence, ')
           ..write('agentForwarding: $agentForwarding, ')
           ..write('x11Forwarding: $x11Forwarding, ')
@@ -3352,60 +3302,60 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   ];
 }
 
-typedef $$HostsTableCreateCompanionBuilder = HostsCompanion Function({
-  required String id,
-  required String alias,
-  required String hostname,
-  Value<int> port,
-  required String username,
-  Value<int> connectionType,
-  Value<int> authType,
-  Value<int> localShellType,
-  Value<String?> workingDirectory,
-  Value<String?> credentialRef,
-  Value<String?> jumpHostId,
-  Value<String?> kubernetesContext,
-  Value<String?> kubernetesNamespace,
-  Value<String?> kubernetesResource,
-  Value<int> kubernetesSshPort,
-  Value<String?> kubernetesUsername,
-  Value<int> kubernetesAuthType,
-  Value<String?> kubernetesCredentialRef,
-  Value<int> remoteSessionPersistence,
-  Value<bool> agentForwarding,
-  Value<bool> x11Forwarding,
-  Value<String?> startupScript,
-  required DateTime createdAt,
-  required DateTime updatedAt,
-  Value<int> rowid,
-});
-typedef $$HostsTableUpdateCompanionBuilder = HostsCompanion Function({
-  Value<String> id,
-  Value<String> alias,
-  Value<String> hostname,
-  Value<int> port,
-  Value<String> username,
-  Value<int> connectionType,
-  Value<int> authType,
-  Value<int> localShellType,
-  Value<String?> workingDirectory,
-  Value<String?> credentialRef,
-  Value<String?> jumpHostId,
-  Value<String?> kubernetesContext,
-  Value<String?> kubernetesNamespace,
-  Value<String?> kubernetesResource,
-  Value<int> kubernetesSshPort,
-  Value<String?> kubernetesUsername,
-  Value<int> kubernetesAuthType,
-  Value<String?> kubernetesCredentialRef,
-  Value<int> remoteSessionPersistence,
-  Value<bool> agentForwarding,
-  Value<bool> x11Forwarding,
-  Value<String?> startupScript,
-  Value<DateTime> createdAt,
-  Value<DateTime> updatedAt,
-  Value<int> rowid,
-});
+typedef $$HostsTableCreateCompanionBuilder =
+    HostsCompanion Function({
+      required String id,
+      required String alias,
+      required String hostname,
+      Value<int> port,
+      required String username,
+      Value<int> connectionType,
+      Value<int> authType,
+      Value<int> localShellType,
+      Value<String?> workingDirectory,
+      Value<String?> credentialRef,
+      Value<String?> jumpHostId,
+      Value<int> kubernetesGateway,
+      Value<String?> kubernetesGatewayHostId,
+      Value<String?> kubernetesContext,
+      Value<String?> kubernetesNamespace,
+      Value<String?> kubernetesResource,
+      Value<String?> kubernetesContainer,
+      Value<int> remoteSessionPersistence,
+      Value<bool> agentForwarding,
+      Value<bool> x11Forwarding,
+      Value<String?> startupScript,
+      required DateTime createdAt,
+      required DateTime updatedAt,
+      Value<int> rowid,
+    });
+typedef $$HostsTableUpdateCompanionBuilder =
+    HostsCompanion Function({
+      Value<String> id,
+      Value<String> alias,
+      Value<String> hostname,
+      Value<int> port,
+      Value<String> username,
+      Value<int> connectionType,
+      Value<int> authType,
+      Value<int> localShellType,
+      Value<String?> workingDirectory,
+      Value<String?> credentialRef,
+      Value<String?> jumpHostId,
+      Value<int> kubernetesGateway,
+      Value<String?> kubernetesGatewayHostId,
+      Value<String?> kubernetesContext,
+      Value<String?> kubernetesNamespace,
+      Value<String?> kubernetesResource,
+      Value<String?> kubernetesContainer,
+      Value<int> remoteSessionPersistence,
+      Value<bool> agentForwarding,
+      Value<bool> x11Forwarding,
+      Value<String?> startupScript,
+      Value<DateTime> createdAt,
+      Value<DateTime> updatedAt,
+      Value<int> rowid,
+    });
 
 class $$HostsTableFilterComposer extends Composer<_$AppDatabase, $HostsTable> {
   $$HostsTableFilterComposer({
@@ -3470,6 +3420,16 @@ class $$HostsTableFilterComposer extends Composer<_$AppDatabase, $HostsTable> {
     builder: (column) => ColumnFilters(column),
   );
 
+  ColumnFilters<int> get kubernetesGateway => $composableBuilder(
+    column: $table.kubernetesGateway,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get kubernetesGatewayHostId => $composableBuilder(
+    column: $table.kubernetesGatewayHostId,
+    builder: (column) => ColumnFilters(column),
+  );
+
   ColumnFilters<String> get kubernetesContext => $composableBuilder(
     column: $table.kubernetesContext,
     builder: (column) => ColumnFilters(column),
@@ -3485,23 +3445,8 @@ class $$HostsTableFilterComposer extends Composer<_$AppDatabase, $HostsTable> {
     builder: (column) => ColumnFilters(column),
   );
 
-  ColumnFilters<int> get kubernetesSshPort => $composableBuilder(
-    column: $table.kubernetesSshPort,
-    builder: (column) => ColumnFilters(column),
-  );
-
-  ColumnFilters<String> get kubernetesUsername => $composableBuilder(
-    column: $table.kubernetesUsername,
-    builder: (column) => ColumnFilters(column),
-  );
-
-  ColumnFilters<int> get kubernetesAuthType => $composableBuilder(
-    column: $table.kubernetesAuthType,
-    builder: (column) => ColumnFilters(column),
-  );
-
-  ColumnFilters<String> get kubernetesCredentialRef => $composableBuilder(
-    column: $table.kubernetesCredentialRef,
+  ColumnFilters<String> get kubernetesContainer => $composableBuilder(
+    column: $table.kubernetesContainer,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -3600,6 +3545,16 @@ class $$HostsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<int> get kubernetesGateway => $composableBuilder(
+    column: $table.kubernetesGateway,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get kubernetesGatewayHostId => $composableBuilder(
+    column: $table.kubernetesGatewayHostId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<String> get kubernetesContext => $composableBuilder(
     column: $table.kubernetesContext,
     builder: (column) => ColumnOrderings(column),
@@ -3615,23 +3570,8 @@ class $$HostsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
-  ColumnOrderings<int> get kubernetesSshPort => $composableBuilder(
-    column: $table.kubernetesSshPort,
-    builder: (column) => ColumnOrderings(column),
-  );
-
-  ColumnOrderings<String> get kubernetesUsername => $composableBuilder(
-    column: $table.kubernetesUsername,
-    builder: (column) => ColumnOrderings(column),
-  );
-
-  ColumnOrderings<int> get kubernetesAuthType => $composableBuilder(
-    column: $table.kubernetesAuthType,
-    builder: (column) => ColumnOrderings(column),
-  );
-
-  ColumnOrderings<String> get kubernetesCredentialRef => $composableBuilder(
-    column: $table.kubernetesCredentialRef,
+  ColumnOrderings<String> get kubernetesContainer => $composableBuilder(
+    column: $table.kubernetesContainer,
     builder: (column) => ColumnOrderings(column),
   );
 
@@ -3718,6 +3658,16 @@ class $$HostsTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<int> get kubernetesGateway => $composableBuilder(
+    column: $table.kubernetesGateway,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get kubernetesGatewayHostId => $composableBuilder(
+    column: $table.kubernetesGatewayHostId,
+    builder: (column) => column,
+  );
+
   GeneratedColumn<String> get kubernetesContext => $composableBuilder(
     column: $table.kubernetesContext,
     builder: (column) => column,
@@ -3733,23 +3683,8 @@ class $$HostsTableAnnotationComposer
     builder: (column) => column,
   );
 
-  GeneratedColumn<int> get kubernetesSshPort => $composableBuilder(
-    column: $table.kubernetesSshPort,
-    builder: (column) => column,
-  );
-
-  GeneratedColumn<String> get kubernetesUsername => $composableBuilder(
-    column: $table.kubernetesUsername,
-    builder: (column) => column,
-  );
-
-  GeneratedColumn<int> get kubernetesAuthType => $composableBuilder(
-    column: $table.kubernetesAuthType,
-    builder: (column) => column,
-  );
-
-  GeneratedColumn<String> get kubernetesCredentialRef => $composableBuilder(
-    column: $table.kubernetesCredentialRef,
+  GeneratedColumn<String> get kubernetesContainer => $composableBuilder(
+    column: $table.kubernetesContainer,
     builder: (column) => column,
   );
 
@@ -3819,13 +3754,12 @@ class $$HostsTableTableManager
                 Value<String?> workingDirectory = const Value.absent(),
                 Value<String?> credentialRef = const Value.absent(),
                 Value<String?> jumpHostId = const Value.absent(),
+                Value<int> kubernetesGateway = const Value.absent(),
+                Value<String?> kubernetesGatewayHostId = const Value.absent(),
                 Value<String?> kubernetesContext = const Value.absent(),
                 Value<String?> kubernetesNamespace = const Value.absent(),
                 Value<String?> kubernetesResource = const Value.absent(),
-                Value<int> kubernetesSshPort = const Value.absent(),
-                Value<String?> kubernetesUsername = const Value.absent(),
-                Value<int> kubernetesAuthType = const Value.absent(),
-                Value<String?> kubernetesCredentialRef = const Value.absent(),
+                Value<String?> kubernetesContainer = const Value.absent(),
                 Value<int> remoteSessionPersistence = const Value.absent(),
                 Value<bool> agentForwarding = const Value.absent(),
                 Value<bool> x11Forwarding = const Value.absent(),
@@ -3845,13 +3779,12 @@ class $$HostsTableTableManager
                 workingDirectory: workingDirectory,
                 credentialRef: credentialRef,
                 jumpHostId: jumpHostId,
+                kubernetesGateway: kubernetesGateway,
+                kubernetesGatewayHostId: kubernetesGatewayHostId,
                 kubernetesContext: kubernetesContext,
                 kubernetesNamespace: kubernetesNamespace,
                 kubernetesResource: kubernetesResource,
-                kubernetesSshPort: kubernetesSshPort,
-                kubernetesUsername: kubernetesUsername,
-                kubernetesAuthType: kubernetesAuthType,
-                kubernetesCredentialRef: kubernetesCredentialRef,
+                kubernetesContainer: kubernetesContainer,
                 remoteSessionPersistence: remoteSessionPersistence,
                 agentForwarding: agentForwarding,
                 x11Forwarding: x11Forwarding,
@@ -3873,13 +3806,12 @@ class $$HostsTableTableManager
                 Value<String?> workingDirectory = const Value.absent(),
                 Value<String?> credentialRef = const Value.absent(),
                 Value<String?> jumpHostId = const Value.absent(),
+                Value<int> kubernetesGateway = const Value.absent(),
+                Value<String?> kubernetesGatewayHostId = const Value.absent(),
                 Value<String?> kubernetesContext = const Value.absent(),
                 Value<String?> kubernetesNamespace = const Value.absent(),
                 Value<String?> kubernetesResource = const Value.absent(),
-                Value<int> kubernetesSshPort = const Value.absent(),
-                Value<String?> kubernetesUsername = const Value.absent(),
-                Value<int> kubernetesAuthType = const Value.absent(),
-                Value<String?> kubernetesCredentialRef = const Value.absent(),
+                Value<String?> kubernetesContainer = const Value.absent(),
                 Value<int> remoteSessionPersistence = const Value.absent(),
                 Value<bool> agentForwarding = const Value.absent(),
                 Value<bool> x11Forwarding = const Value.absent(),
@@ -3899,13 +3831,12 @@ class $$HostsTableTableManager
                 workingDirectory: workingDirectory,
                 credentialRef: credentialRef,
                 jumpHostId: jumpHostId,
+                kubernetesGateway: kubernetesGateway,
+                kubernetesGatewayHostId: kubernetesGatewayHostId,
                 kubernetesContext: kubernetesContext,
                 kubernetesNamespace: kubernetesNamespace,
                 kubernetesResource: kubernetesResource,
-                kubernetesSshPort: kubernetesSshPort,
-                kubernetesUsername: kubernetesUsername,
-                kubernetesAuthType: kubernetesAuthType,
-                kubernetesCredentialRef: kubernetesCredentialRef,
+                kubernetesContainer: kubernetesContainer,
                 remoteSessionPersistence: remoteSessionPersistence,
                 agentForwarding: agentForwarding,
                 x11Forwarding: x11Forwarding,

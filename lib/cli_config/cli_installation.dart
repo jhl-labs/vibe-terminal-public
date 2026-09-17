@@ -1,8 +1,8 @@
-import 'dart:async';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../local/login_shell_path.dart';
 import 'cli_config_home.dart';
 
 /// Finds local CLI executables without running the CLI or inspecting credentials.
@@ -14,7 +14,7 @@ class CliInstallationDetector {
     Future<bool> Function(String, bool)? isExecutable,
   }) : _environment = environment ?? Platform.environment,
        _os = operatingSystem ?? Platform.operatingSystem,
-       _loginShellPath = loginShellPath ?? _readLoginShellPath,
+       _loginShellPath = loginShellPath ?? readLoginShellPath,
        _isExecutable = isExecutable ?? isExecutableFile;
 
   final Map<String, String> _environment;
@@ -99,34 +99,5 @@ class CliInstallationDetector {
     final stat = await File(path).stat();
     return stat.type == FileSystemEntityType.file &&
         (windows || stat.mode & 0x49 != 0);
-  }
-
-  static Future<String?> _readLoginShellPath() async {
-    final shell = Platform.environment['SHELL'];
-    if (shell == null || !p.posix.isAbsolute(shell)) return null;
-    final process = await Process.start(shell, [
-      '-lc',
-      r'''printf '\n__VIBE_CLI_PATH__%s\n' "$PATH"''',
-    ]);
-    final output = process.stdout
-        .transform(const SystemEncoding().decoder)
-        .join();
-    final errors = process.stderr.drain<void>();
-    try {
-      final code = await process.exitCode.timeout(const Duration(seconds: 3));
-      if (code != 0) return null;
-      final text = await output.timeout(const Duration(seconds: 1));
-      return RegExp(
-        r'^__VIBE_CLI_PATH__(.*)$',
-        multiLine: true,
-      ).firstMatch(text)?.group(1);
-    } on TimeoutException {
-      process.kill();
-      return null;
-    } finally {
-      // Drain both pipes even if a startup script fails or times out.
-      unawaited(output.then<void>((_) {}, onError: (Object _) {}));
-      unawaited(errors);
-    }
   }
 }

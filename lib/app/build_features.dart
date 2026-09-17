@@ -17,6 +17,8 @@ class BuildFeatures {
     this.community = true,
     this.logs = true,
     this.x11 = true,
+    this.externalControl = false,
+    this.localBackgroundSessions = false,
     this.settingsTerminal = true,
     this.settingsInteraction = true,
     this.settingsShortcut = true,
@@ -50,6 +52,12 @@ class BuildFeatures {
   final bool community;
   final bool logs;
   final bool x11;
+
+  /// 공개 빌드에서는 숨기며 내부 개발 빌드에서만 명시적으로 활성화한다.
+  final bool externalControl;
+
+  /// 로컬 데몬 동작과 별도로 작업 관리 화면의 노출만 결정한다.
+  final bool localBackgroundSessions;
   final bool settingsTerminal;
   final bool settingsInteraction;
   final bool settingsShortcut;

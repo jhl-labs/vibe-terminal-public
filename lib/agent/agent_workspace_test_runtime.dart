@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../data/models/host.dart';
+import '../local/managed_process.dart';
 
 class AgentTestProcessResult {
   const AgentTestProcessResult({
@@ -32,7 +33,12 @@ typedef RemoteAgentTestExecutor =
 /// 사용자가 확인한 테스트 명령을 worktree의 셸에서 실행하고 출력을 제한한다.
 /// Git 상태, Registry, UI는 알지 않으며 원격 채널은 주입된 executor가 소유한다.
 class AgentWorkspaceTestRuntime {
-  const AgentWorkspaceTestRuntime(this._remoteExecutor);
+  const AgentWorkspaceTestRuntime(
+    this._remoteExecutor, {
+    this.executionTimeout = timeout,
+  });
+
+  final Duration executionTimeout;
 
   static const timeout = Duration(minutes: 15);
   static const int maximumOutputCharacters = 240000;
@@ -51,7 +57,7 @@ class AgentWorkspaceTestRuntime {
         preferredSessionId: preferredSessionId,
         command: command,
         workingDirectory: workingDirectory,
-        timeout: timeout,
+        timeout: executionTimeout,
       );
     }
 
@@ -60,12 +66,10 @@ class AgentWorkspaceTestRuntime {
       command: command,
       workingDirectory: workingDirectory,
     );
-    final process = await Process.start(
+    final process = await ManagedLocalProcess.start(
       invocation.executable,
       invocation.arguments,
       workingDirectory: invocation.workingDirectory,
-      runInShell: false,
-      environment: Platform.isWindows ? Platform.environment : null,
     );
     final stdout = AgentBoundedOutputCollector(maximumOutputCharacters ~/ 2)
       ..listen(process.stdout);
@@ -74,13 +78,18 @@ class AgentWorkspaceTestRuntime {
     var timedOut = false;
     int? exitCode;
     try {
-      exitCode = await process.exitCode.timeout(timeout);
-      await Future.wait([stdout.done, stderr.done]);
+      await (() async {
+        exitCode = await process.exitCode;
+        await Future.wait([stdout.done, stderr.done]);
+      })().timeout(executionTimeout);
     } on TimeoutException {
       timedOut = true;
-      await _terminateLocalProcess(process);
-      await stdout.cancel();
-      await stderr.cancel();
+      try {
+        await process.stop();
+      } finally {
+        await stdout.cancel();
+        await stderr.cancel();
+      }
     }
     return AgentTestProcessResult(
       exitCode: exitCode,
@@ -126,36 +135,11 @@ class AgentWorkspaceTestRuntime {
           '--',
           'sh',
           '-lc',
-          'cd ${_quotePosix(workingDirectory)} && (\n$command\n)',
+          managedPosixCommand(command, directory: workingDirectory),
         ],
       ),
     };
   }
-
-  Future<void> _terminateLocalProcess(Process process) async {
-    if (Platform.isWindows) {
-      try {
-        await Process.run('taskkill.exe', [
-          '/PID',
-          '${process.pid}',
-          '/T',
-          '/F',
-        ], runInShell: false).timeout(const Duration(seconds: 5));
-        return;
-      } catch (_) {
-        // taskkill을 사용할 수 없으면 정확한 셸 프로세스만 종료한다.
-      }
-    }
-    process.kill(ProcessSignal.sigterm);
-    try {
-      await process.exitCode.timeout(const Duration(seconds: 2));
-    } catch (_) {
-      process.kill(ProcessSignal.sigkill);
-    }
-  }
-
-  static String _quotePosix(String value) =>
-      "'${value.replaceAll("'", "'\"'\"'")}'";
 }
 
 class _LocalTestInvocation {

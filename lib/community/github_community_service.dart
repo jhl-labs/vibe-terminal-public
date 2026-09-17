@@ -112,7 +112,7 @@ class GitHubCommunityService {
     : _client = client ?? (HttpClient()..connectionTimeout = _connectTimeout);
 
   static const owner = 'jhl-labs';
-  static const repo = 'vibe_terminal';
+  static const repo = 'vibe-terminal-public';
 
   /// 응답이 없는 서버에서 커뮤니티 패널이 영원히 로딩 상태로 남지 않게 한다.
   static const _connectTimeout = Duration(seconds: 15);

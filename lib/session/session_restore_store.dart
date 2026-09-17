@@ -23,6 +23,7 @@ class RestoredSessionEntry {
     this.pathPromptDismissed = false,
     this.pathPromptCompleted = false,
     this.remoteSessionId,
+    this.localSessionId,
     this.agentWorkspace,
   });
 
@@ -39,11 +40,13 @@ class RestoredSessionEntry {
   final bool pathPromptDismissed;
   final bool pathPromptCompleted;
   final String? remoteSessionId;
+  final String? localSessionId;
   final AgentWorkspaceContext? agentWorkspace;
 
   Map<String, Object?> toJson() => {
     'id': id,
     'hostId': hostId,
+    if (localSessionId != null) 'localSessionId': localSessionId,
     if (title != null) 'title': title,
     if (terminalText != null && terminalText!.isNotEmpty)
       'terminalText': terminalText,
@@ -82,6 +85,9 @@ class RestoredSessionEntry {
     return RestoredSessionEntry(
       id: id,
       hostId: hostId,
+      localSessionId: value['localSessionId'] is String
+          ? value['localSessionId'] as String
+          : null,
       title: title is String ? title : null,
       terminalText: terminalText is String ? terminalText : null,
       currentWorkingDirectory: currentWorkingDirectory is String

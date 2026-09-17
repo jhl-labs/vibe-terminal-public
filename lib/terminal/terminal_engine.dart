@@ -6,6 +6,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:xterm/xterm.dart';
 
 import 'terminal_session_handle.dart';
+import 'terminal_resize_dispatcher.dart';
 import 'terminal_sideband.dart';
 
 /// xterm [Terminal]을 SSH/로컬 PTY 세션 핸들에 연결하는 엔진.
@@ -15,7 +16,9 @@ import 'terminal_sideband.dart';
 /// - `terminal.onResize` (w, h, pw, ph) → `handle.resize` (cols, rows)
 class TerminalEngine {
   TerminalEngine({int maxLines = 5000})
-    : terminal = Terminal(maxLines: maxLines);
+    : terminal = Terminal(maxLines: maxLines) {
+    terminal.onTitleChange = (title) => onTitleChange?.call(title);
+  }
 
   static const _clearSessionScreen = '\x1b[?1049l\x1b[2J\x1b[3J\x1b[H';
 
@@ -27,11 +30,18 @@ class TerminalEngine {
   /// 화면에 그리지 않는 OSC sideband 메시지를 수신한다.
   ValueChanged<TerminalSidebandMessage>? onSidebandMessage;
 
+  /// 프로그램이 OSC 0/2로 터미널 제목을 바꿀 때 호출된다(Agent 판별용).
+  ValueChanged<String>? onTitleChange;
+
   /// 터미널에서 세션 핸들로 전송되는 입력.
   ValueChanged<String>? onInput;
 
-  StreamSubscription<String>? _outputSub;
+  StreamSubscription<dynamic>? _outputSub;
+  bool _replaying = false;
+  bool _applyingOutput = false;
+  bool _remoteQueries = false;
   TerminalSessionHandle? _handle;
+  TerminalResizeDispatcher? _resizeDispatcher;
 
   // 출력 코얼레싱 버퍼.
   //
@@ -55,6 +65,7 @@ class TerminalEngine {
   void attach(TerminalSessionHandle handle, {VoidCallback? onClosed}) {
     // 재attach 방어: 기존 구독 정리.
     final isReattach = _handle != null;
+    _resizeDispatcher?.dispose();
     _outputSub?.cancel();
     // 이전 세션의 미flush 청크는 아래에서 화면을 지우므로 버린다.
     _outputFlushTimer?.cancel();
@@ -62,6 +73,10 @@ class TerminalEngine {
     _pendingOutput.clear();
     _sidebandDecoder.reset();
     _handle = handle;
+    final resizer = _resizeDispatcher = TerminalResizeDispatcher(handle.resize);
+    _replaying = false;
+    _remoteQueries =
+        handle is TerminalReplaySessionHandle && handle.handlesTerminalQueries;
     if (isReattach) {
       // SSH 자동 재연결처럼 새 PTY가 같은 TerminalEngine에 붙을 때, 이전
       // 커서 위치와 스크롤백이 남으면 새 로그인 출력이 과거 화면 위에 덮인다.
@@ -72,37 +87,94 @@ class TerminalEngine {
     // 상태를 유지하는 스트림 디코더를 사용한다. 청크마다 utf8.decode를 호출하면
     // 경계에 걸친 한글·박스 문자·emoji가 대체 문자로 바뀌고, TUI가 계산한 셀 폭과
     // 로컬 버퍼의 셀 폭이 달라져 커서와 레이아웃이 무너질 수 있다.
-    _outputSub = handle.output
-        .transform(const Utf8Decoder(allowMalformed: true))
-        .listen(
-          (data) {
-            for (final message in _sidebandDecoder.add(data)) {
-              onSidebandMessage?.call(message);
-            }
-            _pendingOutput.add(data);
-            _outputFlushTimer ??= Timer(
-              _outputCoalesceWindow,
-              _flushPendingOutput,
-            );
-          },
-          // 스트림 종료 전에 남은 출력을 먼저 반영한 뒤 종료를 알린다.
-          onDone: () {
-            _flushPendingOutput();
-            onClosed?.call();
-          },
-        );
+    void consume(String data) {
+      if (!_replaying) {
+        for (final message in _sidebandDecoder.add(data)) {
+          onSidebandMessage?.call(message);
+        }
+      }
+      _pendingOutput.add(data);
+      _outputFlushTimer ??= Timer(_outputCoalesceWindow, _flushPendingOutput);
+    }
+
+    void done() {
+      resizer.dispose();
+      _flushPendingOutput();
+      onClosed?.call();
+    }
+
+    if (handle is TerminalReplaySessionHandle) {
+      final width = terminal.viewWidth, height = terminal.viewHeight;
+      final decoder = const Utf8Decoder(allowMalformed: true)
+          .startChunkedConversion(
+            StringConversionSink.from(_TerminalTextSink(consume)),
+          );
+      _outputSub = handle.frames.listen(
+        (frame) {
+          switch (frame.type) {
+            case 'replayStart':
+              resizer.reset();
+              _replaying = true;
+              _flushPendingOutput();
+              terminal.write('\x1bc');
+            case 'semantic':
+              for (final message in _sidebandDecoder.add(
+                utf8.decode(frame.data, allowMalformed: true),
+              )) {
+                onSidebandMessage?.call(message);
+              }
+            case 'output':
+              decoder.add(frame.data);
+            case 'resize':
+              _flushPendingOutput();
+              final wasReplaying = _replaying;
+              _replaying = true;
+              try {
+                terminal.resize(frame.cols!, frame.rows!);
+              } finally {
+                _replaying = wasReplaying;
+              }
+            case 'ready':
+              _flushPendingOutput();
+              terminal.resize(width, height);
+              _replaying = false;
+              handle.resize(width, height);
+              resizer.reset(last: (width, height));
+            case 'notice':
+              consume('\r\n[${frame.message}]\r\n');
+          }
+        },
+        onDone: () {
+          decoder.close();
+          done();
+        },
+        onError: (Object error) {
+          consume('\r\n[터미널 연결 오류: $error]\r\n');
+          done();
+        },
+      );
+    } else {
+      _replaying = false;
+      _outputSub = handle.output
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .listen(consume, onDone: done);
+    }
 
     // 터미널 입력 → 서버 (UTF-8 인코드). 단, xterm 4.0.0의 커서 위치 보고(CPR)
     // off-by-one을 1-based로 보정한다(아래 _correctCursorReport 참고).
     terminal.onOutput = (String data) {
+      if (_replaying || (_remoteQueries && _applyingOutput)) return;
       final corrected = _correctCursorReport(data);
       onInput?.call(corrected);
       handle.write(utf8.encode(corrected));
     };
 
     // 터미널 리사이즈 → 서버 (pixelWidth/pixelHeight 무시)
-    terminal.onResize = (int w, int h, int pw, int ph) => handle.resize(w, h);
+    terminal.onResize = (int w, int h, int pw, int ph) {
+      if (!_replaying) resizer.resize(w, h);
+    };
     handle.resize(terminal.viewWidth, terminal.viewHeight);
+    resizer.reset(last: (terminal.viewWidth, terminal.viewHeight));
   }
 
   // CPR(Cursor Position Report) 응답: `ESC [ row ; col R`.
@@ -128,12 +200,18 @@ class TerminalEngine {
     if (_pendingOutput.isEmpty) return;
     final data = _pendingOutput.join();
     _pendingOutput.clear();
-    terminal.write(data);
+    _applyingOutput = true;
+    try {
+      terminal.write(data);
+    } finally {
+      _applyingOutput = false;
+    }
     onOutputActivity?.call();
   }
 
   /// 스트림 구독을 취소하고 SSH 세션을 닫는다.
   void dispose() {
+    _resizeDispatcher?.dispose();
     _outputFlushTimer?.cancel();
     _outputSub?.cancel();
     _handle?.close();
@@ -178,4 +256,13 @@ class TerminalEngine {
         .replaceAll('\n', '\r\n');
     terminal.write('$normalized\r\n');
   }
+}
+
+class _TerminalTextSink implements Sink<String> {
+  _TerminalTextSink(this.consume);
+  final void Function(String) consume;
+  @override
+  void add(String data) => consume(data);
+  @override
+  void close() {}
 }

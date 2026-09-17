@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../agent/agent_source_control.dart';
+import '../../agent/agent_conflict.dart';
 import '../../agent/agent_workspace_test.dart';
 import '../../agent/agent_worktree.dart';
 import '../../app/theme.dart';
@@ -13,11 +14,15 @@ import 'agent_workspace_test_dialog.dart';
 typedef AgentSourceControlLoader =
     Future<AgentSourceControlSnapshot> Function();
 typedef AgentFileDiffLoader =
-    Future<AgentFileDiff> Function(AgentFileChange change);
+    Future<AgentFileDiff> Function(
+      AgentFileChange change,
+      AgentSourceControlSnapshot snapshot,
+    );
 typedef AgentSelectedCommitter =
     Future<AgentCommitResult> Function(
       Set<String> selectedPaths,
       String message,
+      AgentSourceControlSnapshot snapshot,
     );
 
 Future<void> showAgentSourceControlDialog(
@@ -26,7 +31,9 @@ Future<void> showAgentSourceControlDialog(
   required AgentSourceControlLoader load,
   required AgentFileDiffLoader loadDiff,
   required AgentSelectedCommitter commit,
+  Future<String> Function(String diff)? suggestCommit,
   required AgentConflictLoader loadConflicts,
+  Future<void> Function(AgentConflictFile)? resolveMissing,
   required AgentWorkspaceTestStateLoader loadTestState,
   required AgentWorkspaceTestRunner runTest,
   required AgentDeliveryPreviewLoader loadDeliveryPreview,
@@ -50,7 +57,9 @@ Future<void> showAgentSourceControlDialog(
     load: load,
     loadDiff: loadDiff,
     commit: commit,
+    suggestCommit: suggestCommit,
     loadConflicts: loadConflicts,
+    resolveMissing: resolveMissing,
     loadTestState: loadTestState,
     runTest: runTest,
     loadDeliveryPreview: loadDeliveryPreview,
@@ -76,7 +85,9 @@ class _AgentSourceControlDialog extends StatefulWidget {
     required this.load,
     required this.loadDiff,
     required this.commit,
+    this.suggestCommit,
     required this.loadConflicts,
+    this.resolveMissing,
     required this.loadTestState,
     required this.runTest,
     required this.loadDeliveryPreview,
@@ -99,7 +110,9 @@ class _AgentSourceControlDialog extends StatefulWidget {
   final AgentSourceControlLoader load;
   final AgentFileDiffLoader loadDiff;
   final AgentSelectedCommitter commit;
+  final Future<String> Function(String diff)? suggestCommit;
   final AgentConflictLoader loadConflicts;
+  final Future<void> Function(AgentConflictFile)? resolveMissing;
   final AgentWorkspaceTestStateLoader loadTestState;
   final AgentWorkspaceTestRunner runTest;
   final AgentDeliveryPreviewLoader loadDeliveryPreview;
@@ -126,10 +139,12 @@ class _AgentSourceControlDialogState extends State<_AgentSourceControlDialog> {
   final _messageController = TextEditingController();
   final _selectedPaths = <String>{};
   late Future<AgentSourceControlSnapshot> _snapshot;
+  AgentSourceControlSnapshot? _reviewedSnapshot;
   late Future<AgentWorkspaceTestState> _testState;
   Future<AgentFileDiff>? _diff;
   AgentFileChange? _focusedFile;
   bool _committing = false;
+  bool _suggesting = false;
 
   @override
   void initState() {
@@ -152,6 +167,7 @@ class _AgentSourceControlDialogState extends State<_AgentSourceControlDialog> {
         if (!mounted || !identical(_snapshot, request)) return;
         final available = snapshot.files.map((file) => file.path).toSet();
         setState(() {
+          _reviewedSnapshot = snapshot;
           _selectedPaths.removeWhere((path) => !available.contains(path));
           if (initial) {
             _selectedPaths.addAll(
@@ -183,7 +199,10 @@ class _AgentSourceControlDialogState extends State<_AgentSourceControlDialog> {
 
   void _loadFocusedDiff() {
     final file = _focusedFile;
-    _diff = file == null ? null : widget.loadDiff(file);
+    final reviewed = _reviewedSnapshot;
+    _diff = file == null || reviewed == null
+        ? null
+        : widget.loadDiff(file, reviewed);
   }
 
   void _toggle(AgentFileChange file, bool selected) {
@@ -232,6 +251,7 @@ class _AgentSourceControlDialogState extends State<_AgentSourceControlDialog> {
       context,
       worktree: widget.worktree,
       load: widget.loadConflicts,
+      resolveMissing: widget.resolveMissing,
     );
     if (!mounted) return;
     _refreshAll();
@@ -269,6 +289,54 @@ class _AgentSourceControlDialogState extends State<_AgentSourceControlDialog> {
       _testState = widget.loadTestState();
       _reload();
     });
+  }
+
+  Future<void> _suggestMessage(AgentSourceControlSnapshot snapshot) async {
+    if (_suggesting ||
+        _committing ||
+        widget.suggestCommit == null ||
+        _selectedPaths.isEmpty) {
+      return;
+    }
+    setState(() => _suggesting = true);
+    final original = _messageController.text;
+    final selected = Set<String>.of(_selectedPaths);
+    try {
+      final context = StringBuffer();
+      for (final file in snapshot.files.where(
+        (f) => selected.contains(f.path),
+      )) {
+        final diff = await widget.loadDiff(file, snapshot);
+        if (diff.truncated || context.length + diff.content.length > 48000) {
+          throw StateError('선택한 diff가 너무 큽니다. 파일 선택을 줄여 주세요.');
+        }
+        context.writeln('FILE: ${file.path}');
+        context.writeln(diff.content);
+      }
+      final suggestion = (await widget.suggestCommit!(
+        context.toString(),
+      )).trim();
+      if (!mounted) return;
+      if (_messageController.text != original ||
+          selected.length != _selectedPaths.length ||
+          !selected.containsAll(_selectedPaths)) {
+        throw StateError('제안 중 메시지 또는 파일 선택이 변경되었습니다. 다시 요청하세요.');
+      }
+      if (suggestion.isEmpty ||
+          suggestion.length > 4000 ||
+          suggestion.contains('\x00')) {
+        throw StateError('유효한 커밋 메시지를 받지 못했습니다.');
+      }
+      _messageController.text = suggestion;
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('$error')));
+      }
+    } finally {
+      if (mounted) setState(() => _suggesting = false);
+    }
   }
 
   Future<void> _confirmCommit(AgentSourceControlSnapshot snapshot) async {
@@ -344,7 +412,11 @@ class _AgentSourceControlDialogState extends State<_AgentSourceControlDialog> {
 
     setState(() => _committing = true);
     try {
-      final result = await widget.commit(Set.of(_selectedPaths), message);
+      final result = await widget.commit(
+        Set.of(_selectedPaths),
+        message,
+        snapshot,
+      );
       if (!mounted) return;
       _messageController.clear();
       _selectedPaths.clear();
@@ -394,6 +466,20 @@ class _AgentSourceControlDialogState extends State<_AgentSourceControlDialog> {
               Expanded(child: _buildContent(snapshot)),
               if (data != null) ...[
                 const Divider(height: 1),
+                if (widget.suggestCommit != null)
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton.icon(
+                      onPressed:
+                          _suggesting || _committing || _selectedPaths.isEmpty
+                          ? null
+                          : () => _suggestMessage(data),
+                      icon: const Icon(Icons.auto_awesome, size: 16),
+                      label: Text(
+                        _suggesting ? '메시지 제안 중…' : '선택 diff를 AI에 보내 메시지 제안',
+                      ),
+                    ),
+                  ),
                 _CommitBar(
                   controller: _messageController,
                   selectedCount: _selectedPaths.length,

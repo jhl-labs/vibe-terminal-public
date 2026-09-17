@@ -5,25 +5,47 @@ import 'package:flutter/services.dart';
 
 import '../../app/theme.dart';
 import '../../cli_config/cli_config_home.dart';
+import '../../cli_config/wsl_cli_config_home.dart';
 
 /// 우측 패널: 코딩 에이전트 CLI(Claude Code, Codex, OpenCode)의 전역 설정과
 /// 확장(지침·스킬·커맨드·에이전트 등)을 한곳에서 보고 편집한다.
 /// 개요(섹션 목록) → 섹션(파일 목록) → 편집기 순으로 들어간다.
 class CliConfigPanel extends StatefulWidget {
-  const CliConfigPanel({super.key, required this.app, this.home});
+  const CliConfigPanel({
+    super.key,
+    required this.app,
+    this.home,
+    this.wslHomeLoader,
+    this.wslAvailable,
+  });
 
   final CliConfigApp app;
 
   /// 테스트나 다른 홈 경로를 쓸 때 주입한다. null이면 환경변수로 결정한다.
   final CliConfigHome? home;
 
+  /// WSL 배포판 안의 홈을 찾는 함수. null이면 [WslCliConfigLocator]를 쓴다.
+  final Future<CliConfigHome> Function(CliConfigApp app)? wslHomeLoader;
+
+  /// WSL 전환 아이콘을 보일지. null이면 Windows에 wsl.exe가 있을 때만 보인다.
+  final bool? wslAvailable;
+
   @override
   State<CliConfigPanel> createState() => _CliConfigPanelState();
 }
 
 class _CliConfigPanelState extends State<CliConfigPanel> {
-  late final CliConfigHome? _home =
+  late final CliConfigHome? _nativeHome =
       widget.home ?? CliConfigHome.fromEnvironment(widget.app);
+  late final bool _wslAvailable =
+      widget.wslAvailable ?? WslCliConfigLocator.isAvailable;
+
+  /// WSL로 전환하면 이 홈을 쓴다. 찾는 중이면 [_wslLoading], 실패하면
+  /// [_wslError]가 채워진다. 한 번 찾은 홈은 패널이 살아 있는 동안 재사용한다.
+  CliConfigHome? _wslHome;
+  bool _useWsl = false;
+  bool _wslLoading = false;
+  String? _wslError;
 
   CliConfigSection? _section;
   CliConfigEntry? _entry;
@@ -31,10 +53,56 @@ class _CliConfigPanelState extends State<CliConfigPanel> {
   Map<CliConfigSection, int> _counts = const {};
   String? _error;
 
+  CliConfigHome? get _home => _useWsl ? _wslHome : _nativeHome;
+
   @override
   void initState() {
     super.initState();
     _reloadCounts();
+  }
+
+  Future<void> _toggleWsl() async {
+    if (_wslLoading) return;
+    setState(() {
+      _useWsl = !_useWsl;
+      _section = null;
+      _entry = null;
+      _entries = const [];
+      _counts = const {};
+      _error = null;
+    });
+    if (!_useWsl) {
+      _reloadCounts();
+      return;
+    }
+    if (_wslHome != null) {
+      _reloadCounts();
+      return;
+    }
+    await _loadWslHome();
+  }
+
+  Future<void> _loadWslHome() async {
+    setState(() {
+      _wslLoading = true;
+      _wslError = null;
+    });
+    final loader = widget.wslHomeLoader ?? WslCliConfigLocator().locate;
+    try {
+      final home = await loader(widget.app);
+      if (!mounted) return;
+      _wslHome = home;
+      _wslLoading = false;
+      _reloadCounts();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _wslLoading = false;
+        _wslError = error is WslCliConfigException
+            ? error.message
+            : 'WSL 설정을 찾지 못했습니다: $error';
+      });
+    }
   }
 
   void _reloadCounts() {
@@ -161,10 +229,24 @@ class _CliConfigPanelState extends State<CliConfigPanel> {
   @override
   Widget build(BuildContext context) {
     final home = _home;
+    final wslToggle = _wslAvailable
+        ? _WslToggle(
+            selected: _useWsl,
+            enabled: !_wslLoading,
+            onPressed: _toggleWsl,
+          )
+        : null;
     return Material(
       color: VibeColors.surface,
       child: home == null
-          ? _MissingHome(app: widget.app)
+          ? _MissingHome(
+              app: widget.app,
+              wsl: _useWsl,
+              loading: _wslLoading,
+              message: _useWsl ? _wslError : null,
+              onRetry: _useWsl && !_wslLoading ? _loadWslHome : null,
+              wslToggle: wslToggle,
+            )
           : _entry != null
           ? _CliFileEditor(
               key: ValueKey('cli-config-editor:${_entry!.path}'),
@@ -188,31 +270,135 @@ class _CliConfigPanelState extends State<CliConfigPanel> {
             )
           : _OverviewView(
               home: home,
+              wsl: _useWsl,
               counts: _counts,
               error: _error,
               onRefresh: _reloadCounts,
               onCopyPath: _copyPath,
               onOpen: _openSection,
+              wslToggle: wslToggle,
             ),
     );
   }
 }
 
+/// 홈을 찾지 못했거나(환경변수 없음, WSL 실패) WSL 홈을 찾는 중일 때의 화면.
+/// 헤더는 그대로 두어 WSL ↔ Windows 전환은 언제나 가능하게 한다.
 class _MissingHome extends StatelessWidget {
-  const _MissingHome({required this.app});
+  const _MissingHome({
+    required this.app,
+    required this.wsl,
+    required this.loading,
+    required this.message,
+    required this.onRetry,
+    required this.wslToggle,
+  });
 
   final CliConfigApp app;
+  final bool wsl;
+  final bool loading;
+
+  /// WSL 실패 사유. null이면 환경변수 안내를 보여 준다.
+  final String? message;
+  final VoidCallback? onRetry;
+  final Widget? wslToggle;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Text(
-        '${app.title} 홈 디렉터리를 찾지 못했습니다. '
-        '${app.rootEnvironmentHint} 환경변수를 확인하세요.',
-        style: const TextStyle(
-          color: VibeColors.onSurfaceMuted,
-          fontSize: 12.5,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _PanelHeader(
+          icon: appIconFor(app),
+          title: _appTitle(app, wsl: wsl),
+          subtitle: loading ? 'WSL 홈 디렉터리를 찾는 중…' : '—',
+          actions: [?wslToggle],
+        ),
+        Expanded(
+          child: loading
+              ? const Center(
+                  key: ValueKey('cli-config-wsl-loading'),
+                  child: SizedBox.square(
+                    dimension: 22,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                )
+              : Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        message ??
+                            '${app.title} 홈 디렉터리를 찾지 못했습니다. '
+                                '${app.rootEnvironmentHint} 환경변수를 확인하세요.',
+                        key: const ValueKey('cli-config-missing-home'),
+                        style: const TextStyle(
+                          color: VibeColors.onSurfaceMuted,
+                          fontSize: 12.5,
+                        ),
+                      ),
+                      if (onRetry != null) ...[
+                        const SizedBox(height: 12),
+                        OutlinedButton.icon(
+                          key: const ValueKey('cli-config-wsl-retry'),
+                          onPressed: onRetry,
+                          icon: const Icon(Icons.refresh, size: 16),
+                          label: const Text('다시 시도'),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+String _appTitle(CliConfigApp app, {required bool wsl}) =>
+    wsl ? '${app.title} (WSL)' : app.title;
+
+/// Windows 홈과 WSL 배포판 홈 사이를 오가는 토글. 선택되면 accent 색으로 채워
+/// 지금 WSL 쪽을 보고 있음을 드러낸다.
+class _WslToggle extends StatelessWidget {
+  const _WslToggle({
+    required this.selected,
+    required this.enabled,
+    required this.onPressed,
+  });
+
+  final bool selected;
+  final bool enabled;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      key: const ValueKey('cli-config-wsl-toggle'),
+      tooltip: selected ? 'Windows 설정 보기' : 'WSL 설정 보기',
+      isSelected: selected,
+      onPressed: enabled ? onPressed : null,
+      // 켜진 상태는 배경을 채워 글자 하나로도 WSL 쪽을 보고 있음이 보이게 한다.
+      style: ButtonStyle(
+        foregroundColor: WidgetStateProperty.resolveWith(
+          (states) => states.contains(WidgetState.selected)
+              ? VibeColors.surface
+              : VibeColors.onSurfaceMuted,
+        ),
+        backgroundColor: WidgetStateProperty.resolveWith(
+          (states) => states.contains(WidgetState.selected)
+              ? VibeColors.accent
+              : Colors.transparent,
+        ),
+      ),
+      icon: const Text(
+        'WSL',
+        style: TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 0.3,
+          height: 1,
         ),
       ),
     );
@@ -341,19 +527,25 @@ class _ErrorNote extends StatelessWidget {
 class _OverviewView extends StatelessWidget {
   const _OverviewView({
     required this.home,
+    required this.wsl,
     required this.counts,
     required this.error,
     required this.onRefresh,
     required this.onCopyPath,
     required this.onOpen,
+    required this.wslToggle,
   });
 
   final CliConfigHome home;
+  final bool wsl;
   final Map<CliConfigSection, int> counts;
   final String? error;
   final VoidCallback onRefresh;
   final ValueChanged<String> onCopyPath;
   final ValueChanged<CliConfigSection> onOpen;
+
+  /// Windows에서 WSL을 쓸 수 있을 때만 있다. '경로 복사' 왼쪽에 놓는다.
+  final Widget? wslToggle;
 
   @override
   Widget build(BuildContext context) {
@@ -362,9 +554,10 @@ class _OverviewView extends StatelessWidget {
       children: [
         _PanelHeader(
           icon: appIconFor(home.app),
-          title: home.app.title,
+          title: _appTitle(home.app, wsl: wsl),
           subtitle: home.rootPath,
           actions: [
+            ?wslToggle,
             IconButton(
               tooltip: '경로 복사',
               onPressed: () => onCopyPath(home.rootPath),

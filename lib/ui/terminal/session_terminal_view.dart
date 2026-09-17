@@ -12,6 +12,7 @@ import '../../clipboard/clipboard_image.dart';
 import '../../clipboard/image_paste.dart';
 import '../../core/result.dart';
 import '../../session/session.dart';
+import '../../session/terminal_zoom.dart';
 import '../../settings/app_settings.dart';
 import '../../settings/shortcut_bindings.dart';
 import '../../state/providers.dart';
@@ -28,8 +29,12 @@ class SessionTerminalView extends ConsumerStatefulWidget {
     this.onEditHost,
     this.onFallbackToCmd,
     this.isPowershellFallbackAvailable = false,
+    this.paneHeaderBuilder,
+    this.paneShortcuts = const {},
   });
 
+  final Widget Function(Map<String, VoidCallback>)? paneHeaderBuilder;
+  final Map<String, VoidCallback> paneShortcuts;
   final SessionInfo session;
   final VoidCallback? onRetry;
   final VoidCallback? onEditHost;
@@ -554,7 +559,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   void _syncPinchBase() {
     if (_activePointers.length == 2) {
       _pinchBaseDistance = _currentPointerDistance();
-      _pinchBaseFontSize = ref.read(appSettingsProvider).terminalFontSize;
+      _pinchBaseFontSize = ref
+          .read(terminalZoomProvider.notifier)
+          .fontSizeFor(widget.session.id);
     } else {
       _pinchBaseDistance = 0;
     }
@@ -590,8 +597,8 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     if (_activePointers.length == 2 && _pinchBaseDistance > 0) {
       final scale = _currentPointerDistance() / _pinchBaseDistance;
       ref
-          .read(appSettingsProvider.notifier)
-          .setTerminalFontSize(_pinchBaseFontSize * scale);
+          .read(terminalZoomProvider.notifier)
+          .setFontSize(widget.session.id, _pinchBaseFontSize * scale);
     }
   }
 
@@ -681,12 +688,21 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   }
 
   void _requestFocus() {
+    final activeId = ref.read(activeSessionIdProvider);
+    if ((widget.paneHeaderBuilder != null || activeId != null) &&
+        activeId != widget.session.id) {
+      return;
+    }
     if (mounted && widget.session.status == SessionStatus.connected) {
       _traceInput('requestFocus hasFocus=${_inputFocusNode.hasFocus}');
       _inputFocusNode.requestFocus();
       _editableTextKey.currentState?.requestKeyboard();
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && widget.session.status == SessionStatus.connected) {
+        if (mounted &&
+            widget.session.status == SessionStatus.connected &&
+            ((widget.paneHeaderBuilder == null &&
+                    ref.read(activeSessionIdProvider) == null) ||
+                ref.read(activeSessionIdProvider) == widget.session.id)) {
           _traceInput(
             'requestFocus.postFrame hasFocus=${_inputFocusNode.hasFocus}',
           );
@@ -1210,6 +1226,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
       }
     }
 
+    for (final action in widget.paneShortcuts.entries) {
+      add(action.key, action.value);
+    }
     add('zoomIn', zoomIn);
     add('zoomOut', zoomOut);
     add('zoomReset', zoomReset);
@@ -1253,6 +1272,21 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
       return KeyEventResult.ignored;
     }
     final settings = ref.read(appSettingsProvider);
+    for (final action in widget.paneShortcuts.entries) {
+      if (_matchesShortcut(
+        action.key,
+        event.logicalKey,
+        settings: settings,
+        ctrl: ctrl,
+        alt: alt,
+        meta: meta,
+        shift: shift,
+      )) {
+        _flushTextInputBuffer();
+        action.value();
+        return KeyEventResult.handled;
+      }
+    }
     if (_matchesShortcut(
       'sessionPrevious',
       event.logicalKey,
@@ -1536,25 +1570,8 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     return _logicalKeyToken(key) == parts.single;
   }
 
-  String? _logicalKeyToken(LogicalKeyboardKey key) {
-    if (key.keyId >= LogicalKeyboardKey.keyA.keyId &&
-        key.keyId <= LogicalKeyboardKey.keyZ.keyId) {
-      final offset = key.keyId - LogicalKeyboardKey.keyA.keyId;
-      return String.fromCharCode('a'.codeUnitAt(0) + offset);
-    }
-    if (key.keyId >= LogicalKeyboardKey.digit0.keyId &&
-        key.keyId <= LogicalKeyboardKey.digit9.keyId) {
-      final offset = key.keyId - LogicalKeyboardKey.digit0.keyId;
-      return String.fromCharCode('0'.codeUnitAt(0) + offset);
-    }
-    return switch (key) {
-      LogicalKeyboardKey.equal => '=',
-      LogicalKeyboardKey.minus => '-',
-      LogicalKeyboardKey.tab => 'tab',
-      LogicalKeyboardKey.insert => 'insert',
-      _ => null,
-    };
-  }
+  String? _logicalKeyToken(LogicalKeyboardKey key) =>
+      shortcutTokenForKey(key)?.toLowerCase();
 
   bool _shouldFlushBeforeTerminalKey(LogicalKeyboardKey key) {
     return _isEnterKey(key) ||
@@ -1888,45 +1905,78 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
         _requestFocus();
       }
     });
-    ref.listen(activeSessionIdProvider, (_, activeId) {
+    ref.listen(activeSessionIdProvider, (previousId, activeId) {
+      if (previousId == widget.session.id && activeId != widget.session.id) {
+        _flushTextInputBuffer();
+        _releaseTextInputBuffer();
+        _inputFocusNode.unfocus();
+      }
       if (activeId == widget.session.id) {
         _syncModifierKeyState();
         _requestFocus();
       }
     });
     final settings = ref.watch(appSettingsProvider);
-    final settingsController = ref.read(appSettingsProvider.notifier);
-    final fontSize = settings.terminalFontSize;
+    // 줌은 세션별(터미널 칸별)이다. 설정의 글꼴 크기는 기본값일 뿐이다.
+    final fontSize = watchTerminalFontSize(ref, widget.session.id);
+    final zoom = ref.read(terminalZoomProvider.notifier);
+    void zoomIn() => zoom.zoomIn(widget.session.id);
+    void zoomOut() => zoom.zoomOut(widget.session.id);
+    void zoomReset() => zoom.reset(widget.session.id);
 
+    final paneActions = <String, VoidCallback>{};
+    for (final token in settings.terminalHeaderItems) {
+      final definition = resolveHeaderToken(token);
+      final callback = switch (token) {
+        // 분할 화면(칸 헤더)에서는 이전/다음 세션이 칸 조작이 아니라 그룹 조작이라
+        // 상단 툴바(SessionPaneDeck)가 맡는다. 칸 메뉴에는 넣지 않는다.
+        'sessionPrev' || 'sessionNext' => null,
+        'retry' => widget.onRetry,
+        'zoomIn' => zoomIn,
+        'zoomOut' => zoomOut,
+        'zoomReset' => zoomReset,
+        'repaint' => _requestTerminalRepaint,
+        _ => null,
+      };
+      if (definition != null && callback != null) {
+        paneActions[definition.label] = callback;
+      }
+    }
+    final paneHeader = widget.paneHeaderBuilder?.call(paneActions);
+    Widget withPaneHeader(Widget body) => paneHeader == null
+        ? body
+        : Column(
+            children: [
+              paneHeader,
+              Expanded(child: body),
+            ],
+          );
     switch (widget.session.status) {
       case SessionStatus.connecting:
-        return const Center(child: CircularProgressIndicator());
+        return withPaneHeader(const Center(child: CircularProgressIndicator()));
       case SessionStatus.error:
-        return _SessionErrorView(
-          failure: widget.session.failure,
-          detail: widget.session.error,
-          onRetry: widget.onRetry,
-          onEditHost: widget.onEditHost,
-          onFallbackToCmd: widget.onFallbackToCmd,
-          isPowershellFallbackAvailable: widget.isPowershellFallbackAvailable,
+        return withPaneHeader(
+          _SessionErrorView(
+            failure: widget.session.failure,
+            detail: widget.session.error,
+            onRetry: widget.onRetry,
+            onEditHost: widget.onEditHost,
+            onFallbackToCmd: widget.onFallbackToCmd,
+            isPowershellFallbackAvailable: widget.isPowershellFallbackAvailable,
+          ),
         );
       case SessionStatus.disconnected:
         return Column(
           children: [
-            _TerminalHeader(
-              session: widget.session,
-              onRetry: widget.onRetry,
-              onZoomIn: () => settingsController.setTerminalFontSize(
-                fontSize + AppSettings.fontSizeStep,
-              ),
-              onZoomOut: () => settingsController.setTerminalFontSize(
-                fontSize - AppSettings.fontSizeStep,
-              ),
-              onZoomReset: () => settingsController.setTerminalFontSize(
-                AppSettings.defaultSettings.terminalFontSize,
-              ),
-              onRepaint: _requestTerminalRepaint,
-            ),
+            paneHeader ??
+                _TerminalHeader(
+                  session: widget.session,
+                  onRetry: widget.onRetry,
+                  onZoomIn: zoomIn,
+                  onZoomOut: zoomOut,
+                  onZoomReset: zoomReset,
+                  onRepaint: _requestTerminalRepaint,
+                ),
             if (widget.session.fellBackToDirectSsh)
               _DirectSshFallbackNotice(onEditHost: widget.onEditHost),
             Expanded(
@@ -1962,35 +2012,24 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
       case SessionStatus.connected:
         return Column(
           children: [
-            _TerminalHeader(
-              session: widget.session,
-              onRetry: widget.onRetry,
-              onZoomIn: () => settingsController.setTerminalFontSize(
-                fontSize + AppSettings.fontSizeStep,
-              ),
-              onZoomOut: () => settingsController.setTerminalFontSize(
-                fontSize - AppSettings.fontSizeStep,
-              ),
-              onZoomReset: () => settingsController.setTerminalFontSize(
-                AppSettings.defaultSettings.terminalFontSize,
-              ),
-              onRepaint: _requestTerminalRepaint,
-            ),
+            paneHeader ??
+                _TerminalHeader(
+                  session: widget.session,
+                  onRetry: widget.onRetry,
+                  onZoomIn: zoomIn,
+                  onZoomOut: zoomOut,
+                  onZoomReset: zoomReset,
+                  onRepaint: _requestTerminalRepaint,
+                ),
             if (widget.session.fellBackToDirectSsh)
               _DirectSshFallbackNotice(onEditHost: widget.onEditHost),
             Expanded(
               child: CallbackShortcuts(
                 bindings: _terminalShortcutCallbacks(
                   settings: settings,
-                  zoomIn: () => settingsController.setTerminalFontSize(
-                    fontSize + AppSettings.fontSizeStep,
-                  ),
-                  zoomOut: () => settingsController.setTerminalFontSize(
-                    fontSize - AppSettings.fontSizeStep,
-                  ),
-                  zoomReset: () => settingsController.setTerminalFontSize(
-                    AppSettings.defaultSettings.terminalFontSize,
-                  ),
+                  zoomIn: zoomIn,
+                  zoomOut: zoomOut,
+                  zoomReset: zoomReset,
                 ),
                 child: Shortcuts.manager(
                   debugLabel: 'Terminal input shortcuts',
@@ -2603,7 +2642,7 @@ class _SessionErrorView extends StatelessWidget {
     AuthFailure() => '인증에 실패했습니다',
     HostKeyMismatchFailure() => '호스트 키가 변경되었습니다',
     NetworkFailure() => '네트워크 연결에 실패했습니다',
-    KubernetesFailure() => 'Kubernetes 연결 준비에 실패했습니다',
+    KubernetesFailure() => 'Kubernetes 경유 연결에 실패했습니다',
     RemoteSessionFailure() => '작업 이어가기를 시작하지 못했습니다',
     StorageFailure() => '자격증명 저장소를 읽지 못했습니다',
     JumpChainFailure() => 'Jump 호스트 체인 오류',
@@ -2624,7 +2663,8 @@ class _SessionErrorView extends StatelessWidget {
       '서버 신원이 저장된 호스트 키와 다릅니다. 서버 변경 여부를 확인한 뒤 다시 시도하세요.',
     NetworkFailure() => '주소, 포트, 네트워크 상태와 SSH 서버 실행 여부를 확인하세요.',
     KubernetesFailure() =>
-      'kubectl 설치·PATH, context, namespace, 리소스와 Pod SSH 설정을 확인하세요.',
+      'kubectl 실행 위치(게이트웨이), context·namespace·Pod, Pod 안의 nc/socat/bash, '
+          '그리고 최종 SSH 주소·포트를 확인하세요.',
     RemoteSessionFailure() => '서버에 tmux를 설치하거나 호스트 설정에서 작업 이어가기를 꺼 주세요.',
     StorageFailure() => '저장된 자격증명을 읽을 수 없습니다. 비밀번호를 다시 저장하세요.',
     JumpChainFailure() => 'Jump 호스트 설정을 확인한 뒤 다시 연결하세요.',

@@ -54,6 +54,28 @@ class AgentSessionInspector {
     (RegExp(r'\bqodercli\b|\bqoder\s+cli\b'), 'qoder'),
   ];
 
+  /// 대화가 길어져 시작 배너가 스크롤백 밖으로 밀려난 뒤에도 화면 하단에 계속
+  /// 남는 TUI 고정 문구. 다른 CLI에는 없는 문구만 확정 근거로 삼는다.
+  static final List<(RegExp, String)> _chromePatterns = [
+    (
+      RegExp(
+        r'shift\+tab to cycle|accept edits on\b|plan mode on\b|'
+        r'bypass permissions on\b|auto-accept edits',
+      ),
+      'claude',
+    ),
+  ];
+
+  /// 여러 Agent TUI가 공유하는 고정 문구. 어떤 Agent인지는 모르지만 일반 셸
+  /// 출력에는 나오지 않으므로 'agent'로 느슨하게 판별한다.
+  static final RegExp _genericChromePattern = RegExp(
+    r'\? for shortcuts|esc to interrupt|context left\b',
+  );
+
+  /// Claude Code가 터미널 제목 앞에 붙이는 글리프. 제목이 대화 요약으로 바뀌면
+  /// 'claude'라는 단어가 사라지므로 이 접두어로 알아본다.
+  static final RegExp _claudeTitleGlyph = RegExp(r'^[✳✶✻✽✢]\s');
+
   static final List<(RegExp, String)> _possiblePatterns = [
     (RegExp(r'\bclaude\b'), 'claude'),
     (RegExp(r'\bcodex\b'), 'codex'),
@@ -92,6 +114,17 @@ class AgentSessionInspector {
         );
       }
     }
+    // 고정 문구는 화면 하단에 있으므로 최근 줄만 본다. 지나간 대화 안의
+    // 인용문(예: 문서에 적힌 "esc to interrupt")까지 근거로 삼지 않는다.
+    for (final (pattern, hint) in _chromePatterns) {
+      if (pattern.hasMatch(searchable)) {
+        return AgentSessionInspection(
+          agentHint: hint,
+          confidence: AgentDetectionConfidence.confirmed,
+          preview: _preview(lines, previewLines),
+        );
+      }
+    }
     for (final (pattern, hint) in _possiblePatterns) {
       if (pattern.hasMatch(searchable)) {
         return AgentSessionInspection(
@@ -101,10 +134,59 @@ class AgentSessionInspector {
         );
       }
     }
+    if (_genericChromePattern.hasMatch(searchable)) {
+      return AgentSessionInspection(
+        agentHint: 'agent',
+        confidence: AgentDetectionConfidence.possible,
+        preview: _preview(lines, previewLines),
+      );
+    }
     return AgentSessionInspection(
       agentHint: 'unknown',
       confidence: AgentDetectionConfidence.none,
       preview: _preview(lines, previewLines),
+    );
+  }
+
+  /// 터미널 제목(OSC 0/2)에서 Agent를 판별한다.
+  ///
+  /// Claude Code는 "✳ Claude Code" 또는 "✳ <대화 요약>"으로, 다른 CLI는 제품명을
+  /// 제목에 쓴다. 화면 문구와 달리 스크롤로 사라지지 않고, 셸이 제목을 되찾으면
+  /// Agent가 끝났다는 신호도 된다. 셸 제목에는 작업 디렉터리가 들어가므로
+  /// (`user@host: ~/claude-notes`) 느슨한 단어 일치는 쓰지 않는다.
+  static AgentSessionInspection inspectTitle(String title) {
+    final trimmed = title.trim();
+    final lower = trimmed.toLowerCase();
+    for (final (pattern, hint) in _confirmedPatterns) {
+      if (pattern.hasMatch(lower)) {
+        return AgentSessionInspection(
+          agentHint: hint,
+          confidence: AgentDetectionConfidence.confirmed,
+          preview: trimmed,
+        );
+      }
+    }
+    // 제목 전체가 제품명이면(TUI가 직접 설정, tmux 자동 이름) 그 Agent다.
+    for (final (pattern, hint) in _possiblePatterns) {
+      if (RegExp('^${pattern.pattern}\$').hasMatch(lower)) {
+        return AgentSessionInspection(
+          agentHint: hint,
+          confidence: AgentDetectionConfidence.confirmed,
+          preview: trimmed,
+        );
+      }
+    }
+    if (_claudeTitleGlyph.hasMatch(trimmed)) {
+      return AgentSessionInspection(
+        agentHint: 'claude',
+        confidence: AgentDetectionConfidence.possible,
+        preview: trimmed,
+      );
+    }
+    return AgentSessionInspection(
+      agentHint: 'unknown',
+      confidence: AgentDetectionConfidence.none,
+      preview: trimmed,
     );
   }
 

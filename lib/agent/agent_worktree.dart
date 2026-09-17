@@ -1,4 +1,5 @@
 import 'agent_launcher.dart';
+import 'agent_native_session.dart';
 
 enum AgentWorktreeLifecycle { provisioning, active, stranded, missing }
 
@@ -20,6 +21,10 @@ class AgentWorktreeRecord {
     required this.lifecycle,
     this.gitState = AgentWorktreeGitState.unknown,
     this.sessionId,
+    this.nativeSessionId,
+    this.executable,
+    this.initialGoal,
+    this.localSessionId,
     this.lastInspectedAt,
     this.lastError,
   });
@@ -38,6 +43,10 @@ class AgentWorktreeRecord {
   final AgentWorktreeLifecycle lifecycle;
   final AgentWorktreeGitState gitState;
   final String? sessionId;
+  final String? nativeSessionId;
+  final String? executable;
+  final String? initialGoal;
+  final String? localSessionId;
   final DateTime? lastInspectedAt;
   final String? lastError;
 
@@ -48,6 +57,8 @@ class AgentWorktreeRecord {
 
   AgentWorkspaceContext toWorkspaceContext() => AgentWorkspaceContext(
     cli: cli,
+    executable: executable,
+    initialGoal: initialGoal,
     isolatedWorktree: true,
     branchName: branchName,
     arguments: List.unmodifiable(arguments),
@@ -61,6 +72,8 @@ class AgentWorktreeRecord {
     AgentWorktreeLifecycle? lifecycle,
     AgentWorktreeGitState? gitState,
     Object? sessionId = _unchanged,
+    Object? nativeSessionId = _unchanged,
+    Object? localSessionId = _unchanged,
     Object? lastInspectedAt = _unchanged,
     Object? lastError = _unchanged,
   }) => AgentWorktreeRecord(
@@ -69,6 +82,8 @@ class AgentWorktreeRecord {
     hostAlias: hostAlias,
     groupId: groupId,
     cli: cli,
+    executable: executable,
+    initialGoal: initialGoal,
     arguments: arguments,
     branchName: branchName,
     baseRef: baseRef,
@@ -80,6 +95,12 @@ class AgentWorktreeRecord {
     sessionId: identical(sessionId, _unchanged)
         ? this.sessionId
         : sessionId as String?,
+    localSessionId: identical(localSessionId, _unchanged)
+        ? this.localSessionId
+        : localSessionId as String?,
+    nativeSessionId: identical(nativeSessionId, _unchanged)
+        ? this.nativeSessionId
+        : nativeSessionId as String?,
     lastInspectedAt: identical(lastInspectedAt, _unchanged)
         ? this.lastInspectedAt
         : lastInspectedAt as DateTime?,
@@ -94,6 +115,10 @@ class AgentWorktreeRecord {
     'hostAlias': hostAlias,
     'groupId': groupId,
     'cli': cli.name,
+    if (executable != null) 'executable': executable,
+    if (initialGoal != null) 'initialGoal': initialGoal,
+    if (nativeSessionId != null) 'nativeSessionId': nativeSessionId,
+    if (localSessionId != null) 'localSessionId': localSessionId,
     if (arguments.isNotEmpty) 'arguments': arguments,
     'branchName': branchName,
     'baseRef': baseRef,
@@ -161,6 +186,12 @@ class AgentWorktreeRecord {
       hostAlias: hostAlias,
       groupId: groupId,
       cli: cli,
+      executable: value['executable'] is String
+          ? value['executable'] as String
+          : null,
+      initialGoal: value['initialGoal'] is String
+          ? value['initialGoal'] as String
+          : null,
       arguments: rawArguments is List
           ? [
               for (final item in rawArguments)
@@ -175,6 +206,14 @@ class AgentWorktreeRecord {
       lifecycle: lifecycle,
       gitState: gitState ?? AgentWorktreeGitState.unknown,
       sessionId: sessionId is String && sessionId.isNotEmpty ? sessionId : null,
+      localSessionId: value['localSessionId'] is String
+          ? value['localSessionId'] as String
+          : null,
+      nativeSessionId:
+          value['nativeSessionId'] is String &&
+              isValidNativeAgentSessionId(value['nativeSessionId'] as String)
+          ? value['nativeSessionId'] as String
+          : null,
       lastInspectedAt: lastInspectedAt is String
           ? DateTime.tryParse(lastInspectedAt)
           : null,

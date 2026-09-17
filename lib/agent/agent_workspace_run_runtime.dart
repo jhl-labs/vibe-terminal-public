@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import '../data/models/host.dart';
+import '../local/managed_process.dart';
 
 abstract interface class AgentWorkspaceRunHandle {
   Stream<List<int>> get stdout;
@@ -44,12 +45,10 @@ class AgentWorkspaceRunRuntime {
       command: command,
       workingDirectory: workingDirectory,
     );
-    final process = await Process.start(
+    final process = await ManagedLocalProcess.start(
       invocation.executable,
       invocation.arguments,
       workingDirectory: invocation.workingDirectory,
-      runInShell: false,
-      environment: Platform.isWindows ? Platform.environment : null,
     );
     return _LocalAgentWorkspaceRunHandle(process);
   }
@@ -89,14 +88,11 @@ class AgentWorkspaceRunRuntime {
           '--',
           'sh',
           '-lc',
-          'cd ${_quotePosix(workingDirectory)} && (\n$command\n)',
+          managedPosixCommand(command, directory: workingDirectory),
         ],
       ),
     };
   }
-
-  static String _quotePosix(String value) =>
-      "'${value.replaceAll("'", "'\"'\"'")}'";
 }
 
 class _LocalRunInvocation {
@@ -114,8 +110,7 @@ class _LocalRunInvocation {
 class _LocalAgentWorkspaceRunHandle implements AgentWorkspaceRunHandle {
   _LocalAgentWorkspaceRunHandle(this._process);
 
-  final Process _process;
-  bool _stopping = false;
+  final ManagedLocalProcess _process;
 
   @override
   Stream<List<int>> get stdout => _process.stdout;
@@ -127,28 +122,5 @@ class _LocalAgentWorkspaceRunHandle implements AgentWorkspaceRunHandle {
   Future<int?> get done => _process.exitCode;
 
   @override
-  Future<void> stop() async {
-    if (_stopping) return;
-    _stopping = true;
-    if (Platform.isWindows) {
-      try {
-        await Process.run('taskkill.exe', [
-          '/PID',
-          '${_process.pid}',
-          '/T',
-          '/F',
-        ], runInShell: false).timeout(const Duration(seconds: 5));
-        await _process.exitCode.timeout(const Duration(seconds: 3));
-        return;
-      } catch (_) {
-        // 정확한 프로세스 트리 종료가 실패하면 해당 셸 프로세스를 종료한다.
-      }
-    }
-    _process.kill(ProcessSignal.sigterm);
-    try {
-      await _process.exitCode.timeout(const Duration(seconds: 3));
-    } catch (_) {
-      _process.kill(ProcessSignal.sigkill);
-    }
-  }
+  Future<void> stop() => _process.stop();
 }

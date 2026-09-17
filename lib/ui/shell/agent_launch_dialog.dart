@@ -11,6 +11,7 @@ Future<AgentLaunchSpec?> showAgentLaunchDialog(
   BuildContext context, {
   required AgentLaunchPreferences preferences,
   AgentCli initialCli = AgentCli.claude,
+  String? initialGoal,
   required AgentLaunchProfileSaver saveProfile,
   required AgentLaunchProfileRemover removeProfile,
 }) => showDialog<AgentLaunchSpec>(
@@ -18,6 +19,7 @@ Future<AgentLaunchSpec?> showAgentLaunchDialog(
   builder: (_) => _AgentLaunchDialog(
     preferences: preferences,
     initialCli: initialCli,
+    initialGoal: initialGoal,
     saveProfile: saveProfile,
     removeProfile: removeProfile,
   ),
@@ -27,12 +29,14 @@ class _AgentLaunchDialog extends StatefulWidget {
   const _AgentLaunchDialog({
     required this.preferences,
     required this.initialCli,
+    this.initialGoal,
     required this.saveProfile,
     required this.removeProfile,
   });
 
   final AgentLaunchPreferences preferences;
   final AgentCli initialCli;
+  final String? initialGoal;
   final AgentLaunchProfileSaver saveProfile;
   final AgentLaunchProfileRemover removeProfile;
 
@@ -42,6 +46,8 @@ class _AgentLaunchDialog extends StatefulWidget {
 
 class _AgentLaunchDialogState extends State<_AgentLaunchDialog> {
   final _formKey = GlobalKey<FormState>();
+  final _executableController = TextEditingController();
+  final _goalController = TextEditingController();
   late final TextEditingController _branchController;
   late final TextEditingController _argumentsController;
   final Map<AgentCli, List<String>> _argumentsByCli = {};
@@ -54,6 +60,10 @@ class _AgentLaunchDialogState extends State<_AgentLaunchDialog> {
   void initState() {
     super.initState();
     _cli = widget.initialCli;
+    _goalController.text = (widget.initialGoal ?? '').replaceAll(
+      RegExp(r'[\r\n]+'),
+      ' ',
+    );
     _isolated = widget.preferences.isolateByDefault;
     _profiles = List.of(widget.preferences.profiles);
     for (final cli in AgentCli.values) {
@@ -72,6 +82,8 @@ class _AgentLaunchDialogState extends State<_AgentLaunchDialog> {
 
   @override
   void dispose() {
+    _executableController.dispose();
+    _goalController.dispose();
     _branchController.dispose();
     _argumentsController.dispose();
     super.dispose();
@@ -82,6 +94,12 @@ class _AgentLaunchDialogState extends State<_AgentLaunchDialog> {
     Navigator.of(context).pop(
       AgentLaunchSpec(
         cli: _cli,
+        executable: _executableController.text.trim().isEmpty
+            ? null
+            : _executableController.text.trim(),
+        initialGoal: _goalController.text.trim().isEmpty
+            ? null
+            : _goalController.text.trim(),
         isolatedWorktree: _isolated,
         branchName: _isolated ? _branchController.text.trim() : null,
         arguments: _argumentsFromText(),
@@ -113,6 +131,8 @@ class _AgentLaunchDialogState extends State<_AgentLaunchDialog> {
       _selectedProfileId = profile.id;
       _cli = cli;
       _isolated = profile.isolateWorktree;
+      _executableController.text = profile.executable ?? '';
+      _goalController.text = profile.initialGoal ?? '';
       _argumentsByCli[cli] = List.of(profile.arguments);
       _argumentsController.text = profile.arguments.join('\n');
     });
@@ -133,6 +153,12 @@ class _AgentLaunchDialogState extends State<_AgentLaunchDialog> {
       id: selected?.id ?? 'agent-${DateTime.now().microsecondsSinceEpoch}',
       name: name,
       cliName: _cli.name,
+      executable: _executableController.text.trim().isEmpty
+          ? null
+          : _executableController.text.trim(),
+      initialGoal: _goalController.text.trim().isEmpty
+          ? null
+          : _goalController.text.trim(),
       arguments: List.unmodifiable(_argumentsFromText()),
       isolateWorktree: _isolated,
     );
@@ -210,6 +236,42 @@ class _AgentLaunchDialogState extends State<_AgentLaunchDialog> {
                 onSelectionChanged: (selection) => _selectCli(selection.single),
               ),
               const SizedBox(height: 16),
+              ExpansionTile(
+                title: const Text('실행 파일 · 초기 목표'),
+                tilePadding: EdgeInsets.zero,
+                children: [
+                  TextFormField(
+                    key: const ValueKey('agent-executable'),
+                    controller: _executableController,
+                    decoration: const InputDecoration(
+                      labelText: '사용자 실행 파일 (선택)',
+                      helperText: '선택한 Agent와 같은 CLI 인자를 지원하는 실행 파일 경로',
+                    ),
+                    validator: (value) =>
+                        value != null &&
+                            (value.length > 1000 ||
+                                value.contains(RegExp(r'[\r\n\x00]')))
+                        ? '실행 파일 경로가 올바르지 않습니다.'
+                        : null,
+                  ),
+                  const SizedBox(height: 8),
+                  TextFormField(
+                    key: const ValueKey('agent-initial-goal'),
+                    controller: _goalController,
+                    decoration: const InputDecoration(
+                      labelText: '초기 목표 (선택)',
+                      helperText: '새 대화 시작 시 한 번 전달합니다. 대화 재개 시 반복하지 않습니다.',
+                    ),
+                    validator: (value) =>
+                        value != null &&
+                            (value.length > 8000 ||
+                                value.contains(RegExp(r'[\r\n\x00]')))
+                        ? '목표는 한 줄, 8,000자 이내로 입력하세요.'
+                        : null,
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              ),
               TextFormField(
                 key: const ValueKey('agent-cli-arguments'),
                 controller: _argumentsController,

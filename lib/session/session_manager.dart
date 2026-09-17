@@ -10,9 +10,13 @@ import 'package:xterm/xterm.dart';
 
 import '../agent/agent_launcher.dart';
 import '../agent/agent_semantic_event.dart';
+import '../agent/agent_native_session.dart';
+import '../agent/workspace_operation_coordinator.dart';
 import '../agent/agent_conflict.dart';
 import '../agent/agent_delivery.dart';
 import '../agent/agent_delivery_runtime.dart';
+import '../agent/agent_integration.dart';
+import '../agent/agent_workspace_files.dart';
 import '../agent/agent_source_control.dart';
 import '../agent/agent_workspace_test.dart';
 import '../agent/agent_workspace_test_runtime.dart';
@@ -26,12 +30,18 @@ import '../core/result.dart';
 import '../data/models/host.dart';
 import '../data/repositories/session_log_repository.dart';
 import '../local/local_shell_paths.dart';
-import '../kubernetes/kubernetes_port_forward_service.dart';
+import '../local/local_working_directory.dart';
+import '../local/managed_process.dart';
+import '../local/daemon/client.dart';
+import '../local/daemon/autostart.dart';
+import '../kubernetes/kubernetes_exec_relay.dart';
 import '../security/host_key_store.dart';
+import '../ssh/managed_ssh_command.dart';
 import '../ssh/jump_chain.dart';
 import '../ssh/ssh_service.dart';
 import '../ssh/remote_session_identity.dart';
 import '../ssh/remote_session_catalog.dart';
+import '../ssh/remote_working_directory.dart';
 import '../ssh/remote_terminal_launcher.dart';
 import '../state/providers.dart';
 import '../terminal/logging_terminal_session_handle.dart';
@@ -57,6 +67,8 @@ class RemoteSessionActivation {
 
 /// 다중 SSH 세션 풀을 관리하는 Notifier.
 class SessionManager extends Notifier<List<SessionInfo>> {
+  final _workspaceOperations = WorkspaceOperationCoordinator();
+
   @override
   List<SessionInfo> build() {
     _agentWorktreeInitialization = ref
@@ -70,16 +82,12 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       for (final engine in _engines.values) {
         engine.dispose();
       }
-      for (final forward in _kubernetesForwards.values) {
-        unawaited(forward.close());
-      }
       for (final run in _runningWorkspaceRuns.values) {
         run.stopRequested = true;
         run.persistTimer?.cancel();
         unawaited(run.handle.stop());
       }
       _runningWorkspaceRuns.clear();
-      _kubernetesForwards.clear();
       _engines.clear();
     });
     return const [];
@@ -88,6 +96,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   int _counter = 0;
   String _genId() => 's${_counter++}';
   final Random _secureRandom = Random.secure();
+  final Set<String> _newLocalSessions = {};
+  final Map<String, String> _nativeSessionReferences = {};
   final Map<String, TerminalEngine> _engines = {};
   final Set<String> _runningWorkspaceTests = {};
   final Set<String> _runningWorkspaceDeliveries = {};
@@ -136,11 +146,11 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   /// 세션별 SSH 핸들. SFTP 등 같은 연결 위의 추가 채널에 클라이언트를 제공한다.
   final Map<String, SshSessionHandle> _sshHandles = {};
 
-  /// Kubernetes 경유 SSH 세션과 수명을 같이하는 kubectl port-forward.
-  final Map<String, KubernetesPortForwardHandle> _kubernetesForwards = {};
-
   /// 세션별 복원 메타데이터 추적기.
   final Map<String, LocalSessionStateTracker> _sessionStates = {};
+
+  /// 로컬 셸 프로세스 ID. 복제처럼 정확한 현재 경로가 필요할 때 OS에 묻는다.
+  final Map<String, int> _localShellPids = {};
 
   /// 세션별 현재 로그 id.
   final Map<String, String> _sessionLogIds = {};
@@ -148,6 +158,16 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   /// 활성 SFTP 등에서 쓸 수 있도록 세션의 SSHClient를 노출한다.
   /// 연결되어 있지 않거나 로컬 셸이면 null.
   SSHClient? sshClientFor(String id) => _sshHandles[id]?.client;
+
+  final _agentHookDiagnostics = <String, String>{};
+  String agentIntegrationDiagnostic(String workspaceId) {
+    for (final session in state) {
+      if (session.agentWorkspace?.workspaceId != workspaceId) continue;
+      final received = _agentHookDiagnostics[session.id];
+      if (received != null) return '실제 이벤트 수신: $received';
+    }
+    return '현재 앱 연결에서 수신한 이벤트가 없습니다. CLI를 다시 시작하고 /hooks 신뢰 또는 플러그인 로딩을 확인하세요.';
+  }
 
   TerminalEngine _newEngine(String id) {
     // 스크롤백은 터미널 생성 시점에 정해진다. 설정을 바꾸면 이후에 여는
@@ -160,8 +180,16 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     engine.onOutputActivity = () {
       ref
           .read(sessionActivityProvider.notifier)
-          .markActivity(id, screen: engine.recentPlainText(maxLines: 80));
+          .markActivity(
+            id,
+            readScreen: () => engine.recentPlainText(maxLines: 80),
+          );
       _schedulePersistOpenSessions();
+    };
+    // Claude Code 등은 제목에 자기 이름·대화 요약을 쓴다. 화면 문구가 스크롤로
+    // 사라져도 Agent 세션임을 알 수 있고, 셸이 제목을 되찾으면 종료로 본다.
+    engine.onTitleChange = (title) {
+      ref.read(sessionAttentionProvider.notifier).markTitle(id, title);
     };
     engine.onSidebandMessage = (message) {
       if (message.channel != AgentSemanticEvent.sidebandChannel) return;
@@ -172,6 +200,47 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       // 일반 셸과 다른 Agent 종류가 만든 marker는 상태 신호로 받아들이지 않는다.
       if (expectedProvider == null || event.provider != expectedProvider) {
         return;
+      }
+      _agentHookDiagnostics[id] =
+          '${DateTime.now().toIso8601String()} · ${event.provider} · ${event.name}';
+      final workspaceId = session?.agentWorkspace?.workspaceId;
+      final nativeId = event.providerSessionId;
+      if (workspaceId != null &&
+          nativeId != null &&
+          isValidNativeAgentSessionId(nativeId) &&
+          _nativeSessionReferences[id] != '${event.provider}:$nativeId') {
+        unawaited(
+          ref
+              .read(agentWorktreeStoreProvider)
+              .recordNativeSession(
+                workspaceId,
+                id,
+                event.provider,
+                nativeId,
+                localSessionId: session?.localSessionId,
+              )
+              .then((_) {
+                if (ref.mounted && _sessionById(id) != null) {
+                  _nativeSessionReferences[id] = '${event.provider}:$nativeId';
+                  ref
+                      .read(sessionAttentionProvider.notifier)
+                      .clearExternalBlock(id, 'native-session-storage');
+                }
+              })
+              .catchError((Object error) {
+                // 저장 실패는 세션의 화면 출력을 중단하지 않는다. 상태에서 재시도를 안내한다.
+                if (ref.mounted) {
+                  ref
+                      .read(sessionAttentionProvider.notifier)
+                      .markExternalBlocked(
+                        id,
+                        source: 'native-session-storage',
+                        message: '대화 복구 정보 저장 실패: $error',
+                        agentHint: event.provider,
+                      );
+                }
+              }),
+        );
       }
       final userIsWatching =
           ref.read(appForegroundProvider) &&
@@ -190,6 +259,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     RestoredSessionContext? restoredContext,
     String groupId = defaultSessionGroupId,
     String? remoteSessionId,
+    String? localSessionId,
     AgentWorkspaceContext? agentWorkspace,
   }) => SessionInfo(
     id: id,
@@ -199,6 +269,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     restoredContext: restoredContext,
     groupId: groupId,
     remoteSessionId: host.keepsRemoteSession ? remoteSessionId : null,
+    localSessionId: localSessionId,
     agentWorkspace: agentWorkspace,
   );
 
@@ -208,11 +279,22 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     required Future<bool> Function(String, String, String, HostKeyVerdict)
     onHostKey,
     KeyboardInteractivePrompt? onKeyboardInteractive,
+    ValueChanged<String>? onCreated,
     String? title,
     String groupId = defaultSessionGroupId,
     String? remoteSessionId,
+    String? localSessionId,
+    bool persistentLocal = true,
     AgentWorkspaceContext? agentWorkspace,
   }) async {
+    var resolvedLocalId = localSessionId;
+    if (host.isLocalShell &&
+        persistentLocal &&
+        resolvedLocalId == null &&
+        ref.read(localTerminalServiceProvider).persistentAvailable) {
+      resolvedLocalId = 'local-${await _newRemoteSessionId()}';
+      _newLocalSessions.add(resolvedLocalId);
+    }
     final resolvedRemoteSessionId = host.keepsRemoteSession
         ? (remoteSessionId?.trim().isNotEmpty == true
               ? remoteSessionId!.trim()
@@ -225,11 +307,13 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       title: title,
       groupId: groupId,
       remoteSessionId: resolvedRemoteSessionId,
+      localSessionId: resolvedLocalId,
       agentWorkspace: agentWorkspace,
     );
     final engine = session.engine;
     _configureSessionTracking(id, host, engine);
     state = [...state, session];
+    onCreated?.call(id);
     if (session.remoteSessionId != null) _persistOpenSessions();
 
     if (host.isLocalShell) {
@@ -248,11 +332,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         return id;
     }
     if (_userClosed.contains(id) || !state.any((session) => session.id == id)) {
-      await route.kubernetesForward?.close();
       return id;
-    }
-    if (route.kubernetesForward case final forward?) {
-      _kubernetesForwards[id] = forward;
     }
 
     final ssh = ref.read(sshServiceProvider);
@@ -266,7 +346,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       onHostKey: onHostKey,
       onKeyboardInteractive: onKeyboardInteractive,
       jumpHosts: route.jumpHosts,
-
+      targetSocket: route.targetSocket,
       remoteSessionId: session.remoteSessionId,
     );
 
@@ -280,7 +360,6 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         }
         await value.close();
       }
-      await _closeKubernetesForward(id);
       return id;
     }
 
@@ -310,11 +389,41 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         );
         if (!value.resumedPersistentSession) _runStartupScript(host, engine);
       case Err(:final failure):
-        await _closeKubernetesForward(id);
         _markError(id, failure);
         _persistOpenSessions();
     }
     return id;
+  }
+
+  /// 터미널 탭 없이 [host] 프로필로 인증된 SSH 연결을 연다.
+  ///
+  /// jump 체인과 Kubernetes 릴레이는 세션과 같은 규칙으로 해석하며, 릴레이
+  /// 프로세스는 연결을 닫을 때 소켓과 함께 정리된다. Port Forward처럼 저장된
+  /// 호스트를 골라 전용 연결을 여는 도구가 쓴다.
+  Future<Result<SshClientConnection>> openSshClient(
+    Host host, {
+    required HostKeyApproval onHostKey,
+    KeyboardInteractivePrompt? onKeyboardInteractive,
+  }) async {
+    if (host.isLocalShell) {
+      return const Err(UnknownFailure('로컬 셸 호스트에는 SSH 연결을 열 수 없습니다.'));
+    }
+    final _SshRoute route;
+    switch (await _openSshRoute(host)) {
+      case Ok(:final value):
+        route = value;
+      case Err(:final failure):
+        return Err(failure);
+    }
+    return ref
+        .read(sshServiceProvider)
+        .connectClient(
+          host: host,
+          onHostKey: onHostKey,
+          onKeyboardInteractive: onKeyboardInteractive,
+          jumpHosts: route.jumpHosts,
+          targetSocket: route.targetSocket,
+        );
   }
 
   Future<Result<_SshRoute>> _openSshRoute(Host host) async {
@@ -330,64 +439,70 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       };
     }
 
-    final namespace = host.kubernetesNamespace?.trim() ?? '';
-    final resource = host.kubernetesResource?.trim() ?? '';
-    final gatewayUsername = host.kubernetesUsername?.trim() ?? '';
-    if (namespace.isEmpty || resource.isEmpty || gatewayUsername.isEmpty) {
-      return const Err(
-        KubernetesFailure('Kubernetes namespace, 리소스, Pod SSH 사용자명을 확인하세요.'),
-      );
-    }
+    final spec = KubernetesRelaySpec(
+      context: host.kubernetesContext,
+      namespace: host.kubernetesNamespace?.trim() ?? '',
+      resource: host.kubernetesResource?.trim() ?? '',
+      container: host.kubernetesContainer,
+      targetHost: host.hostname.trim(),
+      targetPort: host.port,
+    );
+    final validation = spec.validate();
+    if (validation != null) return Err(KubernetesFailure(validation));
 
-    final result = await ref
-        .read(kubernetesPortForwardServiceProvider)
-        .start(
-          KubernetesPortForwardSpec(
-            context: host.kubernetesContext,
-            namespace: namespace,
-            resource: resource,
-            remotePort: host.kubernetesSshPort,
+    final relay = ref.read(kubernetesRelayServiceProvider);
+    switch (host.kubernetesGateway) {
+      case KubernetesGateway.local:
+        return Ok(
+          _SshRoute(
+            targetSocket: (_) => relay.open(spec, const LocalKubectlGateway()),
           ),
         );
-    return switch (result) {
-      Ok(:final value) => Ok(
-        _SshRoute(
-          jumpHosts: [
-            Host(
-              id: '${host.id}:kubernetes-gateway',
-              alias: '${host.alias} · $resource',
-              hostname: _kubernetesHostKeyIdentity(host, namespace, resource),
-              port: host.kubernetesSshPort,
-              username: gatewayUsername,
-              authType: host.kubernetesAuthType,
-              credentialRef: host.kubernetesCredentialRef,
-              transportHostname: value.localHost,
-              transportPort: value.localPort,
-              createdAt: host.createdAt,
-              updatedAt: host.updatedAt,
-            ),
-          ],
-          kubernetesForward: value,
+      case KubernetesGateway.wsl:
+        return Ok(
+          _SshRoute(
+            targetSocket: (_) => relay.open(spec, const WslKubectlGateway()),
+          ),
+        );
+      case KubernetesGateway.sshHost:
+        break;
+    }
+
+    final gatewayId = host.kubernetesGatewayHostId;
+    if (gatewayId == null || gatewayId.isEmpty) {
+      return const Err(KubernetesFailure('kubectl을 실행할 SSH 호스트를 선택하세요.'));
+    }
+    final lookup = ref.read(hostRepositoryProvider).getById;
+    final gateway = await lookup(gatewayId);
+    if (gateway == null) {
+      return Err(
+        KubernetesFailure('kubectl을 실행할 SSH 호스트를 찾을 수 없습니다 (id: $gatewayId)'),
+      );
+    }
+    if (gateway.connectionType != HostConnectionType.ssh) {
+      return Err(
+        KubernetesFailure(
+          '${gateway.connectionType.label} 프로필은 kubectl 게이트웨이로 쓸 수 없습니다: '
+          '${gateway.alias}',
+        ),
+      );
+    }
+    final List<Host> gatewayChain;
+    switch (await resolveJumpChain(gateway, lookup)) {
+      case Ok(:final value):
+        gatewayChain = [...value, gateway];
+      case Err(:final failure):
+        return Err(failure);
+    }
+    return Ok(
+      _SshRoute(
+        jumpHosts: gatewayChain,
+        targetSocket: (lastJump) => relay.open(
+          spec,
+          SshKubectlGateway(lastJump!, alias: gateway.alias),
         ),
       ),
-      Err(:final failure) => Err(failure),
-    };
-  }
-
-  String _kubernetesHostKeyIdentity(
-    Host host,
-    String namespace,
-    String resource,
-  ) {
-    final context = host.kubernetesContext?.trim();
-    final cluster = context == null || context.isEmpty
-        ? 'current-context'
-        : context;
-    return 'kubernetes:$cluster:$namespace:$resource';
-  }
-
-  Future<void> _closeKubernetesForward(String id) async {
-    await _kubernetesForwards.remove(id)?.close();
+    );
   }
 
   /// 실행 중인 세션의 현재 상태를 기준으로 새 세션을 만든다.
@@ -408,9 +523,25 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     if (source == null) return id;
 
     final tracker = _sessionStates[id];
-    final workingDirectory = _cleanWorkingDirectory(
-      tracker?.workingDirectory ?? source.restoredContext?.workingDirectory,
-    );
+    final sshHandle = _sshHandles[id];
+    final persistentName = sshHandle?.persistentSessionName;
+    final workingDirectory = persistentName != null
+        ? await readRemoteWorkingDirectory(
+            persistentName,
+            (command) => runManagedSshCommand(
+              sshHandle!.client,
+              command,
+              timeout: const Duration(seconds: 3),
+            ),
+          )
+        : source.host.isLocalShell
+        ? await _currentLocalWorkingDirectory(id, source)
+        : _cleanWorkingDirectory(
+            tracker != null
+                ? tracker.workingDirectory
+                : source.restoredContext?.workingDirectory,
+          );
+    if (_sessionById(id) == null) return id;
     final storedHost =
         await ref.read(hostRepositoryProvider).getById(source.host.id) ??
         source.host;
@@ -459,11 +590,14 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     var workspace = spec.toWorkspaceContext();
     if (spec.isolatedWorktree) {
       await _agentWorktreeInitialization;
-      final workingDirectory = _cleanWorkingDirectory(
-        _sessionStates[source.id]?.workingDirectory ??
-            source.restoredContext?.workingDirectory ??
-            source.host.workingDirectory,
-      );
+      final workingDirectory = source.host.isLocalShell
+          ? await _currentLocalWorkingDirectory(source.id, source) ??
+                _cleanWorkingDirectory(source.host.workingDirectory)
+          : _cleanWorkingDirectory(
+              _sessionStates[source.id]?.workingDirectory ??
+                  source.restoredContext?.workingDirectory ??
+                  source.host.workingDirectory,
+            );
       final location = await _worktreeRuntime.resolveLocation(
         host: source.host,
         preferredSessionId: source.id,
@@ -476,6 +610,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         hostAlias: source.host.alias,
         groupId: source.groupId,
         cli: spec.cli,
+        executable: spec.executable,
+        initialGoal: spec.initialGoal,
         arguments: List.unmodifiable(spec.arguments),
         branchName: spec.branchName!.trim(),
         baseRef: location.baseRef,
@@ -512,6 +648,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       final activeWorktree = worktree.copyWith(
         lifecycle: AgentWorktreeLifecycle.active,
         sessionId: launchedId,
+        localSessionId: launched?.localSessionId,
         lastError: null,
       );
       await ref.read(agentWorktreeStoreProvider).upsert(activeWorktree);
@@ -548,12 +685,197 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     return ref.read(agentWorktreeStoreProvider).all();
   }
 
+  Future<List<Host>> localScheduleHosts() async =>
+      (await ref.read(hostRepositoryProvider).getAll())
+          .where((host) => host.isLocalShell)
+          .toList();
+  Future<Map<String, dynamic>> backgroundSchedules() async {
+    final client = await ref.read(localTerminalServiceProvider).daemonClient();
+    await client.ensureStarted();
+    return Map<String, dynamic>.from(
+      await client.call('schedules.list') as Map,
+    );
+  }
+
+  Future<void> saveBackgroundSchedule(Map<String, dynamic> task) async {
+    final service = ref.read(localTerminalServiceProvider);
+    final host = await ref
+        .read(hostRepositoryProvider)
+        .getById(task['hostId'] as String);
+    if (host == null || !host.isLocalShell) throw StateError('로컬 호스트를 선택하세요.');
+    final cwd = task['workingDirectory'];
+    final launch = service.backgroundCommand(
+      cwd is String && cwd.isNotEmpty
+          ? host.copyWith(workingDirectory: cwd)
+          : host,
+      task['commandText'] as String,
+    );
+    final client = await service.daemonClient();
+    await client.ensureStarted();
+    await client.call('schedules.set', {
+      'task': {...task, 'launch': launch},
+    });
+  }
+
+  Future<void> removeBackgroundSchedule(String id) async =>
+      (await ref.read(localTerminalServiceProvider).daemonClient()).call(
+        'schedules.remove',
+        {'id': id},
+      );
+  Future<DaemonAutostart> _daemonAutostart() async {
+    final service = ref.read(localTerminalServiceProvider);
+    final client = await service.daemonClient();
+    return DaemonAutostart(
+      executable: service.daemonExecutable,
+      directory: client.directory.path,
+    );
+  }
+
+  Future<bool> backgroundAutostartEnabled() async =>
+      (await _daemonAutostart()).enabled();
+  Future<void> setBackgroundAutostart(bool enabled) async =>
+      (await _daemonAutostart()).setEnabled(enabled);
+
+  Future<List<Map<String, dynamic>>> localBackgroundSessions() async {
+    final client = await ref.read(localTerminalServiceProvider).daemonClient();
+    try {
+      return (await client.call('list') as List)
+          .map((row) => Map<String, dynamic>.from(row as Map))
+          .toList();
+    } on FileSystemException {
+      return [];
+    } on SocketException {
+      await client.ensureStarted();
+      return (await client.call('list') as List)
+          .map((row) => Map<String, dynamic>.from(row as Map))
+          .toList();
+    }
+  }
+
+  Future<String> attachLocalBackgroundSession(
+    Map<String, dynamic> entry, {
+    required Future<bool> Function(String, String, String, HostKeyVerdict)
+    onHostKey,
+  }) async {
+    final localId = entry['id'] as String;
+    for (final session in state) {
+      if (session.localSessionId == localId &&
+          session.status == SessionStatus.connected) {
+        return session.id;
+      }
+    }
+    final host = await ref
+        .read(hostRepositoryProvider)
+        .getById(entry['hostId'] as String);
+    if (host == null || !host.isLocalShell) {
+      throw StateError('원래 로컬 호스트 설정을 찾을 수 없습니다.');
+    }
+    return openSession(host, onHostKey: onHostKey, localSessionId: localId);
+  }
+
+  Future<void> terminateLocalBackgroundSession(String localId) async {
+    final client = await ref.read(localTerminalServiceProvider).daemonClient();
+    await client.call('terminate', {'id': localId});
+    for (final session in state.toList()) {
+      if (session.localSessionId == localId) closeSession(session.id);
+    }
+  }
+
   Future<Host> agentWorkspaceHost(String workspaceId) async {
     await _agentWorktreeInitialization;
     final entry = await ref.read(agentWorktreeStoreProvider).find(workspaceId);
     if (entry == null) throw StateError('Agent 작업공간 기록을 찾을 수 없습니다.');
     return _hostForWorktree(entry);
   }
+
+  Future<Object?> _agentFiles(
+    String workspaceId,
+    Map<String, Object?> request,
+  ) async {
+    await _agentWorktreeInitialization;
+    final entry = await ref.read(agentWorktreeStoreProvider).find(workspaceId);
+    if (entry == null) throw StateError('Agent 작업공간 기록을 찾을 수 없습니다.');
+    return _worktreeRuntime.workspaceFiles(
+      entry: entry,
+      host: await _hostForWorktree(entry),
+      request: request,
+    );
+  }
+
+  Future<List<AgentWorkspaceFileEntry>> agentWorkspaceFiles(
+    String workspaceId,
+    String directory,
+  ) async {
+    final rows =
+        await _agentFiles(workspaceId, {'action': 'list', 'path': directory})
+            as List;
+    return [
+      for (final row in rows)
+        AgentWorkspaceFileEntry(
+          path: row['path'] as String,
+          name: row['name'] as String,
+          kind: row['kind'] as String,
+          size: row['size'] as int,
+        ),
+    ];
+  }
+
+  Future<AgentWorkspaceFileContent> readAgentWorkspaceFile(
+    String workspaceId,
+    String path,
+  ) async => _fileContent(
+    await _agentFiles(workspaceId, {'action': 'read', 'path': path}) as Map,
+  );
+
+  Future<AgentWorkspaceFileContent> writeAgentWorkspaceFile(
+    String workspaceId,
+    String path,
+    String text,
+    String? revision,
+  ) => _workspaceOperations.run(
+    'workspace:$workspaceId',
+    '파일 저장',
+    () async => _fileContent(
+      await _agentFiles(workspaceId, {
+            'action': 'write',
+            'path': path,
+            'contentBase64': base64Encode(utf8.encode(text)),
+            'revision': revision,
+          })
+          as Map,
+    ),
+  );
+
+  AgentWorkspaceFileContent _fileContent(Map row) => AgentWorkspaceFileContent(
+    path: row['path'] as String,
+    text: row['text'] as String,
+    revision: row['revision'] as String,
+    editable: row['editable'] == true,
+    imageBase64: row['imageBase64'] as String?,
+    truncated: row['truncated'] == true,
+  );
+
+  Future<AgentIntegrationPlan> agentIntegration(
+    String workspaceId, {
+    bool remove = false,
+    AgentIntegrationPlan? approved,
+  }) =>
+      _workspaceOperations.run('workspace:$workspaceId', 'CLI 연동 설정', () async {
+        await _agentWorktreeInitialization;
+        final entry = await ref
+            .read(agentWorktreeStoreProvider)
+            .find(workspaceId);
+        if (entry == null) throw StateError('Agent 작업공간 기록을 찾을 수 없습니다.');
+        if (approved != null && approved.remove != remove) {
+          throw StateError('검토한 작업과 일치하지 않습니다.');
+        }
+        return _worktreeRuntime.configureIntegration(
+          entry: entry,
+          host: await _hostForWorktree(entry),
+          remove: remove,
+          expectedRevision: approved?.revision,
+        );
+      });
 
   Future<AgentSourceControlSnapshot> agentSourceControl(
     String workspaceId,
@@ -568,6 +890,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     final snapshot = await _worktreeRuntime.sourceControlSnapshot(
       entry: entry,
       host: host,
+      captureReview: true,
     );
     _syncWorkspaceConflictAttention(
       entry,
@@ -617,19 +940,42 @@ class SessionManager extends Notifier<List<SessionInfo>> {
 
   Future<AgentFileDiff> agentFileDiff(
     String workspaceId,
-    AgentFileChange change,
-  ) async {
+    AgentFileChange change, {
+    AgentSourceControlSnapshot? reviewedSnapshot,
+  }) async {
     await _agentWorktreeInitialization;
     final entry = await ref.read(agentWorktreeStoreProvider).find(workspaceId);
     if (entry == null) throw StateError('Agent 작업공간 기록을 찾을 수 없습니다.');
     final host = await _hostForWorktree(entry);
-    return _worktreeRuntime.fileDiff(entry: entry, host: host, change: change);
+    return _worktreeRuntime.fileDiff(
+      entry: entry,
+      host: host,
+      change: change,
+      reviewedSnapshot: reviewedSnapshot,
+    );
   }
 
   Future<AgentCommitResult> commitAgentChanges(
     String workspaceId, {
     required Set<String> selectedPaths,
     required String message,
+    AgentSourceControlSnapshot? reviewedSnapshot,
+  }) => _workspaceOperations.run(
+    'workspace:$workspaceId',
+    '커밋',
+    () => _commitAgentChanges(
+      workspaceId,
+      selectedPaths: selectedPaths,
+      message: message,
+      reviewedSnapshot: reviewedSnapshot,
+    ),
+  );
+
+  Future<AgentCommitResult> _commitAgentChanges(
+    String workspaceId, {
+    required Set<String> selectedPaths,
+    required String message,
+    AgentSourceControlSnapshot? reviewedSnapshot,
   }) async {
     await _agentWorktreeInitialization;
     if (_runningWorkspaceTests.contains(workspaceId)) {
@@ -647,6 +993,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       host: host,
       selectedPaths: selectedPaths,
       message: message,
+      reviewedSnapshot: reviewedSnapshot,
     );
     await inspectAgentWorktree(workspaceId);
     return result;
@@ -675,6 +1022,15 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   }
 
   Future<AgentWorkspaceTestResult> runAgentWorkspaceTest(
+    String workspaceId,
+    String command,
+  ) => _workspaceOperations.run(
+    'workspace:$workspaceId',
+    '테스트',
+    () => _runAgentWorkspaceTest(workspaceId, command),
+  );
+
+  Future<AgentWorkspaceTestResult> _runAgentWorkspaceTest(
     String workspaceId,
     String command,
   ) async {
@@ -800,6 +1156,15 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   Future<AgentWorkspaceRunRecord> startAgentWorkspaceRun(
     String workspaceId,
     String command,
+  ) => _workspaceOperations.run(
+    'workspace:$workspaceId',
+    '실행',
+    () => _startAgentWorkspaceRun(workspaceId, command),
+  );
+
+  Future<AgentWorkspaceRunRecord> _startAgentWorkspaceRun(
+    String workspaceId,
+    String command,
   ) async {
     await _agentWorktreeInitialization;
     final normalizedCommand = command.trim();
@@ -886,14 +1251,30 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   Future<AgentWorkspaceRunRecord> restartAgentWorkspaceRun(
     String workspaceId,
     String command,
+  ) => _workspaceOperations.run(
+    'workspace:$workspaceId',
+    '재시작',
+    () => _restartAgentWorkspaceRun(workspaceId, command),
+  );
+
+  Future<AgentWorkspaceRunRecord> _restartAgentWorkspaceRun(
+    String workspaceId,
+    String command,
   ) async {
     if (_runningWorkspaceRuns.containsKey(workspaceId)) {
-      await stopAgentWorkspaceRun(workspaceId);
+      await _stopAgentWorkspaceRun(workspaceId);
     }
-    return startAgentWorkspaceRun(workspaceId, command);
+    return _startAgentWorkspaceRun(workspaceId, command);
   }
 
-  Future<void> stopAgentWorkspaceRun(String workspaceId) async {
+  Future<void> stopAgentWorkspaceRun(String workspaceId) =>
+      _workspaceOperations.run(
+        'workspace:$workspaceId',
+        '중지',
+        () => _stopAgentWorkspaceRun(workspaceId),
+      );
+
+  Future<void> _stopAgentWorkspaceRun(String workspaceId) async {
     final managed = _runningWorkspaceRuns[workspaceId];
     if (managed == null) return;
     managed.stopRequested = true;
@@ -1009,33 +1390,60 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     }
   }
 
-  Future<AgentDeliveryResult> mergeAgentWorkspace(String workspaceId) =>
-      _runAgentDelivery(
-        workspaceId,
-        (entry, host) =>
-            _deliveryRuntime.mergeFastForward(entry: entry, host: host),
-        inspectAfter: true,
-      );
+  Future<AgentDeliveryResult> mergeAgentWorkspace(
+    String workspaceId, {
+    AgentDeliveryPreview? expected,
+  }) => _runAgentDelivery(
+    workspaceId,
+    (entry, host) => _deliveryRuntime.mergeFastForward(
+      entry: entry,
+      host: host,
+      expected: expected,
+    ),
+    inspectAfter: true,
+  );
 
-  Future<AgentDeliveryResult> pushAgentWorkspace(String workspaceId) =>
-      _runAgentDelivery(
-        workspaceId,
-        (entry, host) => _deliveryRuntime.pushBranch(entry: entry, host: host),
-      );
+  Future<AgentDeliveryResult> pushAgentWorkspace(
+    String workspaceId, {
+    AgentDeliveryPreview? expected,
+  }) => _runAgentDelivery(
+    workspaceId,
+    (entry, host) => _deliveryRuntime.pushBranch(
+      entry: entry,
+      host: host,
+      expected: expected,
+    ),
+  );
 
   Future<AgentDeliveryResult> createAgentPullRequest(
     String workspaceId,
-    AgentPullRequestDraft draft,
-  ) => _runAgentDelivery(
+    AgentPullRequestDraft draft, {
+    AgentDeliveryPreview? expected,
+  }) => _runAgentDelivery(
     workspaceId,
     (entry, host) => _deliveryRuntime.createPullRequest(
       entry: entry,
       host: host,
       draft: draft,
+      expected: expected,
     ),
   );
 
   Future<T> _runAgentDelivery<T>(
+    String workspaceId,
+    Future<T> Function(AgentWorktreeRecord entry, Host host) action, {
+    bool inspectAfter = false,
+  }) => _workspaceOperations.run(
+    'workspace:$workspaceId',
+    '전달',
+    () => _runAgentDeliveryLocked(
+      workspaceId,
+      action,
+      inspectAfter: inspectAfter,
+    ),
+  );
+
+  Future<T> _runAgentDeliveryLocked<T>(
     String workspaceId,
     Future<T> Function(AgentWorktreeRecord entry, Host host) action, {
     bool inspectAfter = false,
@@ -1064,7 +1472,11 @@ class SessionManager extends Notifier<List<SessionInfo>> {
           .find(workspaceId);
       if (entry == null) throw StateError('Agent 작업공간 기록을 찾을 수 없습니다.');
       final host = await _hostForWorktree(entry);
-      final result = await action(entry, host);
+      final result = await _workspaceOperations.run(
+        'repository:${entry.hostId}:${entry.repositoryRoot}',
+        '저장소 전달',
+        () => action(entry, host),
+      );
       if (inspectAfter) await inspectAgentWorktree(workspaceId);
       return result;
     } finally {
@@ -1129,6 +1541,22 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     String workspaceId, {
     required Future<bool> Function(String, String, String, HostKeyVerdict)
     onHostKey,
+    bool allowNewConversation = false,
+  }) => _workspaceOperations.run(
+    'workspace:$workspaceId',
+    '재개',
+    () => _resumeAgentWorktree(
+      workspaceId,
+      onHostKey: onHostKey,
+      allowNewConversation: allowNewConversation,
+    ),
+  );
+
+  Future<String> _resumeAgentWorktree(
+    String workspaceId, {
+    required Future<bool> Function(String, String, String, HostKeyVerdict)
+    onHostKey,
+    bool allowNewConversation = false,
   }) async {
     await _agentWorktreeInitialization;
     final store = ref.read(agentWorktreeStoreProvider);
@@ -1149,6 +1577,20 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       }
     }
 
+    if (entry.localSessionId != null) {
+      final background = await localBackgroundSessions();
+      final alive = background.any(
+        (row) => row['id'] == entry!.localSessionId && row['exitCode'] == null,
+      );
+      if (!alive) {
+        if (entry.nativeSessionId == null && !allowNewConversation) {
+          throw StateError('이전 로컬 프로세스가 종료되었고 대화 ID가 없습니다. 새 대화로 열기를 선택하세요.');
+        }
+        entry = entry.copyWith(localSessionId: null);
+        await store.upsert(entry);
+      }
+    }
+    final restoringLocalProcess = entry.localSessionId != null;
     final host = await _hostForWorktree(entry);
     ref
         .read(sessionGroupProvider.notifier)
@@ -1168,6 +1610,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         onHostKey: onHostKey,
         title: '${entry.cli.label} · ${entry.branchName}',
         groupId: entry.groupId,
+        localSessionId: entry.localSessionId,
         agentWorkspace: entry.toWorkspaceContext(),
       );
       final opened = _sessionById(sessionId);
@@ -1177,9 +1620,11 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       session = opened!;
     }
 
+    entry = await store.find(workspaceId) ?? entry;
     entry = entry.copyWith(
       lifecycle: AgentWorktreeLifecycle.active,
       sessionId: sessionId,
+      localSessionId: session.localSessionId,
       lastError: null,
     );
     await store.upsert(entry);
@@ -1194,6 +1639,15 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       throw StateError('worktree 경로가 더 이상 존재하지 않습니다.');
     }
 
+    if (restoringLocalProcess && session.localSessionId != null) {
+      // 재연결한 daemon PTY에는 이미 CLI가 실행 중이다.
+      final rows = await localBackgroundSessions();
+      if (rows.any(
+        (row) => row['id'] == session.localSessionId && row['exitCode'] == null,
+      )) {
+        return sessionId;
+      }
+    }
     // tmux가 복원한 원격 세션에는 기존 Agent 프로세스가 이미 살아 있다.
     // 같은 CLI를 중복 실행하지 않고 해당 탭을 활성화하는 것으로 재개한다.
     if (!session.host.isLocalShell &&
@@ -1201,9 +1655,23 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       return sessionId;
     }
 
+    if (entry.nativeSessionId == null && !allowNewConversation) {
+      closeSession(sessionId);
+      throw StateError('저장된 대화 ID가 없습니다. 새 대화로 작업공간을 여는 동작을 선택해 주세요.');
+    }
     final shell = _agentShellFlavor(session.host);
     final invocation = const AgentLaunchCommandBuilder().invocation(
-      AgentLaunchSpec(cli: entry.cli, arguments: entry.arguments),
+      AgentLaunchSpec(
+        cli: entry.cli,
+        executable: entry.executable,
+        arguments: entry.nativeSessionId == null
+            ? entry.arguments
+            : nativeAgentResumeArguments(
+                entry.cli,
+                entry.nativeSessionId!,
+                entry.arguments,
+              ),
+      ),
       shell,
     );
     if (!session.host.isLocalShell) {
@@ -1218,7 +1686,95 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   }
 
   /// clean + merged인 중단 worktree만 제거한다. 브랜치는 보존한다.
-  Future<void> cleanupAgentWorktree(String workspaceId) async {
+  Future<String> agentWorkspaceMergeFingerprint(String id) async {
+    final entry = await ref.read(agentWorktreeStoreProvider).find(id);
+    if (entry == null) throw StateError('Workspace not found');
+    return (await _worktreeRuntime.workspaceTestContext(
+      entry: entry,
+      host: await _hostForWorktree(entry),
+    )).workspaceFingerprint;
+  }
+
+  Future<void> abortAgentWorkspaceMerge(
+    String id,
+    String expectedFingerprint,
+  ) => _workspaceOperations.run('workspace:$id', 'Merge abort', () async {
+    final entry = await ref.read(agentWorktreeStoreProvider).find(id);
+    if (entry == null) throw StateError('Workspace not found');
+    await _worktreeRuntime.abortMerge(
+      entry: entry,
+      host: await _hostForWorktree(entry),
+      expectedFingerprint: expectedFingerprint,
+    );
+  });
+
+  Future<List<Map<String, dynamic>>> agentWorkspaceIssues(String id) async {
+    final entry = await ref.read(agentWorktreeStoreProvider).find(id);
+    if (entry == null) throw StateError('작업공간을 찾을 수 없습니다.');
+    return _deliveryRuntime.issues(
+      entry: entry,
+      host: await _hostForWorktree(entry),
+    );
+  }
+
+  Future<AgentDeliveryResult> integrateAgentWorkspaceBase(
+    String id,
+    AgentDeliveryPreview expected,
+  ) => _workspaceOperations.run('workspace:$id', '기준 브랜치 병합', () async {
+    final entry = await ref.read(agentWorktreeStoreProvider).find(id);
+    if (entry == null) throw StateError('작업공간을 찾을 수 없습니다.');
+    return _deliveryRuntime.integrateBase(
+      entry: entry,
+      host: await _hostForWorktree(entry),
+      expected: expected,
+    );
+  });
+
+  Future<void> markAgentWorkspaceFileDeleted(
+    String id,
+    AgentWorkspaceFileContent file,
+  ) => _workspaceOperations.run('workspace:$id', 'Resolve deletion', () async {
+    await _agentFiles(id, {
+      'action': 'resolveDelete',
+      'path': file.path,
+      'revision': file.revision,
+    });
+  });
+  Future<void> markAgentWorkspaceMissingResolved(
+    String id,
+    String path,
+    List<List<Object>> stages,
+  ) => _workspaceOperations.run(
+    'workspace:$id',
+    'Resolve missing file',
+    () async {
+      await _agentFiles(id, {
+        'action': 'resolveMissing',
+        'path': path,
+        'stages': stages,
+      });
+    },
+  );
+
+  Future<void> markAgentWorkspaceFileResolved(
+    String id,
+    AgentWorkspaceFileContent file,
+  ) => _workspaceOperations.run('workspace:$id', '충돌 해결 표시', () async {
+    await _agentFiles(id, {
+      'action': 'resolve',
+      'path': file.path,
+      'revision': file.revision,
+    });
+  });
+
+  Future<void> cleanupAgentWorktree(String workspaceId) =>
+      _workspaceOperations.run(
+        'workspace:$workspaceId',
+        '정리',
+        () => _cleanupAgentWorktree(workspaceId),
+      );
+
+  Future<void> _cleanupAgentWorktree(String workspaceId) async {
     if (_runningWorkspaceTests.contains(workspaceId)) {
       throw StateError('테스트가 끝난 뒤 worktree를 정리해 주세요.');
     }
@@ -1238,6 +1794,15 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       throw StateError('이 worktree를 사용하는 세션을 먼저 닫아 주세요.');
     }
     final inspected = await inspectAgentWorktree(workspaceId);
+    if (inspected.localSessionId != null) {
+      final background = await localBackgroundSessions();
+      if (background.any(
+        (row) =>
+            row['id'] == inspected.localSessionId && row['exitCode'] == null,
+      )) {
+        throw StateError('로컬 백그라운드 작업을 먼저 종료한 뒤 worktree를 정리해 주세요.');
+      }
+    }
     if (inspected.lifecycle == AgentWorktreeLifecycle.active) {
       throw StateError('실행 중인 Agent 세션을 먼저 닫아 주세요.');
     }
@@ -1290,9 +1855,10 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       throw StateError('${host.alias}에 연결된 세션이 필요합니다.');
     }
 
-    final remoteCommand =
-        'cd ${_posixWorkingDirectoryArgument(workingDirectory)} && '
-        '(\n$command\n)';
+    final remoteCommand = managedPosixCommand(
+      command,
+      directory: workingDirectory,
+    );
     final remoteSession = await handle.client.execute(remoteCommand);
     final stdout = AgentBoundedOutputCollector(
       AgentWorkspaceTestRuntime.maximumOutputCharacters ~/ 2,
@@ -1302,12 +1868,19 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     )..listen(remoteSession.stderr);
     var timedOut = false;
     try {
-      await remoteSession.done.timeout(timeout);
-      await Future.wait([stdout.done, stderr.done]);
+      await Future.wait([
+        remoteSession.done,
+        stdout.done,
+        stderr.done,
+      ]).timeout(timeout);
     } on TimeoutException {
       timedOut = true;
       remoteSession.kill(SSHSignal.TERM);
-      await Future<void>.delayed(const Duration(milliseconds: 300));
+      try {
+        await remoteSession.done.timeout(const Duration(seconds: 3));
+      } on TimeoutException {
+        remoteSession.kill(SSHSignal.KILL);
+      }
       remoteSession.close();
       await stdout.cancel();
       await stderr.cancel();
@@ -1342,9 +1915,10 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     if (handle == null) {
       throw StateError('${host.alias}에 연결된 세션이 필요합니다.');
     }
-    final remoteCommand =
-        'cd ${_posixWorkingDirectoryArgument(workingDirectory)} && '
-        '(\n$command\n)';
+    final remoteCommand = managedPosixCommand(
+      command,
+      directory: workingDirectory,
+    );
     final session = await handle.client.execute(remoteCommand);
     return _RemoteAgentWorkspaceRunHandle(session);
   }
@@ -1395,13 +1969,15 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       ],
       for (final argument in arguments) _quotePosixShellWord(argument),
     ].join(' ');
-    final result = await handle.client
-        .runWithResult(command)
-        .timeout(const Duration(seconds: 45));
+    final result = await runManagedSshCommand(
+      handle.client,
+      command,
+      timeout: const Duration(seconds: 45),
+    );
     return AgentGitResult(
-      exitCode: result.exitCode ?? -1,
-      stdout: utf8.decode(result.stdout, allowMalformed: true),
-      stderr: utf8.decode(result.stderr, allowMalformed: true),
+      exitCode: result.exitCode,
+      stdout: result.stdout as String,
+      stderr: result.stderr as String,
     );
   }
 
@@ -1436,11 +2012,15 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     final command = directory == null || directory.isEmpty
         ? invocation
         : 'cd ${_posixWorkingDirectoryArgument(directory)} && $invocation';
-    final result = await handle.client.runWithResult(command).timeout(timeout);
+    final result = await runManagedSshCommand(
+      handle.client,
+      command,
+      timeout: timeout,
+    );
     return AgentDeliveryProcessResult(
-      exitCode: result.exitCode ?? -1,
-      stdout: utf8.decode(result.stdout, allowMalformed: true),
-      stderr: utf8.decode(result.stderr, allowMalformed: true),
+      exitCode: result.exitCode,
+      stdout: result.stdout as String,
+      stderr: result.stderr as String,
     );
   }
 
@@ -1552,6 +2132,31 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     return cleaned == null || cleaned.isEmpty ? null : cleaned;
   }
 
+  /// 로컬 셸의 현재 작업 디렉터리를 결정한다.
+  ///
+  /// 키 입력 추적기는 자동완성·히스토리 뒤에 경로를 잃으므로, 살아 있는
+  /// 프로세스가 있으면 OS에서 읽은 값을 우선하고 추적기도 그 값으로 맞춘다.
+  /// OS 조회가 불가능하면(Windows, 프로세스 종료) 추적기 값으로 돌아간다.
+  Future<String?> _currentLocalWorkingDirectory(
+    String id,
+    SessionInfo source,
+  ) async {
+    final tracker = _sessionStates[id];
+    final pid = _localShellPids[id];
+    if (pid != null) {
+      final actual = await readLocalWorkingDirectory(pid);
+      if (actual != null) {
+        tracker?.syncWorkingDirectory(actual);
+        return actual;
+      }
+    }
+    return _cleanWorkingDirectory(
+      tracker != null
+          ? tracker.workingDirectory
+          : source.restoredContext?.workingDirectory,
+    );
+  }
+
   /// Android가 Activity/Flutter 상태를 재생성하면 인메모리 세션 목록과 SSH
   /// 소켓은 사라진다. 마지막으로 연결됐던 원격 세션 탭을 복원하고, 이미 핀된
   /// 호스트키가 일치하는 경우에만 자동 재연결한다.
@@ -1601,12 +2206,13 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         title: entry.title,
         restoredContext: restoredContext,
         groupId: entry.groupId,
+        localSessionId: entry.localSessionId,
         remoteSessionId: sessionHost.keepsRemoteSession
             ? entry.remoteSessionId
             : null,
         agentWorkspace: entry.agentWorkspace,
       );
-      if (!sessionHost.keepsRemoteSession) {
+      if (!sessionHost.keepsRemoteSession && entry.localSessionId == null) {
         session.engine.restorePlainText(entry.terminalText);
       }
       _configureSessionTracking(
@@ -1671,14 +2277,35 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     final remoteSessionId = session.remoteSessionId;
 
     closeSession(id);
-    return openSession(
+    final retriedId = await openSession(
       host,
       onHostKey: onHostKey,
       onKeyboardInteractive: onKeyboardInteractive,
       title: title,
       groupId: session.groupId,
       remoteSessionId: remoteSessionId,
+      localSessionId: session.localSessionId,
+      persistentLocal: session.localSessionId != null,
+      agentWorkspace: session.agentWorkspace,
     );
+    final workspaceId = session.agentWorkspace?.workspaceId;
+    if (workspaceId != null) {
+      final store = ref.read(agentWorktreeStoreProvider);
+      final entry = await store.find(workspaceId);
+      if (entry != null) {
+        await store.upsert(
+          entry.copyWith(
+            sessionId: retriedId,
+            localSessionId: _sessionById(retriedId)?.localSessionId,
+            lifecycle:
+                _sessionById(retriedId)?.status == SessionStatus.connected
+                ? AgentWorktreeLifecycle.active
+                : AgentWorktreeLifecycle.stranded,
+          ),
+        );
+      }
+    }
+    return retriedId;
   }
 
   /// 호스트에 등록된 시작 스크립트가 있으면 세션 연결 직후 한 번 실행한다.
@@ -1724,24 +2351,53 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     bool runStartupScript = true,
   }) async {
     final local = ref.read(localTerminalServiceProvider);
-    final result = await local.start(
-      host: host,
-      cols: engine.terminal.viewWidth,
-      rows: engine.terminal.viewHeight,
-    );
+    final localId = _sessionById(id)?.localSessionId;
+    final result = localId == null
+        ? await local.start(
+            host: host,
+            cols: engine.terminal.viewWidth,
+            rows: engine.terminal.viewHeight,
+          )
+        : await local.startPersistent(
+            host: host,
+            cols: engine.terminal.viewWidth,
+            rows: engine.terminal.viewHeight,
+            id: localId,
+            create: _newLocalSessions.contains(localId),
+          );
     switch (result) {
       case Ok(:final value):
+        if (localId != null) _newLocalSessions.remove(localId);
+        final pid = value is LocalProcessSessionHandle ? value.pid : null;
+        if (pid != null) {
+          _localShellPids[id] = pid;
+        } else {
+          _localShellPids.remove(id);
+        }
         final handle = await _withSessionLogging(id, host, value);
         engine.attach(
           handle,
           onClosed: () {
+            // 종료된 pid는 다른 프로세스가 재사용할 수 있으므로 더는 묻지 않는다.
+            _localShellPids.remove(id);
             _markStatus(id, SessionStatus.disconnected);
             _persistOpenSessions();
           },
         );
+        if (value is DaemonTerminalHandle) {
+          try {
+            await value.ready.timeout(const Duration(seconds: 30));
+          } catch (error) {
+            _markError(id, UnknownFailure('로컬 화면 복구 실패: $error'));
+            return;
+          }
+        }
         _markStatus(id, SessionStatus.connected);
         _persistOpenSessions();
-        if (runStartupScript) _runStartupScript(host, engine);
+        if (runStartupScript &&
+            !(value is DaemonTerminalHandle && value.resumed)) {
+          _runStartupScript(host, engine);
+        }
       case Err(:final failure):
         _markError(id, failure);
         _persistOpenSessions();
@@ -1795,7 +2451,6 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         .record(id, SessionEventType.dropped);
     final staleHandle = _sshHandles.remove(id);
     if (staleHandle != null) unawaited(staleHandle.close());
-    unawaited(_closeKubernetesForward(id));
     _markStatus(id, SessionStatus.disconnected);
     _scheduleReconnect(id);
   }
@@ -1917,10 +2572,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     }
     if (session == null) return;
 
-    if (session.host.authType == HostAuthType.keyboardInteractive ||
-        (session.host.isKubernetesSsh &&
-            session.host.kubernetesAuthType ==
-                HostAuthType.keyboardInteractive)) {
+    if (session.host.authType == HostAuthType.keyboardInteractive) {
       _markError(id, const AuthFailure('추가 인증 응답이 필요합니다. 수동으로 재시도하세요.'));
       _persistOpenSessions();
       return;
@@ -1931,7 +2583,6 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         .read(sessionDiagnosticsProvider.notifier)
         .record(id, SessionEventType.reconnectAttempt);
 
-    await _closeKubernetesForward(id);
     final routeResult = await _openSshRoute(session.host);
     final _SshRoute route;
     switch (routeResult) {
@@ -1944,11 +2595,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         return;
     }
     if (_userClosed.contains(id) || !state.any((item) => item.id == id)) {
-      await route.kubernetesForward?.close();
       return;
-    }
-    if (route.kubernetesForward case final forward?) {
-      _kubernetesForwards[id] = forward;
     }
 
     final ssh = ref.read(sshServiceProvider);
@@ -1961,7 +2608,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       onHostKey: (_, _, _, verdict) async =>
           verdict == HostKeyVerdict.trustedKnown,
       jumpHosts: route.jumpHosts,
-
+      targetSocket: route.targetSocket,
       remoteSessionId: session.remoteSessionId,
     );
 
@@ -1970,7 +2617,6 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       if (result case Ok(:final value)) {
         await value.close();
       }
-      await _closeKubernetesForward(id);
       return;
     }
 
@@ -2006,7 +2652,6 @@ class SessionManager extends Notifier<List<SessionInfo>> {
           _runStartupScript(session.host, session.engine);
         }
       case Err():
-        await _closeKubernetesForward(id);
         // 다시 끊김 상태로 두고 백오프 재시도.
         _markStatus(id, SessionStatus.disconnected);
         _scheduleReconnect(id);
@@ -2132,6 +2777,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   /// 작업 이어가기가 켜진 세션의 원격 작업을 끝내려면 먼저
   /// [terminatePersistentSession]을 호출해야 한다.
   void closeSession(String id) {
+    _nativeSessionReferences.remove(id);
     final closing = _sessionById(id);
     final workspaceId = closing?.agentWorkspace?.workspaceId;
     if (workspaceId != null) {
@@ -2142,8 +2788,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     _reconnectTimers.remove(id)?.cancel();
     _reconnectAttempts.remove(id);
     _sshHandles.remove(id);
-    unawaited(_closeKubernetesForward(id));
     _sessionStates.remove(id);
+    _localShellPids.remove(id);
     _sessionLogIds.remove(id);
     ref.read(sessionActivityProvider.notifier).remove(id);
     ref.read(sessionDiagnosticsProvider.notifier).remove(id);
@@ -2461,6 +3107,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
               title: session.title,
               groupId: session.groupId,
               remoteSessionId: session.remoteSessionId,
+              localSessionId: session.localSessionId,
               agentWorkspace: session.agentWorkspace,
               terminalText: _terminalTextForRestore(session),
               currentWorkingDirectory:
@@ -2690,8 +3337,10 @@ class _RemoteAgentWorkspaceRunHandle implements AgentWorkspaceRunHandle {
 }
 
 class _SshRoute {
-  const _SshRoute({this.jumpHosts = const [], this.kubernetesForward});
+  const _SshRoute({this.jumpHosts = const [], this.targetSocket});
 
   final List<Host> jumpHosts;
-  final KubernetesPortForwardHandle? kubernetesForward;
+
+  /// Kubernetes 릴레이처럼 마지막 홉의 스트림을 대신 여는 전송. null이면 기본.
+  final SshTargetSocketOpener? targetSocket;
 }

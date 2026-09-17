@@ -10,16 +10,26 @@ Future<void> showAgentConflictDialog(
   BuildContext context, {
   required AgentWorktreeRecord worktree,
   required AgentConflictLoader load,
+  Future<void> Function(AgentConflictFile)? resolveMissing,
 }) => showDialog<void>(
   context: context,
-  builder: (_) => _AgentConflictDialog(worktree: worktree, load: load),
+  builder: (_) => _AgentConflictDialog(
+    worktree: worktree,
+    load: load,
+    resolveMissing: resolveMissing,
+  ),
 );
 
 class _AgentConflictDialog extends StatefulWidget {
-  const _AgentConflictDialog({required this.worktree, required this.load});
+  const _AgentConflictDialog({
+    required this.worktree,
+    required this.load,
+    this.resolveMissing,
+  });
 
   final AgentWorktreeRecord worktree;
   final AgentConflictLoader load;
+  final Future<void> Function(AgentConflictFile)? resolveMissing;
 
   @override
   State<_AgentConflictDialog> createState() => _AgentConflictDialogState();
@@ -127,10 +137,36 @@ class _AgentConflictDialogState extends State<_AgentConflictDialog> {
                     onRetry: () => setState(_reload),
                   );
                 }
-                return _ConflictWorkspace(
-                  snapshot: data,
-                  selectedPath: _selectedPath ?? data.allPaths.first,
-                  onSelect: (path) => setState(() => _selectedPath = path),
+                final selected = data.unresolvedFiles
+                    .where((file) => file.path == _selectedPath)
+                    .firstOrNull;
+                return Column(
+                  children: [
+                    if (widget.resolveMissing != null && selected != null)
+                      TextButton(
+                        onPressed: () async {
+                          try {
+                            await widget.resolveMissing!(selected);
+                            if (mounted) setState(_reload);
+                          } catch (error) {
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(
+                                context,
+                              ).showSnackBar(SnackBar(content: Text('$error')));
+                            }
+                          }
+                        },
+                        child: const Text('없는 파일을 삭제로 해결 표시'),
+                      ),
+                    Expanded(
+                      child: _ConflictWorkspace(
+                        snapshot: data,
+                        selectedPath: _selectedPath ?? data.allPaths.first,
+                        onSelect: (path) =>
+                            setState(() => _selectedPath = path),
+                      ),
+                    ),
+                  ],
                 );
               },
             ),

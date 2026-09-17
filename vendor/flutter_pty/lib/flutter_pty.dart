@@ -10,6 +10,20 @@ import 'package:flutter_pty/src/flutter_pty_bindings_generated.dart';
 const _libName = 'flutter_pty';
 
 final DynamicLibrary _dylib = () {
+  final explicitLibrary = Platform.environment['VIBE_PTY_LIBRARY'];
+  if (explicitLibrary != null && explicitLibrary.isNotEmpty) {
+    return DynamicLibrary.open(explicitLibrary);
+  }
+  if (Platform.isMacOS) {
+    final bundled = File(
+        '${File(Platform.resolvedExecutable).parent.parent.path}/Frameworks/$_libName.framework/$_libName');
+    if (bundled.existsSync()) return DynamicLibrary.open(bundled.path);
+  }
+  if (Platform.isLinux) {
+    final bundled = File(
+        '${File(Platform.resolvedExecutable).parent.path}/lib/lib$_libName.so');
+    if (bundled.existsSync()) return DynamicLibrary.open(bundled.path);
+  }
   if (Platform.isMacOS || Platform.isIOS) {
     return DynamicLibrary.open('$_libName.framework/$_libName');
   }
