@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../agent/risk_classifier.dart';
 import '../../ai/ai_chat_service.dart';
 import '../../ai/secret_masker.dart';
+import '../../ai/session_log_request.dart';
 import '../../app/theme.dart';
 import '../../data/models/host.dart';
 import '../../session/session.dart';
@@ -48,6 +49,10 @@ class _AiChatPanelState extends ConsumerState<AiChatPanel> {
   /// '터미널로 보내기' 토글. 켜면 키워드 판정 없이 terminal tool call 경로로
   /// 보낸다. 패널이 살아 있는 동안만 유지된다.
   bool _forceTerminalToolCall = false;
+
+  /// '로그 포함' 토글. 켜면 첫 요청부터 세션 로그 tail을 붙인다. 꺼져 있어도
+  /// 모델이 `session-log` 블록으로 요청하면 한 번 더 붙여서 다시 묻는다.
+  bool _includeSessionLog = false;
 
   /// 터미널 내용이 AI provider로 전송된다는 안내를 닫았는지. 패널 수명 동안만
   /// 기억한다.
@@ -825,6 +830,36 @@ $result
     return buffer.toString().trimRight();
   }
 
+  /// 세션 로그 tail을 읽어 [request]를 적용한 텍스트와 안내 문구를 돌려준다.
+  /// 로그가 없는 세션이면 모델이 화면만으로 답하도록 알리는 문구를 돌려준다.
+  Future<_SessionLogContext> _loadSessionLogContext({
+    required String sessionId,
+    required SessionLogRequest request,
+  }) async {
+    final logId = ref.read(sessionManagerProvider.notifier).logIdOf(sessionId);
+    if (logId == null || logId.trim().isEmpty) {
+      return const _SessionLogContext(
+        text:
+            '(no session log is available for this session; answer from the terminal context only and say that the earlier output is unavailable)',
+        note: null,
+      );
+    }
+    final tail = await ref
+        .read(sessionLogRepositoryProvider)
+        .readPlainTextTailById(logId, maxLines: request.lines);
+    if (tail.trim().isEmpty) {
+      return const _SessionLogContext(
+        text: '(the session log is empty so far)',
+        note: null,
+      );
+    }
+    final filtered = request.filter(tail);
+    return _SessionLogContext(
+      text: filtered,
+      note: '세션 로그 ${request.description} 참조',
+    );
+  }
+
   Future<void> _send([String? quickPrompt]) async {
     final text = (quickPrompt ?? _inputController.text).trim();
     if (text.isEmpty) return;
@@ -884,28 +919,62 @@ $result
     try {
       // 다중 세션 오케스트레이션(agent loop)은 Agent Chat 패널로 이관됨.
       // AI Chat은 단일 세션 질의응답과 단발 terminal tool call 보조에 집중한다.
-      final reply = useToolCall
-          ? await _runTerminalToolCall(
-              settings: settings,
-              session: session,
-              userGoal: text,
-              requestMessages: requestMessages,
-              service: service,
-              cancelToken: cancelToken,
-            )
-          : await service.complete(
-              settings: settings,
-              sessionLabel: session.displayName,
-              terminalContext: terminalContext,
-              messages: requestMessages,
-              cancelToken: cancelToken,
-            );
+      String reply;
+      String? contextNote;
+      if (useToolCall) {
+        reply = await _runTerminalToolCall(
+          settings: settings,
+          session: session,
+          userGoal: text,
+          requestMessages: requestMessages,
+          service: service,
+          cancelToken: cancelToken,
+        );
+      } else {
+        // 기본은 화면만 본다. 토글이 켜져 있으면 처음부터 로그를 붙이고,
+        // 아니면 모델이 `session-log` 블록으로 요청할 때 한 번만 붙여
+        // 다시 묻는다(재요청 없음).
+        _SessionLogContext? log;
+        if (_includeSessionLog) {
+          log = await _loadSessionLogContext(
+            sessionId: sessionId,
+            request: SessionLogRequest(lines: settings.maxLogContextLines),
+          );
+          cancelToken.throwIfCancelled();
+        }
+        reply = await service.complete(
+          settings: settings,
+          sessionLabel: session.displayName,
+          terminalContext: terminalContext,
+          messages: requestMessages,
+          cancelToken: cancelToken,
+          sessionLogContext: log?.text,
+        );
+        final request = log == null ? SessionLogRequest.tryParse(reply) : null;
+        if (request != null) {
+          log = await _loadSessionLogContext(
+            sessionId: sessionId,
+            request: request,
+          );
+          cancelToken.throwIfCancelled();
+          reply = await service.complete(
+            settings: settings,
+            sessionLabel: session.displayName,
+            terminalContext: _terminalContext(session, settings),
+            messages: requestMessages,
+            cancelToken: cancelToken,
+            sessionLogContext: log.text,
+          );
+        }
+        contextNote = log?.note;
+      }
       // 패널이 닫혔어도(notifier는 유효) 응답을 저장해 맥락을 유지한다.
       chat.add(
         AiChatMessage(
           role: AiChatRole.assistant,
           content: reply,
           createdAt: DateTime.now(),
+          contextNote: contextNote,
         ),
       );
     } on AiChatCancelledException {
@@ -1150,6 +1219,9 @@ $result
             forceTerminalToolCall: _forceTerminalToolCall,
             onToggleTerminalToolCall: (value) =>
                 setState(() => _forceTerminalToolCall = value),
+            includeSessionLog: _includeSessionLog,
+            onToggleSessionLog: (value) =>
+                setState(() => _includeSessionLog = value),
             fontFamily: settings.chatFontFamily,
             fontFallback: settings.fontFallback,
             fontSize: settings.chatFontSize,
@@ -1161,6 +1233,14 @@ $result
 }
 
 /// 오류 말풍선 하나와, 그 말풍선을 만든 요청을 다시 보내는 함수.
+/// 모델에 붙일 세션 로그 텍스트와, 답변 아래에 보여 줄 안내.
+class _SessionLogContext {
+  const _SessionLogContext({required this.text, required this.note});
+
+  final String text;
+  final String? note;
+}
+
 class _RetryableRequest {
   const _RetryableRequest({required this.errorMessage, required this.run});
 
@@ -1756,6 +1836,27 @@ class _MessageBubble extends StatelessWidget {
                       fontFallback: fontFallback,
                       fontSize: fontSize,
                     ),
+                    if (message.contextNote != null) ...[
+                      const SizedBox(height: 6),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.history_toggle_off,
+                            size: 12,
+                            color: VibeColors.onSurfaceDim,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            message.contextNote!,
+                            style: const TextStyle(
+                              fontSize: 10,
+                              color: VibeColors.onSurfaceDim,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
                     if (onRetry != null) ...[
                       const SizedBox(height: 6),
                       Align(
@@ -1815,6 +1916,48 @@ class _ThinkingBubble extends StatelessWidget {
   }
 }
 
+/// 입력창 위의 작은 토글 칩('로그 포함', '터미널로 보내기').
+class _ComposerToggleChip extends StatelessWidget {
+  const _ComposerToggleChip({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.tooltip,
+    required this.onSelected,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final String tooltip;
+  final ValueChanged<bool>? onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: FilterChip(
+        label: Text(label),
+        avatar: Icon(
+          icon,
+          size: 15,
+          color: selected ? VibeColors.onAccent : VibeColors.onSurfaceDim,
+        ),
+        selected: selected,
+        showCheckmark: false,
+        visualDensity: VisualDensity.compact,
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        labelStyle: TextStyle(
+          fontSize: 11,
+          color: selected ? VibeColors.onAccent : VibeColors.onSurfaceMuted,
+        ),
+        selectedColor: VibeColors.accent,
+        onSelected: onSelected,
+      ),
+    );
+  }
+}
+
 class _AiInputBar extends StatefulWidget {
   const _AiInputBar({
     required this.controller,
@@ -1823,6 +1966,8 @@ class _AiInputBar extends StatefulWidget {
     required this.onCancel,
     required this.forceTerminalToolCall,
     required this.onToggleTerminalToolCall,
+    required this.includeSessionLog,
+    required this.onToggleSessionLog,
     required this.fontFamily,
     required this.fontFallback,
     required this.fontSize,
@@ -1836,6 +1981,10 @@ class _AiInputBar extends StatefulWidget {
   /// '터미널로 보내기' 토글 상태와 변경 콜백.
   final bool forceTerminalToolCall;
   final ValueChanged<bool> onToggleTerminalToolCall;
+
+  /// '로그 포함' 토글 상태와 변경 콜백.
+  final bool includeSessionLog;
+  final ValueChanged<bool> onToggleSessionLog;
   final String fontFamily;
   final List<String> fontFallback;
   final double fontSize;
@@ -1904,37 +2053,31 @@ class _AiInputBarState extends State<_AiInputBar> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Align(
-              alignment: Alignment.centerRight,
-              child: Tooltip(
-                message: widget.forceTerminalToolCall
-                    ? '켜짐: 답변을 터미널 tool call로 바로 입력합니다'
-                    : '켜면 키워드 판정 없이 답변을 터미널에 바로 입력합니다',
-                child: FilterChip(
-                  label: const Text('터미널로 보내기'),
-                  avatar: Icon(
-                    Icons.terminal,
-                    size: 15,
-                    color: widget.forceTerminalToolCall
-                        ? VibeColors.onAccent
-                        : VibeColors.onSurfaceDim,
-                  ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                _ComposerToggleChip(
+                  label: '로그 포함',
+                  icon: Icons.history_toggle_off,
+                  selected: widget.includeSessionLog,
+                  tooltip: widget.includeSessionLog
+                      ? '켜짐: 화면 밖으로 지나간 세션 로그까지 함께 보냅니다'
+                      : '켜면 화면뿐 아니라 세션 로그(스크롤 밖 출력)까지 함께 보냅니다',
+                  onSelected: widget.sending ? null : widget.onToggleSessionLog,
+                ),
+                const SizedBox(width: 6),
+                _ComposerToggleChip(
+                  label: '터미널로 보내기',
+                  icon: Icons.terminal,
                   selected: widget.forceTerminalToolCall,
-                  showCheckmark: false,
-                  visualDensity: VisualDensity.compact,
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  labelStyle: TextStyle(
-                    fontSize: 11,
-                    color: widget.forceTerminalToolCall
-                        ? VibeColors.onAccent
-                        : VibeColors.onSurfaceMuted,
-                  ),
-                  selectedColor: VibeColors.accent,
+                  tooltip: widget.forceTerminalToolCall
+                      ? '켜짐: 답변을 터미널 tool call로 바로 입력합니다'
+                      : '켜면 키워드 판정 없이 답변을 터미널에 바로 입력합니다',
                   onSelected: widget.sending
                       ? null
                       : widget.onToggleTerminalToolCall,
                 ),
-              ),
+              ],
             ),
             const SizedBox(height: 6),
             Row(

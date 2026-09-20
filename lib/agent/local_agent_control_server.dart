@@ -11,6 +11,26 @@ typedef AgentControlApproval =
 typedef AgentControlSpawner =
     Future<String> Function(String sourceId, Map<String, Object?> parameters);
 
+/// `agent.spawn`의 선택 인자 `model`을 검사하고 정규화한다.
+///
+/// 실행 다이얼로그와 같은 규칙이다. 값은 CLI 인자로 그대로 넘어가므로 셸
+/// 메타문자·개행이 섞이면 거부한다. 없거나 빈 값이면 null(=CLI 기본 모델).
+String? validateSpawnModel(Object? raw) {
+  if (raw == null) return null;
+  if (raw is! String) {
+    throw const FormatException('model은 문자열이어야 합니다.');
+  }
+  final model = raw.trim();
+  if (model.isEmpty) return null;
+  if (model.length > 200) {
+    throw const FormatException('model은 200자 이하여야 합니다.');
+  }
+  if (!RegExp(r'^[A-Za-z0-9][A-Za-z0-9._/:-]*$').hasMatch(model)) {
+    throw const FormatException('model에 사용할 수 없는 문자가 있습니다.');
+  }
+  return model;
+}
+
 /// 명시적으로 켠 로컬 제어면. 앱 내부 SessionPort와 승인 경계를 재사용한다.
 class LocalAgentControlServer {
   LocalAgentControlServer({
@@ -260,6 +280,9 @@ class LocalAgentControlServer {
           'status.wait',
           'events.poll',
         ],
+        'agent.spawn':
+            'sessionId, connectionToken, cli, arguments, branch, '
+            'isolated, model(선택)',
         'mutations': '입력·생성마다 앱에서 사용자 확인 필요',
       };
     }
@@ -341,6 +364,9 @@ class LocalAgentControlServer {
         (text is! String || text.length > 8192 || text.contains('\u0000'))) {
       throw const FormatException('입력은 8,192자 이하 문자열이어야 합니다.');
     }
+    // 모델은 승인 카드에 보여 주기 전에 거른다. 인자로 그대로 넘어가므로
+    // 실행 다이얼로그와 같은 규칙으로 셸 메타문자·개행을 막는다.
+    if (method == 'agent.spawn') validateSpawnModel(parameters['model']);
     _approvalPending = true;
     try {
       if (!await approve(

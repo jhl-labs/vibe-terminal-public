@@ -6,23 +6,31 @@ import 'package:url_launcher/url_launcher.dart';
 import '../ai/ai_chat_service.dart';
 import '../app/background_keep_alive.dart';
 import '../app/build_features.dart';
+import '../app/error_reporter.dart';
 import '../app/keepalive_pulse.dart';
 import '../app/update_checker.dart';
+import '../app/update_preferences.dart';
 import '../community/github_community_service.dart';
 import '../data/db/app_database.dart';
 import '../data/models/host.dart';
+import '../data/models/identity.dart';
 import '../data/models/session_log.dart';
 import '../data/models/snippet.dart';
+import '../data/models/ssh_key.dart';
 import '../data/repositories/host_repository.dart';
+import '../data/repositories/identity_repository.dart';
 import '../data/repositories/memo_repository.dart';
 import '../data/repositories/session_log_repository.dart';
+import '../data/repositories/ssh_key_repository.dart';
 import '../data/repositories/snippet_repository.dart';
 import '../local/local_terminal_service.dart';
+import '../local/default_local_hosts.dart';
 import '../kubernetes/kubernetes_exec_relay.dart';
 import '../notifications/notification_service.dart';
 import '../security/host_key_store.dart';
 import '../security/secure_store.dart';
 import '../session/session.dart';
+import '../snippets/gist_sync_service.dart';
 import '../session/session_diagnostics.dart';
 import '../session/session_group.dart';
 import '../session/remote_session_identity_store.dart';
@@ -33,6 +41,7 @@ import '../ai/custom_headers.dart';
 import '../agent/agent_worktree_store.dart';
 import '../settings/app_settings.dart';
 import '../settings/app_settings_store.dart';
+import '../ssh/public_key_installer.dart';
 import '../ssh/ssh_service.dart';
 import '../ssh/remote_session_catalog.dart';
 import '../sync/cloud_sync_snapshot.dart';
@@ -68,14 +77,53 @@ final hostKeyStoreProvider = Provider<HostKeyStore>(
   (ref) => HostKeyStore(ref.watch(appDatabaseProvider)),
 );
 
+final knownHostListProvider = FutureProvider<List<HostKeyRow>>(
+  (ref) => ref.watch(hostKeyStoreProvider).listAll(),
+);
+
+final sshKeyRepositoryProvider = Provider<SshKeyRepository>(
+  (ref) => SshKeyRepository(
+    ref.watch(appDatabaseProvider),
+    ref.watch(secureStoreProvider),
+  ),
+);
+
+final identityRepositoryProvider = Provider<IdentityRepository>(
+  (ref) => IdentityRepository(
+    ref.watch(appDatabaseProvider),
+    ref.watch(secureStoreProvider),
+  ),
+);
+
 final hostRepositoryProvider = Provider<HostRepository>(
-  (ref) => HostRepository(ref.watch(appDatabaseProvider)),
+  (ref) => HostRepository(
+    ref.watch(appDatabaseProvider),
+    secureStore: ref.watch(secureStoreProvider),
+  ),
+);
+
+final sshKeyListProvider = FutureProvider<List<SshKey>>(
+  (ref) => ref.watch(sshKeyRepositoryProvider).getAll(),
+);
+
+final identityListProvider = FutureProvider<List<Identity>>(
+  (ref) => ref.watch(identityRepositoryProvider).getAll(),
 );
 
 final sshServiceProvider = Provider<SshService>(
   (ref) => SshService(
     secureStore: ref.watch(secureStoreProvider),
     hostKeyStore: ref.watch(hostKeyStoreProvider),
+  ),
+);
+
+/// 키체인 공개키를 서버 authorized_keys에 등록하는 ssh-copy-id 상당 흐름.
+final publicKeyInstallerProvider = Provider<PublicKeyInstaller>(
+  (ref) => PublicKeyInstaller(
+    sshService: ref.watch(sshServiceProvider),
+    hostRepository: ref.watch(hostRepositoryProvider),
+    identityRepository: ref.watch(identityRepositoryProvider),
+    sshKeyRepository: ref.watch(sshKeyRepositoryProvider),
   ),
 );
 
@@ -99,6 +147,10 @@ final gitHubSyncServiceProvider = Provider<GitHubSyncService>(
 
 final gitHubCommunityServiceProvider = Provider<GitHubCommunityService>(
   (ref) => GitHubCommunityService(),
+);
+
+final gistSyncServiceProvider = Provider<GistSyncService>(
+  (ref) => GistSyncService(),
 );
 
 typedef ExternalUrlLauncher = Future<bool> Function(Uri uri);
@@ -153,6 +205,19 @@ final notificationServiceProvider = Provider<NotificationService>(
 
 final updateCheckerProvider = Provider<UpdateChecker>(
   (ref) => const UpdateChecker(),
+);
+
+/// 첫 실행에 플랫폼별 기본 로컬 셸 호스트(PowerShell/WSL/로컬 셸)를 만든다.
+final defaultLocalHostSeederProvider = Provider<DefaultLocalHostSeeder>(
+  (ref) => DefaultLocalHostSeeder(
+    ref.watch(hostRepositoryProvider),
+    candidates: defaultLocalHostCandidatesForThisDevice(),
+  ),
+);
+
+/// 건너뛴 버전과 마지막 조회 시각을 기억한다.
+final updatePreferencesProvider = Provider<UpdatePreferences>(
+  (ref) => UpdatePreferences(),
 );
 
 /// 앱이 포그라운드에 보이는지 여부. 작업 완료 알림 조건에 쓰인다(앱이
@@ -404,57 +469,66 @@ class AppSettingsController extends Notifier<AppSettings> {
 
   Future<void> _load() async {
     var loaded = await ref.read(appSettingsStoreProvider).load();
-    try {
-      final store = ref.read(secureStoreProvider);
-      final token = await store.readSecret(AiSettings.apiTokenSecretRef);
-      final customHeaders = await store.readSecret(
-        AiSettings.customHeadersSecretRef,
-      );
-      final githubToken = await store.readSecret(
-        CloudSyncSettings.githubTokenSecretRef,
-      );
-      final githubRefreshToken = await store.readSecret(
-        CloudSyncSettings.githubRefreshTokenSecretRef,
-      );
-      final syncEncryptionKey = await store.readSecret(
-        CloudSyncSettings.encryptionKeySecretRef,
-      );
-      if ((token != null && token.isNotEmpty) ||
-          (customHeaders != null && customHeaders.isNotEmpty) ||
-          (githubToken != null && githubToken.isNotEmpty) ||
-          (githubRefreshToken != null && githubRefreshToken.isNotEmpty) ||
-          (syncEncryptionKey != null && syncEncryptionKey.isNotEmpty)) {
-        final base = loaded ?? AppSettings.defaultSettings;
-        loaded = base.copyWith(
-          ai: base.ai.copyWith(
-            apiToken: token != null && token.isNotEmpty
-                ? token
-                : base.ai.apiToken,
-            customHeaders: customHeaders != null && customHeaders.isNotEmpty
-                ? customHeaders
-                : base.ai.customHeaders,
+    final store = ref.read(secureStoreProvider);
+    // 비밀값은 키마다 따로 읽는다. 한 키의 읽기 실패가 나머지(예: GitHub
+    // 로그인 token)까지 버리게 하면 "매번 다시 로그인" 증상이 되고, 원인도
+    // 남지 않는다.
+    final token = await _readSecret(store, AiSettings.apiTokenSecretRef);
+    final customHeaders = await _readSecret(
+      store,
+      AiSettings.customHeadersSecretRef,
+    );
+    final githubToken = await _readSecret(
+      store,
+      CloudSyncSettings.githubTokenSecretRef,
+    );
+    final githubRefreshToken = await _readSecret(
+      store,
+      CloudSyncSettings.githubRefreshTokenSecretRef,
+    );
+    final syncEncryptionKey = await _readSecret(
+      store,
+      CloudSyncSettings.encryptionKeySecretRef,
+    );
+    if (token != null ||
+        customHeaders != null ||
+        githubToken != null ||
+        githubRefreshToken != null ||
+        syncEncryptionKey != null) {
+      final base = loaded ?? AppSettings.defaultSettings;
+      loaded = base.copyWith(
+        ai: base.ai.copyWith(
+          apiToken: token ?? base.ai.apiToken,
+          customHeaders: customHeaders ?? base.ai.customHeaders,
+        ),
+        cloudSync: base.cloudSync.copyWith(
+          encryptionKey: syncEncryptionKey ?? base.cloudSync.encryptionKey,
+          github: base.cloudSync.github.copyWith(
+            token: githubToken ?? base.cloudSync.github.token,
+            refreshToken:
+                githubRefreshToken ?? base.cloudSync.github.refreshToken,
           ),
-          cloudSync: base.cloudSync.copyWith(
-            encryptionKey:
-                syncEncryptionKey != null && syncEncryptionKey.isNotEmpty
-                ? syncEncryptionKey
-                : base.cloudSync.encryptionKey,
-            github: base.cloudSync.github.copyWith(
-              token: githubToken != null && githubToken.isNotEmpty
-                  ? githubToken
-                  : base.cloudSync.github.token,
-              refreshToken:
-                  githubRefreshToken != null && githubRefreshToken.isNotEmpty
-                  ? githubRefreshToken
-                  : base.cloudSync.github.refreshToken,
-            ),
-          ),
-        );
-      }
-    } catch (_) {
-      // Settings must remain usable even when secure storage is unavailable.
+        ),
+      );
     }
     if (loaded != null) state = loaded;
+  }
+
+  /// 비밀값 하나를 읽는다. 없거나 비어 있으면 null. 보안 저장소 오류는
+  /// 설정을 계속 쓸 수 있게 삼키되 crash.log에 남긴다.
+  Future<String?> _readSecret(SecureStore store, String secretRef) async {
+    try {
+      final value = await store.readSecret(secretRef);
+      return value == null || value.isEmpty ? null : value;
+    } catch (error, stackTrace) {
+      appErrorReporter.report(
+        error,
+        stackTrace,
+        source: 'secure-store',
+        context: '비밀값 읽기 실패: $secretRef',
+      );
+      return null;
+    }
   }
 
   void update(AppSettings settings) {
@@ -512,8 +586,15 @@ class AppSettingsController extends Notifier<AppSettings> {
       } else {
         await store.writeSecret(secretRef, value);
       }
-    } catch (_) {
-      // Secret persistence is best-effort. Runtime settings still apply.
+    } catch (error, stackTrace) {
+      // 저장 실패는 런타임 설정에 영향이 없지만, 다음 실행에서 값이 사라지는
+      // 원인이므로 기록은 남긴다.
+      appErrorReporter.report(
+        error,
+        stackTrace,
+        source: 'secure-store',
+        context: '비밀값 저장 실패: $secretRef',
+      );
     }
   }
 
@@ -611,6 +692,24 @@ class AppSettingsController extends Notifier<AppSettings> {
     update(state.copyWith(rightPanelWidth: width));
   }
 
+  void setRightPanelToolHidden(RightPanelTool tool, bool hidden) {
+    final next = {...state.hiddenRightPanelTools};
+    if (hidden) {
+      next.add(tool.name);
+    } else {
+      next.remove(tool.name);
+    }
+    update(state.copyWith(hiddenRightPanelTools: next));
+  }
+
+  void setSnippetGistId(String gistId) {
+    update(state.copyWith(snippetGistId: gistId));
+  }
+
+  void setRightPanelToolOrder(List<String> order) {
+    update(state.copyWith(rightPanelToolOrder: List.unmodifiable(order)));
+  }
+
   void rememberAgentLaunch({
     required String cliName,
     required List<String> arguments,
@@ -622,6 +721,12 @@ class AppSettingsController extends Notifier<AppSettings> {
             .withArguments(cliName, arguments)
             .copyWith(isolateByDefault: isolateByDefault),
       ),
+    );
+  }
+
+  void rememberAgentLaunchModel(String model) {
+    update(
+      state.copyWith(agentLaunch: state.agentLaunch.withRecentModel(model)),
     );
   }
 
@@ -843,6 +948,10 @@ class AppSettingsController extends Notifier<AppSettings> {
     update(state.copyWith(ai: state.ai.copyWith(maxContextLines: lines)));
   }
 
+  void setAiMaxLogContextLines(int lines) {
+    update(state.copyWith(ai: state.ai.copyWith(maxLogContextLines: lines)));
+  }
+
   void setAiChatFontFamily(String fontFamily) {
     update(state.copyWith(ai: state.ai.copyWith(chatFontFamily: fontFamily)));
   }
@@ -858,7 +967,9 @@ final appSettingsProvider =
     );
 
 enum RightPanelTool {
+  paneLayout,
   snippets,
+  sessionInfo,
   aiChat,
   memo,
   claudeSettings,
@@ -868,19 +979,46 @@ enum RightPanelTool {
   logs,
 }
 
+/// [RightPanelState.copyWith]에서 "값을 바꾸지 않음"과 "null로 지움"을
+/// 구분하기 위한 센티널.
+const Object _unchangedRightPanel = Object();
+
 class RightPanelState {
-  const RightPanelState({required this.open, required this.tool});
+  const RightPanelState({
+    required this.open,
+    required this.tool,
+    this.customAppId,
+    this.customAppEditing = false,
+  });
 
   final bool open;
   final RightPanelTool tool;
+
+  /// 우측 패널이 항목 하나를 지목할 때 쓰는 대상 id. null이면 도구의 기본
+  /// 화면을 뜻한다.
+  final String? customAppId;
+
+  /// 대상 id를 편집 모드로 열었는지 여부.
+  final bool customAppEditing;
 
   static const closed = RightPanelState(
     open: false,
     tool: RightPanelTool.aiChat,
   );
 
-  RightPanelState copyWith({bool? open, RightPanelTool? tool}) =>
-      RightPanelState(open: open ?? this.open, tool: tool ?? this.tool);
+  RightPanelState copyWith({
+    bool? open,
+    RightPanelTool? tool,
+    Object? customAppId = _unchangedRightPanel,
+    bool? customAppEditing,
+  }) => RightPanelState(
+    open: open ?? this.open,
+    tool: tool ?? this.tool,
+    customAppId: identical(customAppId, _unchangedRightPanel)
+        ? this.customAppId
+        : customAppId as String?,
+    customAppEditing: customAppEditing ?? this.customAppEditing,
+  );
 }
 
 /// 우측 패널 열림 상태. 데스크톱은 도구 스트립, 모바일은 endDrawer에서 같은 모드를 쓴다.
@@ -889,7 +1027,10 @@ class RightPanelController extends Notifier<RightPanelState> {
   RightPanelState build() => RightPanelState.closed;
 
   void toggle(RightPanelTool tool) {
-    if (state.open && state.tool == tool) {
+    if (state.open &&
+        state.tool == tool &&
+        state.customAppId == null &&
+        !state.customAppEditing) {
       state = state.copyWith(open: false);
       return;
     }

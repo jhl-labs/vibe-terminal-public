@@ -36,6 +36,9 @@ class Hosts extends Table {
   BoolColumn get x11Forwarding =>
       boolean().withDefault(const Constant(false))();
   TextColumn get startupScript => text().nullable()();
+  // 인증 원본은 identities 테이블이다. username/auth_type/credential_ref는
+  // 하위 호환용 비정규화 사본이며 HostRepository가 Identity로 덮어쓴다.
+  TextColumn get identityId => text().nullable()();
   DateTimeColumn get createdAt => dateTime()();
   DateTimeColumn get updatedAt => dateTime()();
 
@@ -51,6 +54,41 @@ class HostKeys extends Table {
   TextColumn get keyType => text()();
   TextColumn get fingerprint => text()();
   DateTimeColumn get pinnedAt => dateTime()();
+  DateTimeColumn get lastSeenAt => dateTime().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// 재사용 가능한 SSH 개인키. 개인키 본문은 secure store에 [secretRef]로 저장한다.
+@DataClassName('SshKeyRow')
+class SshKeys extends Table {
+  TextColumn get id => text()();
+  TextColumn get name => text()();
+  TextColumn get keyType => text()();
+  TextColumn get publicKey => text()();
+  TextColumn get fingerprint => text()();
+  TextColumn get secretRef => text()();
+  IntColumn get source => integer().withDefault(const Constant(0))();
+  DateTimeColumn get createdAt => dateTime()();
+  DateTimeColumn get updatedAt => dateTime()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// 사용자명 + 인증 방식 묶음. 호스트는 identity_id로 참조한다.
+@DataClassName('IdentityRow')
+class Identities extends Table {
+  TextColumn get id => text()();
+  TextColumn get label => text()();
+  TextColumn get username => text()();
+  IntColumn get authType => integer().withDefault(const Constant(0))();
+  TextColumn get keyId => text().nullable()();
+  TextColumn get secretRef => text().nullable()();
+  BoolColumn get hostScoped => boolean().withDefault(const Constant(false))();
+  DateTimeColumn get createdAt => dateTime()();
+  DateTimeColumn get updatedAt => dateTime()();
 
   @override
   Set<Column> get primaryKey => {id};
@@ -82,6 +120,16 @@ class Memos extends Table {
   Set<Column> get primaryKey => {hostId};
 }
 
+/// 메모 버전 히스토리. host당 여러 개, 자동 버전은 개수 상한으로 정리한다.
+@DataClassName('MemoVersionRow')
+class MemoVersions extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  TextColumn get hostId => text()();
+  TextColumn get body => text()();
+  DateTimeColumn get createdAt => dateTime()();
+  TextColumn get label => text().nullable()();
+}
+
 @DataClassName('SessionLogRow')
 class SessionLogs extends Table {
   TextColumn get id => text()();
@@ -101,12 +149,23 @@ class SessionLogs extends Table {
   Set<Column> get primaryKey => {id};
 }
 
-@DriftDatabase(tables: [Hosts, HostKeys, Snippets, Memos, SessionLogs])
+@DriftDatabase(
+  tables: [
+    Hosts,
+    HostKeys,
+    Snippets,
+    Memos,
+    MemoVersions,
+    SessionLogs,
+    SshKeys,
+    Identities,
+  ],
+)
 class AppDatabase extends _$AppDatabase {
   AppDatabase([QueryExecutor? executor]) : super(executor ?? _open());
 
   @override
-  int get schemaVersion => 13;
+  int get schemaVersion => 15;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -150,6 +209,15 @@ class AppDatabase extends _$AppDatabase {
         await _addColumnIfMissing(m, hosts, hosts.kubernetesGateway);
         await _addColumnIfMissing(m, hosts, hosts.kubernetesGatewayHostId);
         await _addColumnIfMissing(m, hosts, hosts.kubernetesContainer);
+      }
+      if (from < 14) {
+        await _createTableIfMissing(m, memoVersions);
+      }
+      if (from < 15) {
+        await _createTableIfMissing(m, sshKeys);
+        await _createTableIfMissing(m, identities);
+        await _addColumnIfMissing(m, hosts, hosts.identityId);
+        await _addColumnIfMissing(m, hostKeys, hostKeys.lastSeenAt);
       }
     },
   );

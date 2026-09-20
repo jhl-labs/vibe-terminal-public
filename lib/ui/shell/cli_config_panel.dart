@@ -2,21 +2,24 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/theme.dart';
 import '../../cli_config/cli_config_home.dart';
+import '../../cli_config/cli_installation_provider.dart';
 import '../../cli_config/wsl_cli_config_home.dart';
 
 /// 우측 패널: 코딩 에이전트 CLI(Claude Code, Codex, OpenCode)의 전역 설정과
 /// 확장(지침·스킬·커맨드·에이전트 등)을 한곳에서 보고 편집한다.
 /// 개요(섹션 목록) → 섹션(파일 목록) → 편집기 순으로 들어간다.
-class CliConfigPanel extends StatefulWidget {
+class CliConfigPanel extends ConsumerStatefulWidget {
   const CliConfigPanel({
     super.key,
     required this.app,
     this.home,
     this.wslHomeLoader,
     this.wslAvailable,
+    this.installedApps,
   });
 
   final CliConfigApp app;
@@ -30,11 +33,15 @@ class CliConfigPanel extends StatefulWidget {
   /// WSL 전환 아이콘을 보일지. null이면 Windows에 wsl.exe가 있을 때만 보인다.
   final bool? wslAvailable;
 
+  /// 로컬에 설치된 것으로 감지된 CLI 목록. null이면
+  /// [installedCliAppsProvider]를 쓴다(테스트 오버라이드용).
+  final Set<CliConfigApp>? installedApps;
+
   @override
-  State<CliConfigPanel> createState() => _CliConfigPanelState();
+  ConsumerState<CliConfigPanel> createState() => _CliConfigPanelState();
 }
 
-class _CliConfigPanelState extends State<CliConfigPanel> {
+class _CliConfigPanelState extends ConsumerState<CliConfigPanel> {
   late final CliConfigHome? _nativeHome =
       widget.home ?? CliConfigHome.fromEnvironment(widget.app);
   late final bool _wslAvailable =
@@ -236,6 +243,16 @@ class _CliConfigPanelState extends State<CliConfigPanel> {
             onPressed: _toggleWsl,
           )
         : null;
+    // 설치 감지는 로컬 PATH 기준이라 아직 로딩 중일 수 있다. 로딩 중에는
+    // 잠깐 "미설치" 화면이 깜빡이지 않도록 결과가 도착할 때까지 기다린다.
+    final installedApps =
+        widget.installedApps ??
+        ref.watch(installedCliAppsProvider).asData?.value;
+    final notInstalledNative =
+        !_useWsl &&
+        home != null &&
+        installedApps != null &&
+        !installedApps.contains(widget.app);
     return Material(
       color: VibeColors.surface,
       child: home == null
@@ -247,6 +264,8 @@ class _CliConfigPanelState extends State<CliConfigPanel> {
               onRetry: _useWsl && !_wslLoading ? _loadWslHome : null,
               wslToggle: wslToggle,
             )
+          : notInstalledNative
+          ? _NotInstalled(app: widget.app, wslToggle: wslToggle)
           : _entry != null
           ? _CliFileEditor(
               key: ValueKey('cli-config-editor:${_entry!.path}'),
@@ -358,6 +377,95 @@ class _MissingHome extends StatelessWidget {
 
 String _appTitle(CliConfigApp app, {required bool wsl}) =>
     wsl ? '${app.title} (WSL)' : app.title;
+
+/// PATH에서 CLI 실행 파일을 찾지 못했을 때 보여주는 안내 화면. 설정 파일
+/// 편집 UI 대신 설치 여부와 설치 방법을 명확히 알려, 빈 화면이나 오류로
+/// 오인하지 않게 한다.
+class _NotInstalled extends StatelessWidget {
+  const _NotInstalled({required this.app, required this.wslToggle});
+
+  final CliConfigApp app;
+  final Widget? wslToggle;
+
+  String get _installHint => switch (app) {
+    CliConfigApp.claude => 'npm install -g @anthropic-ai/claude-code',
+    CliConfigApp.codex => 'npm install -g @openai/codex',
+    CliConfigApp.opencode => 'npm install -g opencode-ai',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _PanelHeader(
+          icon: appIconFor(app),
+          title: app.title,
+          subtitle: '설치되지 않음',
+          actions: [?wslToggle],
+        ),
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${app.title}가 설치되지 않아 사용할 수 없습니다.',
+                  key: const ValueKey('cli-config-not-installed'),
+                  style: const TextStyle(
+                    color: VibeColors.onSurface,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'PATH에서 실행 파일을 찾지 못했습니다. 설치한 뒤 이 패널을 다시 열면 '
+                  '자동으로 인식됩니다.',
+                  style: TextStyle(
+                    color: VibeColors.onSurfaceMuted,
+                    fontSize: 12.5,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: VibeColors.surfaceHigh,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: SelectableText(
+                    _installHint,
+                    style: const TextStyle(
+                      color: VibeColors.onSurface,
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+                if (wslToggle != null) ...[
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Windows라면 WSL 배포판 안에 설치되어 있을 수 있습니다. '
+                    '위의 WSL 버튼으로 전환해 확인하세요.',
+                    style: TextStyle(
+                      color: VibeColors.onSurfaceMuted,
+                      fontSize: 12.5,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
 
 /// Windows 홈과 WSL 배포판 홈 사이를 오가는 토글. 선택되면 accent 색으로 채워
 /// 지금 WSL 쪽을 보고 있음을 드러낸다.

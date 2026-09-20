@@ -248,6 +248,17 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _identityIdMeta = const VerificationMeta(
+    'identityId',
+  );
+  @override
+  late final GeneratedColumn<String> identityId = GeneratedColumn<String>(
+    'identity_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   static const VerificationMeta _createdAtMeta = const VerificationMeta(
     'createdAt',
   );
@@ -293,6 +304,7 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
     agentForwarding,
     x11Forwarding,
     startupScript,
+    identityId,
     createdAt,
     updatedAt,
   ];
@@ -484,6 +496,12 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
         ),
       );
     }
+    if (data.containsKey('identity_id')) {
+      context.handle(
+        _identityIdMeta,
+        identityId.isAcceptableOrUnknown(data['identity_id']!, _identityIdMeta),
+      );
+    }
     if (data.containsKey('created_at')) {
       context.handle(
         _createdAtMeta,
@@ -593,6 +611,10 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
         DriftSqlType.string,
         data['${effectivePrefix}startup_script'],
       ),
+      identityId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}identity_id'],
+      ),
       createdAt: attachedDatabase.typeMapping.read(
         DriftSqlType.dateTime,
         data['${effectivePrefix}created_at'],
@@ -632,6 +654,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
   final bool agentForwarding;
   final bool x11Forwarding;
   final String? startupScript;
+  final String? identityId;
   final DateTime createdAt;
   final DateTime updatedAt;
   const HostRow({
@@ -656,6 +679,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     required this.agentForwarding,
     required this.x11Forwarding,
     this.startupScript,
+    this.identityId,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -703,6 +727,9 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     if (!nullToAbsent || startupScript != null) {
       map['startup_script'] = Variable<String>(startupScript);
     }
+    if (!nullToAbsent || identityId != null) {
+      map['identity_id'] = Variable<String>(identityId);
+    }
     map['created_at'] = Variable<DateTime>(createdAt);
     map['updated_at'] = Variable<DateTime>(updatedAt);
     return map;
@@ -749,6 +776,9 @@ class HostRow extends DataClass implements Insertable<HostRow> {
       startupScript: startupScript == null && nullToAbsent
           ? const Value.absent()
           : Value(startupScript),
+      identityId: identityId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(identityId),
       createdAt: Value(createdAt),
       updatedAt: Value(updatedAt),
     );
@@ -793,6 +823,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
       agentForwarding: serializer.fromJson<bool>(json['agentForwarding']),
       x11Forwarding: serializer.fromJson<bool>(json['x11Forwarding']),
       startupScript: serializer.fromJson<String?>(json['startupScript']),
+      identityId: serializer.fromJson<String?>(json['identityId']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
       updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
     );
@@ -826,6 +857,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
       'agentForwarding': serializer.toJson<bool>(agentForwarding),
       'x11Forwarding': serializer.toJson<bool>(x11Forwarding),
       'startupScript': serializer.toJson<String?>(startupScript),
+      'identityId': serializer.toJson<String?>(identityId),
       'createdAt': serializer.toJson<DateTime>(createdAt),
       'updatedAt': serializer.toJson<DateTime>(updatedAt),
     };
@@ -853,6 +885,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     bool? agentForwarding,
     bool? x11Forwarding,
     Value<String?> startupScript = const Value.absent(),
+    Value<String?> identityId = const Value.absent(),
     DateTime? createdAt,
     DateTime? updatedAt,
   }) => HostRow(
@@ -894,6 +927,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     startupScript: startupScript.present
         ? startupScript.value
         : this.startupScript,
+    identityId: identityId.present ? identityId.value : this.identityId,
     createdAt: createdAt ?? this.createdAt,
     updatedAt: updatedAt ?? this.updatedAt,
   );
@@ -950,6 +984,9 @@ class HostRow extends DataClass implements Insertable<HostRow> {
       startupScript: data.startupScript.present
           ? data.startupScript.value
           : this.startupScript,
+      identityId: data.identityId.present
+          ? data.identityId.value
+          : this.identityId,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
       updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
     );
@@ -979,6 +1016,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
           ..write('agentForwarding: $agentForwarding, ')
           ..write('x11Forwarding: $x11Forwarding, ')
           ..write('startupScript: $startupScript, ')
+          ..write('identityId: $identityId, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt')
           ..write(')'))
@@ -1008,6 +1046,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     agentForwarding,
     x11Forwarding,
     startupScript,
+    identityId,
     createdAt,
     updatedAt,
   ]);
@@ -1036,6 +1075,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
           other.agentForwarding == this.agentForwarding &&
           other.x11Forwarding == this.x11Forwarding &&
           other.startupScript == this.startupScript &&
+          other.identityId == this.identityId &&
           other.createdAt == this.createdAt &&
           other.updatedAt == this.updatedAt);
 }
@@ -1062,6 +1102,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
   final Value<bool> agentForwarding;
   final Value<bool> x11Forwarding;
   final Value<String?> startupScript;
+  final Value<String?> identityId;
   final Value<DateTime> createdAt;
   final Value<DateTime> updatedAt;
   final Value<int> rowid;
@@ -1087,6 +1128,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     this.agentForwarding = const Value.absent(),
     this.x11Forwarding = const Value.absent(),
     this.startupScript = const Value.absent(),
+    this.identityId = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
     this.rowid = const Value.absent(),
@@ -1113,6 +1155,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     this.agentForwarding = const Value.absent(),
     this.x11Forwarding = const Value.absent(),
     this.startupScript = const Value.absent(),
+    this.identityId = const Value.absent(),
     required DateTime createdAt,
     required DateTime updatedAt,
     this.rowid = const Value.absent(),
@@ -1144,6 +1187,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     Expression<bool>? agentForwarding,
     Expression<bool>? x11Forwarding,
     Expression<String>? startupScript,
+    Expression<String>? identityId,
     Expression<DateTime>? createdAt,
     Expression<DateTime>? updatedAt,
     Expression<int>? rowid,
@@ -1174,6 +1218,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
       if (agentForwarding != null) 'agent_forwarding': agentForwarding,
       if (x11Forwarding != null) 'x11_forwarding': x11Forwarding,
       if (startupScript != null) 'startup_script': startupScript,
+      if (identityId != null) 'identity_id': identityId,
       if (createdAt != null) 'created_at': createdAt,
       if (updatedAt != null) 'updated_at': updatedAt,
       if (rowid != null) 'rowid': rowid,
@@ -1202,6 +1247,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     Value<bool>? agentForwarding,
     Value<bool>? x11Forwarding,
     Value<String?>? startupScript,
+    Value<String?>? identityId,
     Value<DateTime>? createdAt,
     Value<DateTime>? updatedAt,
     Value<int>? rowid,
@@ -1230,6 +1276,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
       agentForwarding: agentForwarding ?? this.agentForwarding,
       x11Forwarding: x11Forwarding ?? this.x11Forwarding,
       startupScript: startupScript ?? this.startupScript,
+      identityId: identityId ?? this.identityId,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       rowid: rowid ?? this.rowid,
@@ -1306,6 +1353,9 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     if (startupScript.present) {
       map['startup_script'] = Variable<String>(startupScript.value);
     }
+    if (identityId.present) {
+      map['identity_id'] = Variable<String>(identityId.value);
+    }
     if (createdAt.present) {
       map['created_at'] = Variable<DateTime>(createdAt.value);
     }
@@ -1342,6 +1392,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
           ..write('agentForwarding: $agentForwarding, ')
           ..write('x11Forwarding: $x11Forwarding, ')
           ..write('startupScript: $startupScript, ')
+          ..write('identityId: $identityId, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
           ..write('rowid: $rowid')
@@ -1418,6 +1469,17 @@ class $HostKeysTable extends HostKeys
     type: DriftSqlType.dateTime,
     requiredDuringInsert: true,
   );
+  static const VerificationMeta _lastSeenAtMeta = const VerificationMeta(
+    'lastSeenAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> lastSeenAt = GeneratedColumn<DateTime>(
+    'last_seen_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -1426,6 +1488,7 @@ class $HostKeysTable extends HostKeys
     keyType,
     fingerprint,
     pinnedAt,
+    lastSeenAt,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -1487,6 +1550,15 @@ class $HostKeysTable extends HostKeys
     } else if (isInserting) {
       context.missing(_pinnedAtMeta);
     }
+    if (data.containsKey('last_seen_at')) {
+      context.handle(
+        _lastSeenAtMeta,
+        lastSeenAt.isAcceptableOrUnknown(
+          data['last_seen_at']!,
+          _lastSeenAtMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -1520,6 +1592,10 @@ class $HostKeysTable extends HostKeys
         DriftSqlType.dateTime,
         data['${effectivePrefix}pinned_at'],
       )!,
+      lastSeenAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}last_seen_at'],
+      ),
     );
   }
 
@@ -1536,6 +1612,7 @@ class HostKeyRow extends DataClass implements Insertable<HostKeyRow> {
   final String keyType;
   final String fingerprint;
   final DateTime pinnedAt;
+  final DateTime? lastSeenAt;
   const HostKeyRow({
     required this.id,
     required this.hostname,
@@ -1543,6 +1620,7 @@ class HostKeyRow extends DataClass implements Insertable<HostKeyRow> {
     required this.keyType,
     required this.fingerprint,
     required this.pinnedAt,
+    this.lastSeenAt,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1553,6 +1631,9 @@ class HostKeyRow extends DataClass implements Insertable<HostKeyRow> {
     map['key_type'] = Variable<String>(keyType);
     map['fingerprint'] = Variable<String>(fingerprint);
     map['pinned_at'] = Variable<DateTime>(pinnedAt);
+    if (!nullToAbsent || lastSeenAt != null) {
+      map['last_seen_at'] = Variable<DateTime>(lastSeenAt);
+    }
     return map;
   }
 
@@ -1564,6 +1645,9 @@ class HostKeyRow extends DataClass implements Insertable<HostKeyRow> {
       keyType: Value(keyType),
       fingerprint: Value(fingerprint),
       pinnedAt: Value(pinnedAt),
+      lastSeenAt: lastSeenAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(lastSeenAt),
     );
   }
 
@@ -1579,6 +1663,7 @@ class HostKeyRow extends DataClass implements Insertable<HostKeyRow> {
       keyType: serializer.fromJson<String>(json['keyType']),
       fingerprint: serializer.fromJson<String>(json['fingerprint']),
       pinnedAt: serializer.fromJson<DateTime>(json['pinnedAt']),
+      lastSeenAt: serializer.fromJson<DateTime?>(json['lastSeenAt']),
     );
   }
   @override
@@ -1591,6 +1676,7 @@ class HostKeyRow extends DataClass implements Insertable<HostKeyRow> {
       'keyType': serializer.toJson<String>(keyType),
       'fingerprint': serializer.toJson<String>(fingerprint),
       'pinnedAt': serializer.toJson<DateTime>(pinnedAt),
+      'lastSeenAt': serializer.toJson<DateTime?>(lastSeenAt),
     };
   }
 
@@ -1601,6 +1687,7 @@ class HostKeyRow extends DataClass implements Insertable<HostKeyRow> {
     String? keyType,
     String? fingerprint,
     DateTime? pinnedAt,
+    Value<DateTime?> lastSeenAt = const Value.absent(),
   }) => HostKeyRow(
     id: id ?? this.id,
     hostname: hostname ?? this.hostname,
@@ -1608,6 +1695,7 @@ class HostKeyRow extends DataClass implements Insertable<HostKeyRow> {
     keyType: keyType ?? this.keyType,
     fingerprint: fingerprint ?? this.fingerprint,
     pinnedAt: pinnedAt ?? this.pinnedAt,
+    lastSeenAt: lastSeenAt.present ? lastSeenAt.value : this.lastSeenAt,
   );
   HostKeyRow copyWithCompanion(HostKeysCompanion data) {
     return HostKeyRow(
@@ -1619,6 +1707,9 @@ class HostKeyRow extends DataClass implements Insertable<HostKeyRow> {
           ? data.fingerprint.value
           : this.fingerprint,
       pinnedAt: data.pinnedAt.present ? data.pinnedAt.value : this.pinnedAt,
+      lastSeenAt: data.lastSeenAt.present
+          ? data.lastSeenAt.value
+          : this.lastSeenAt,
     );
   }
 
@@ -1630,14 +1721,22 @@ class HostKeyRow extends DataClass implements Insertable<HostKeyRow> {
           ..write('port: $port, ')
           ..write('keyType: $keyType, ')
           ..write('fingerprint: $fingerprint, ')
-          ..write('pinnedAt: $pinnedAt')
+          ..write('pinnedAt: $pinnedAt, ')
+          ..write('lastSeenAt: $lastSeenAt')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode =>
-      Object.hash(id, hostname, port, keyType, fingerprint, pinnedAt);
+  int get hashCode => Object.hash(
+    id,
+    hostname,
+    port,
+    keyType,
+    fingerprint,
+    pinnedAt,
+    lastSeenAt,
+  );
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -1647,7 +1746,8 @@ class HostKeyRow extends DataClass implements Insertable<HostKeyRow> {
           other.port == this.port &&
           other.keyType == this.keyType &&
           other.fingerprint == this.fingerprint &&
-          other.pinnedAt == this.pinnedAt);
+          other.pinnedAt == this.pinnedAt &&
+          other.lastSeenAt == this.lastSeenAt);
 }
 
 class HostKeysCompanion extends UpdateCompanion<HostKeyRow> {
@@ -1657,6 +1757,7 @@ class HostKeysCompanion extends UpdateCompanion<HostKeyRow> {
   final Value<String> keyType;
   final Value<String> fingerprint;
   final Value<DateTime> pinnedAt;
+  final Value<DateTime?> lastSeenAt;
   final Value<int> rowid;
   const HostKeysCompanion({
     this.id = const Value.absent(),
@@ -1665,6 +1766,7 @@ class HostKeysCompanion extends UpdateCompanion<HostKeyRow> {
     this.keyType = const Value.absent(),
     this.fingerprint = const Value.absent(),
     this.pinnedAt = const Value.absent(),
+    this.lastSeenAt = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   HostKeysCompanion.insert({
@@ -1674,6 +1776,7 @@ class HostKeysCompanion extends UpdateCompanion<HostKeyRow> {
     required String keyType,
     required String fingerprint,
     required DateTime pinnedAt,
+    this.lastSeenAt = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        hostname = Value(hostname),
@@ -1688,6 +1791,7 @@ class HostKeysCompanion extends UpdateCompanion<HostKeyRow> {
     Expression<String>? keyType,
     Expression<String>? fingerprint,
     Expression<DateTime>? pinnedAt,
+    Expression<DateTime>? lastSeenAt,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1697,6 +1801,7 @@ class HostKeysCompanion extends UpdateCompanion<HostKeyRow> {
       if (keyType != null) 'key_type': keyType,
       if (fingerprint != null) 'fingerprint': fingerprint,
       if (pinnedAt != null) 'pinned_at': pinnedAt,
+      if (lastSeenAt != null) 'last_seen_at': lastSeenAt,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1708,6 +1813,7 @@ class HostKeysCompanion extends UpdateCompanion<HostKeyRow> {
     Value<String>? keyType,
     Value<String>? fingerprint,
     Value<DateTime>? pinnedAt,
+    Value<DateTime?>? lastSeenAt,
     Value<int>? rowid,
   }) {
     return HostKeysCompanion(
@@ -1717,6 +1823,7 @@ class HostKeysCompanion extends UpdateCompanion<HostKeyRow> {
       keyType: keyType ?? this.keyType,
       fingerprint: fingerprint ?? this.fingerprint,
       pinnedAt: pinnedAt ?? this.pinnedAt,
+      lastSeenAt: lastSeenAt ?? this.lastSeenAt,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1742,6 +1849,9 @@ class HostKeysCompanion extends UpdateCompanion<HostKeyRow> {
     if (pinnedAt.present) {
       map['pinned_at'] = Variable<DateTime>(pinnedAt.value);
     }
+    if (lastSeenAt.present) {
+      map['last_seen_at'] = Variable<DateTime>(lastSeenAt.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1757,6 +1867,7 @@ class HostKeysCompanion extends UpdateCompanion<HostKeyRow> {
           ..write('keyType: $keyType, ')
           ..write('fingerprint: $fingerprint, ')
           ..write('pinnedAt: $pinnedAt, ')
+          ..write('lastSeenAt: $lastSeenAt, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -2576,6 +2687,347 @@ class MemosCompanion extends UpdateCompanion<MemoRow> {
   }
 }
 
+class $MemoVersionsTable extends MemoVersions
+    with TableInfo<$MemoVersionsTable, MemoVersionRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $MemoVersionsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+    'id',
+    aliasedName,
+    false,
+    hasAutoIncrement: true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'PRIMARY KEY AUTOINCREMENT',
+    ),
+  );
+  static const VerificationMeta _hostIdMeta = const VerificationMeta('hostId');
+  @override
+  late final GeneratedColumn<String> hostId = GeneratedColumn<String>(
+    'host_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _bodyMeta = const VerificationMeta('body');
+  @override
+  late final GeneratedColumn<String> body = GeneratedColumn<String>(
+    'body',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _labelMeta = const VerificationMeta('label');
+  @override
+  late final GeneratedColumn<String> label = GeneratedColumn<String>(
+    'label',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [id, hostId, body, createdAt, label];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'memo_versions';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<MemoVersionRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('host_id')) {
+      context.handle(
+        _hostIdMeta,
+        hostId.isAcceptableOrUnknown(data['host_id']!, _hostIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_hostIdMeta);
+    }
+    if (data.containsKey('body')) {
+      context.handle(
+        _bodyMeta,
+        body.isAcceptableOrUnknown(data['body']!, _bodyMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_bodyMeta);
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('label')) {
+      context.handle(
+        _labelMeta,
+        label.isAcceptableOrUnknown(data['label']!, _labelMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  MemoVersionRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return MemoVersionRow(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}id'],
+      )!,
+      hostId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}host_id'],
+      )!,
+      body: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}body'],
+      )!,
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}created_at'],
+      )!,
+      label: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}label'],
+      ),
+    );
+  }
+
+  @override
+  $MemoVersionsTable createAlias(String alias) {
+    return $MemoVersionsTable(attachedDatabase, alias);
+  }
+}
+
+class MemoVersionRow extends DataClass implements Insertable<MemoVersionRow> {
+  final int id;
+  final String hostId;
+  final String body;
+  final DateTime createdAt;
+  final String? label;
+  const MemoVersionRow({
+    required this.id,
+    required this.hostId,
+    required this.body,
+    required this.createdAt,
+    this.label,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['host_id'] = Variable<String>(hostId);
+    map['body'] = Variable<String>(body);
+    map['created_at'] = Variable<DateTime>(createdAt);
+    if (!nullToAbsent || label != null) {
+      map['label'] = Variable<String>(label);
+    }
+    return map;
+  }
+
+  MemoVersionsCompanion toCompanion(bool nullToAbsent) {
+    return MemoVersionsCompanion(
+      id: Value(id),
+      hostId: Value(hostId),
+      body: Value(body),
+      createdAt: Value(createdAt),
+      label: label == null && nullToAbsent
+          ? const Value.absent()
+          : Value(label),
+    );
+  }
+
+  factory MemoVersionRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return MemoVersionRow(
+      id: serializer.fromJson<int>(json['id']),
+      hostId: serializer.fromJson<String>(json['hostId']),
+      body: serializer.fromJson<String>(json['body']),
+      createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+      label: serializer.fromJson<String?>(json['label']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'hostId': serializer.toJson<String>(hostId),
+      'body': serializer.toJson<String>(body),
+      'createdAt': serializer.toJson<DateTime>(createdAt),
+      'label': serializer.toJson<String?>(label),
+    };
+  }
+
+  MemoVersionRow copyWith({
+    int? id,
+    String? hostId,
+    String? body,
+    DateTime? createdAt,
+    Value<String?> label = const Value.absent(),
+  }) => MemoVersionRow(
+    id: id ?? this.id,
+    hostId: hostId ?? this.hostId,
+    body: body ?? this.body,
+    createdAt: createdAt ?? this.createdAt,
+    label: label.present ? label.value : this.label,
+  );
+  MemoVersionRow copyWithCompanion(MemoVersionsCompanion data) {
+    return MemoVersionRow(
+      id: data.id.present ? data.id.value : this.id,
+      hostId: data.hostId.present ? data.hostId.value : this.hostId,
+      body: data.body.present ? data.body.value : this.body,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      label: data.label.present ? data.label.value : this.label,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MemoVersionRow(')
+          ..write('id: $id, ')
+          ..write('hostId: $hostId, ')
+          ..write('body: $body, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('label: $label')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(id, hostId, body, createdAt, label);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is MemoVersionRow &&
+          other.id == this.id &&
+          other.hostId == this.hostId &&
+          other.body == this.body &&
+          other.createdAt == this.createdAt &&
+          other.label == this.label);
+}
+
+class MemoVersionsCompanion extends UpdateCompanion<MemoVersionRow> {
+  final Value<int> id;
+  final Value<String> hostId;
+  final Value<String> body;
+  final Value<DateTime> createdAt;
+  final Value<String?> label;
+  const MemoVersionsCompanion({
+    this.id = const Value.absent(),
+    this.hostId = const Value.absent(),
+    this.body = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.label = const Value.absent(),
+  });
+  MemoVersionsCompanion.insert({
+    this.id = const Value.absent(),
+    required String hostId,
+    required String body,
+    required DateTime createdAt,
+    this.label = const Value.absent(),
+  }) : hostId = Value(hostId),
+       body = Value(body),
+       createdAt = Value(createdAt);
+  static Insertable<MemoVersionRow> custom({
+    Expression<int>? id,
+    Expression<String>? hostId,
+    Expression<String>? body,
+    Expression<DateTime>? createdAt,
+    Expression<String>? label,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (hostId != null) 'host_id': hostId,
+      if (body != null) 'body': body,
+      if (createdAt != null) 'created_at': createdAt,
+      if (label != null) 'label': label,
+    });
+  }
+
+  MemoVersionsCompanion copyWith({
+    Value<int>? id,
+    Value<String>? hostId,
+    Value<String>? body,
+    Value<DateTime>? createdAt,
+    Value<String?>? label,
+  }) {
+    return MemoVersionsCompanion(
+      id: id ?? this.id,
+      hostId: hostId ?? this.hostId,
+      body: body ?? this.body,
+      createdAt: createdAt ?? this.createdAt,
+      label: label ?? this.label,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (hostId.present) {
+      map['host_id'] = Variable<String>(hostId.value);
+    }
+    if (body.present) {
+      map['body'] = Variable<String>(body.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<DateTime>(createdAt.value);
+    }
+    if (label.present) {
+      map['label'] = Variable<String>(label.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MemoVersionsCompanion(')
+          ..write('id: $id, ')
+          ..write('hostId: $hostId, ')
+          ..write('body: $body, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('label: $label')
+          ..write(')'))
+        .toString();
+  }
+}
+
 class $SessionLogsTable extends SessionLogs
     with TableInfo<$SessionLogsTable, SessionLogRow> {
   @override
@@ -3281,6 +3733,1123 @@ class SessionLogsCompanion extends UpdateCompanion<SessionLogRow> {
   }
 }
 
+class $SshKeysTable extends SshKeys with TableInfo<$SshKeysTable, SshKeyRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $SshKeysTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _nameMeta = const VerificationMeta('name');
+  @override
+  late final GeneratedColumn<String> name = GeneratedColumn<String>(
+    'name',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _keyTypeMeta = const VerificationMeta(
+    'keyType',
+  );
+  @override
+  late final GeneratedColumn<String> keyType = GeneratedColumn<String>(
+    'key_type',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _publicKeyMeta = const VerificationMeta(
+    'publicKey',
+  );
+  @override
+  late final GeneratedColumn<String> publicKey = GeneratedColumn<String>(
+    'public_key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _fingerprintMeta = const VerificationMeta(
+    'fingerprint',
+  );
+  @override
+  late final GeneratedColumn<String> fingerprint = GeneratedColumn<String>(
+    'fingerprint',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _secretRefMeta = const VerificationMeta(
+    'secretRef',
+  );
+  @override
+  late final GeneratedColumn<String> secretRef = GeneratedColumn<String>(
+    'secret_ref',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _sourceMeta = const VerificationMeta('source');
+  @override
+  late final GeneratedColumn<int> source = GeneratedColumn<int>(
+    'source',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    name,
+    keyType,
+    publicKey,
+    fingerprint,
+    secretRef,
+    source,
+    createdAt,
+    updatedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'ssh_keys';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<SshKeyRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('name')) {
+      context.handle(
+        _nameMeta,
+        name.isAcceptableOrUnknown(data['name']!, _nameMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_nameMeta);
+    }
+    if (data.containsKey('key_type')) {
+      context.handle(
+        _keyTypeMeta,
+        keyType.isAcceptableOrUnknown(data['key_type']!, _keyTypeMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_keyTypeMeta);
+    }
+    if (data.containsKey('public_key')) {
+      context.handle(
+        _publicKeyMeta,
+        publicKey.isAcceptableOrUnknown(data['public_key']!, _publicKeyMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_publicKeyMeta);
+    }
+    if (data.containsKey('fingerprint')) {
+      context.handle(
+        _fingerprintMeta,
+        fingerprint.isAcceptableOrUnknown(
+          data['fingerprint']!,
+          _fingerprintMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_fingerprintMeta);
+    }
+    if (data.containsKey('secret_ref')) {
+      context.handle(
+        _secretRefMeta,
+        secretRef.isAcceptableOrUnknown(data['secret_ref']!, _secretRefMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_secretRefMeta);
+    }
+    if (data.containsKey('source')) {
+      context.handle(
+        _sourceMeta,
+        source.isAcceptableOrUnknown(data['source']!, _sourceMeta),
+      );
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  SshKeyRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return SshKeyRow(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      name: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}name'],
+      )!,
+      keyType: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}key_type'],
+      )!,
+      publicKey: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}public_key'],
+      )!,
+      fingerprint: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}fingerprint'],
+      )!,
+      secretRef: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}secret_ref'],
+      )!,
+      source: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}source'],
+      )!,
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}created_at'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}updated_at'],
+      )!,
+    );
+  }
+
+  @override
+  $SshKeysTable createAlias(String alias) {
+    return $SshKeysTable(attachedDatabase, alias);
+  }
+}
+
+class SshKeyRow extends DataClass implements Insertable<SshKeyRow> {
+  final String id;
+  final String name;
+  final String keyType;
+  final String publicKey;
+  final String fingerprint;
+  final String secretRef;
+  final int source;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+  const SshKeyRow({
+    required this.id,
+    required this.name,
+    required this.keyType,
+    required this.publicKey,
+    required this.fingerprint,
+    required this.secretRef,
+    required this.source,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['name'] = Variable<String>(name);
+    map['key_type'] = Variable<String>(keyType);
+    map['public_key'] = Variable<String>(publicKey);
+    map['fingerprint'] = Variable<String>(fingerprint);
+    map['secret_ref'] = Variable<String>(secretRef);
+    map['source'] = Variable<int>(source);
+    map['created_at'] = Variable<DateTime>(createdAt);
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    return map;
+  }
+
+  SshKeysCompanion toCompanion(bool nullToAbsent) {
+    return SshKeysCompanion(
+      id: Value(id),
+      name: Value(name),
+      keyType: Value(keyType),
+      publicKey: Value(publicKey),
+      fingerprint: Value(fingerprint),
+      secretRef: Value(secretRef),
+      source: Value(source),
+      createdAt: Value(createdAt),
+      updatedAt: Value(updatedAt),
+    );
+  }
+
+  factory SshKeyRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return SshKeyRow(
+      id: serializer.fromJson<String>(json['id']),
+      name: serializer.fromJson<String>(json['name']),
+      keyType: serializer.fromJson<String>(json['keyType']),
+      publicKey: serializer.fromJson<String>(json['publicKey']),
+      fingerprint: serializer.fromJson<String>(json['fingerprint']),
+      secretRef: serializer.fromJson<String>(json['secretRef']),
+      source: serializer.fromJson<int>(json['source']),
+      createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'name': serializer.toJson<String>(name),
+      'keyType': serializer.toJson<String>(keyType),
+      'publicKey': serializer.toJson<String>(publicKey),
+      'fingerprint': serializer.toJson<String>(fingerprint),
+      'secretRef': serializer.toJson<String>(secretRef),
+      'source': serializer.toJson<int>(source),
+      'createdAt': serializer.toJson<DateTime>(createdAt),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+    };
+  }
+
+  SshKeyRow copyWith({
+    String? id,
+    String? name,
+    String? keyType,
+    String? publicKey,
+    String? fingerprint,
+    String? secretRef,
+    int? source,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+  }) => SshKeyRow(
+    id: id ?? this.id,
+    name: name ?? this.name,
+    keyType: keyType ?? this.keyType,
+    publicKey: publicKey ?? this.publicKey,
+    fingerprint: fingerprint ?? this.fingerprint,
+    secretRef: secretRef ?? this.secretRef,
+    source: source ?? this.source,
+    createdAt: createdAt ?? this.createdAt,
+    updatedAt: updatedAt ?? this.updatedAt,
+  );
+  SshKeyRow copyWithCompanion(SshKeysCompanion data) {
+    return SshKeyRow(
+      id: data.id.present ? data.id.value : this.id,
+      name: data.name.present ? data.name.value : this.name,
+      keyType: data.keyType.present ? data.keyType.value : this.keyType,
+      publicKey: data.publicKey.present ? data.publicKey.value : this.publicKey,
+      fingerprint: data.fingerprint.present
+          ? data.fingerprint.value
+          : this.fingerprint,
+      secretRef: data.secretRef.present ? data.secretRef.value : this.secretRef,
+      source: data.source.present ? data.source.value : this.source,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SshKeyRow(')
+          ..write('id: $id, ')
+          ..write('name: $name, ')
+          ..write('keyType: $keyType, ')
+          ..write('publicKey: $publicKey, ')
+          ..write('fingerprint: $fingerprint, ')
+          ..write('secretRef: $secretRef, ')
+          ..write('source: $source, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    name,
+    keyType,
+    publicKey,
+    fingerprint,
+    secretRef,
+    source,
+    createdAt,
+    updatedAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is SshKeyRow &&
+          other.id == this.id &&
+          other.name == this.name &&
+          other.keyType == this.keyType &&
+          other.publicKey == this.publicKey &&
+          other.fingerprint == this.fingerprint &&
+          other.secretRef == this.secretRef &&
+          other.source == this.source &&
+          other.createdAt == this.createdAt &&
+          other.updatedAt == this.updatedAt);
+}
+
+class SshKeysCompanion extends UpdateCompanion<SshKeyRow> {
+  final Value<String> id;
+  final Value<String> name;
+  final Value<String> keyType;
+  final Value<String> publicKey;
+  final Value<String> fingerprint;
+  final Value<String> secretRef;
+  final Value<int> source;
+  final Value<DateTime> createdAt;
+  final Value<DateTime> updatedAt;
+  final Value<int> rowid;
+  const SshKeysCompanion({
+    this.id = const Value.absent(),
+    this.name = const Value.absent(),
+    this.keyType = const Value.absent(),
+    this.publicKey = const Value.absent(),
+    this.fingerprint = const Value.absent(),
+    this.secretRef = const Value.absent(),
+    this.source = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  SshKeysCompanion.insert({
+    required String id,
+    required String name,
+    required String keyType,
+    required String publicKey,
+    required String fingerprint,
+    required String secretRef,
+    this.source = const Value.absent(),
+    required DateTime createdAt,
+    required DateTime updatedAt,
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       name = Value(name),
+       keyType = Value(keyType),
+       publicKey = Value(publicKey),
+       fingerprint = Value(fingerprint),
+       secretRef = Value(secretRef),
+       createdAt = Value(createdAt),
+       updatedAt = Value(updatedAt);
+  static Insertable<SshKeyRow> custom({
+    Expression<String>? id,
+    Expression<String>? name,
+    Expression<String>? keyType,
+    Expression<String>? publicKey,
+    Expression<String>? fingerprint,
+    Expression<String>? secretRef,
+    Expression<int>? source,
+    Expression<DateTime>? createdAt,
+    Expression<DateTime>? updatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (name != null) 'name': name,
+      if (keyType != null) 'key_type': keyType,
+      if (publicKey != null) 'public_key': publicKey,
+      if (fingerprint != null) 'fingerprint': fingerprint,
+      if (secretRef != null) 'secret_ref': secretRef,
+      if (source != null) 'source': source,
+      if (createdAt != null) 'created_at': createdAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  SshKeysCompanion copyWith({
+    Value<String>? id,
+    Value<String>? name,
+    Value<String>? keyType,
+    Value<String>? publicKey,
+    Value<String>? fingerprint,
+    Value<String>? secretRef,
+    Value<int>? source,
+    Value<DateTime>? createdAt,
+    Value<DateTime>? updatedAt,
+    Value<int>? rowid,
+  }) {
+    return SshKeysCompanion(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      keyType: keyType ?? this.keyType,
+      publicKey: publicKey ?? this.publicKey,
+      fingerprint: fingerprint ?? this.fingerprint,
+      secretRef: secretRef ?? this.secretRef,
+      source: source ?? this.source,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (name.present) {
+      map['name'] = Variable<String>(name.value);
+    }
+    if (keyType.present) {
+      map['key_type'] = Variable<String>(keyType.value);
+    }
+    if (publicKey.present) {
+      map['public_key'] = Variable<String>(publicKey.value);
+    }
+    if (fingerprint.present) {
+      map['fingerprint'] = Variable<String>(fingerprint.value);
+    }
+    if (secretRef.present) {
+      map['secret_ref'] = Variable<String>(secretRef.value);
+    }
+    if (source.present) {
+      map['source'] = Variable<int>(source.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<DateTime>(createdAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SshKeysCompanion(')
+          ..write('id: $id, ')
+          ..write('name: $name, ')
+          ..write('keyType: $keyType, ')
+          ..write('publicKey: $publicKey, ')
+          ..write('fingerprint: $fingerprint, ')
+          ..write('secretRef: $secretRef, ')
+          ..write('source: $source, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $IdentitiesTable extends Identities
+    with TableInfo<$IdentitiesTable, IdentityRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $IdentitiesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _labelMeta = const VerificationMeta('label');
+  @override
+  late final GeneratedColumn<String> label = GeneratedColumn<String>(
+    'label',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _usernameMeta = const VerificationMeta(
+    'username',
+  );
+  @override
+  late final GeneratedColumn<String> username = GeneratedColumn<String>(
+    'username',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _authTypeMeta = const VerificationMeta(
+    'authType',
+  );
+  @override
+  late final GeneratedColumn<int> authType = GeneratedColumn<int>(
+    'auth_type',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _keyIdMeta = const VerificationMeta('keyId');
+  @override
+  late final GeneratedColumn<String> keyId = GeneratedColumn<String>(
+    'key_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _secretRefMeta = const VerificationMeta(
+    'secretRef',
+  );
+  @override
+  late final GeneratedColumn<String> secretRef = GeneratedColumn<String>(
+    'secret_ref',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _hostScopedMeta = const VerificationMeta(
+    'hostScoped',
+  );
+  @override
+  late final GeneratedColumn<bool> hostScoped = GeneratedColumn<bool>(
+    'host_scoped',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("host_scoped" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    label,
+    username,
+    authType,
+    keyId,
+    secretRef,
+    hostScoped,
+    createdAt,
+    updatedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'identities';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<IdentityRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('label')) {
+      context.handle(
+        _labelMeta,
+        label.isAcceptableOrUnknown(data['label']!, _labelMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_labelMeta);
+    }
+    if (data.containsKey('username')) {
+      context.handle(
+        _usernameMeta,
+        username.isAcceptableOrUnknown(data['username']!, _usernameMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_usernameMeta);
+    }
+    if (data.containsKey('auth_type')) {
+      context.handle(
+        _authTypeMeta,
+        authType.isAcceptableOrUnknown(data['auth_type']!, _authTypeMeta),
+      );
+    }
+    if (data.containsKey('key_id')) {
+      context.handle(
+        _keyIdMeta,
+        keyId.isAcceptableOrUnknown(data['key_id']!, _keyIdMeta),
+      );
+    }
+    if (data.containsKey('secret_ref')) {
+      context.handle(
+        _secretRefMeta,
+        secretRef.isAcceptableOrUnknown(data['secret_ref']!, _secretRefMeta),
+      );
+    }
+    if (data.containsKey('host_scoped')) {
+      context.handle(
+        _hostScopedMeta,
+        hostScoped.isAcceptableOrUnknown(data['host_scoped']!, _hostScopedMeta),
+      );
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  IdentityRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return IdentityRow(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      label: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}label'],
+      )!,
+      username: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}username'],
+      )!,
+      authType: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}auth_type'],
+      )!,
+      keyId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}key_id'],
+      ),
+      secretRef: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}secret_ref'],
+      ),
+      hostScoped: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}host_scoped'],
+      )!,
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}created_at'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}updated_at'],
+      )!,
+    );
+  }
+
+  @override
+  $IdentitiesTable createAlias(String alias) {
+    return $IdentitiesTable(attachedDatabase, alias);
+  }
+}
+
+class IdentityRow extends DataClass implements Insertable<IdentityRow> {
+  final String id;
+  final String label;
+  final String username;
+  final int authType;
+  final String? keyId;
+  final String? secretRef;
+  final bool hostScoped;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+  const IdentityRow({
+    required this.id,
+    required this.label,
+    required this.username,
+    required this.authType,
+    this.keyId,
+    this.secretRef,
+    required this.hostScoped,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['label'] = Variable<String>(label);
+    map['username'] = Variable<String>(username);
+    map['auth_type'] = Variable<int>(authType);
+    if (!nullToAbsent || keyId != null) {
+      map['key_id'] = Variable<String>(keyId);
+    }
+    if (!nullToAbsent || secretRef != null) {
+      map['secret_ref'] = Variable<String>(secretRef);
+    }
+    map['host_scoped'] = Variable<bool>(hostScoped);
+    map['created_at'] = Variable<DateTime>(createdAt);
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    return map;
+  }
+
+  IdentitiesCompanion toCompanion(bool nullToAbsent) {
+    return IdentitiesCompanion(
+      id: Value(id),
+      label: Value(label),
+      username: Value(username),
+      authType: Value(authType),
+      keyId: keyId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(keyId),
+      secretRef: secretRef == null && nullToAbsent
+          ? const Value.absent()
+          : Value(secretRef),
+      hostScoped: Value(hostScoped),
+      createdAt: Value(createdAt),
+      updatedAt: Value(updatedAt),
+    );
+  }
+
+  factory IdentityRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return IdentityRow(
+      id: serializer.fromJson<String>(json['id']),
+      label: serializer.fromJson<String>(json['label']),
+      username: serializer.fromJson<String>(json['username']),
+      authType: serializer.fromJson<int>(json['authType']),
+      keyId: serializer.fromJson<String?>(json['keyId']),
+      secretRef: serializer.fromJson<String?>(json['secretRef']),
+      hostScoped: serializer.fromJson<bool>(json['hostScoped']),
+      createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'label': serializer.toJson<String>(label),
+      'username': serializer.toJson<String>(username),
+      'authType': serializer.toJson<int>(authType),
+      'keyId': serializer.toJson<String?>(keyId),
+      'secretRef': serializer.toJson<String?>(secretRef),
+      'hostScoped': serializer.toJson<bool>(hostScoped),
+      'createdAt': serializer.toJson<DateTime>(createdAt),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+    };
+  }
+
+  IdentityRow copyWith({
+    String? id,
+    String? label,
+    String? username,
+    int? authType,
+    Value<String?> keyId = const Value.absent(),
+    Value<String?> secretRef = const Value.absent(),
+    bool? hostScoped,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+  }) => IdentityRow(
+    id: id ?? this.id,
+    label: label ?? this.label,
+    username: username ?? this.username,
+    authType: authType ?? this.authType,
+    keyId: keyId.present ? keyId.value : this.keyId,
+    secretRef: secretRef.present ? secretRef.value : this.secretRef,
+    hostScoped: hostScoped ?? this.hostScoped,
+    createdAt: createdAt ?? this.createdAt,
+    updatedAt: updatedAt ?? this.updatedAt,
+  );
+  IdentityRow copyWithCompanion(IdentitiesCompanion data) {
+    return IdentityRow(
+      id: data.id.present ? data.id.value : this.id,
+      label: data.label.present ? data.label.value : this.label,
+      username: data.username.present ? data.username.value : this.username,
+      authType: data.authType.present ? data.authType.value : this.authType,
+      keyId: data.keyId.present ? data.keyId.value : this.keyId,
+      secretRef: data.secretRef.present ? data.secretRef.value : this.secretRef,
+      hostScoped: data.hostScoped.present
+          ? data.hostScoped.value
+          : this.hostScoped,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('IdentityRow(')
+          ..write('id: $id, ')
+          ..write('label: $label, ')
+          ..write('username: $username, ')
+          ..write('authType: $authType, ')
+          ..write('keyId: $keyId, ')
+          ..write('secretRef: $secretRef, ')
+          ..write('hostScoped: $hostScoped, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    label,
+    username,
+    authType,
+    keyId,
+    secretRef,
+    hostScoped,
+    createdAt,
+    updatedAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is IdentityRow &&
+          other.id == this.id &&
+          other.label == this.label &&
+          other.username == this.username &&
+          other.authType == this.authType &&
+          other.keyId == this.keyId &&
+          other.secretRef == this.secretRef &&
+          other.hostScoped == this.hostScoped &&
+          other.createdAt == this.createdAt &&
+          other.updatedAt == this.updatedAt);
+}
+
+class IdentitiesCompanion extends UpdateCompanion<IdentityRow> {
+  final Value<String> id;
+  final Value<String> label;
+  final Value<String> username;
+  final Value<int> authType;
+  final Value<String?> keyId;
+  final Value<String?> secretRef;
+  final Value<bool> hostScoped;
+  final Value<DateTime> createdAt;
+  final Value<DateTime> updatedAt;
+  final Value<int> rowid;
+  const IdentitiesCompanion({
+    this.id = const Value.absent(),
+    this.label = const Value.absent(),
+    this.username = const Value.absent(),
+    this.authType = const Value.absent(),
+    this.keyId = const Value.absent(),
+    this.secretRef = const Value.absent(),
+    this.hostScoped = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  IdentitiesCompanion.insert({
+    required String id,
+    required String label,
+    required String username,
+    this.authType = const Value.absent(),
+    this.keyId = const Value.absent(),
+    this.secretRef = const Value.absent(),
+    this.hostScoped = const Value.absent(),
+    required DateTime createdAt,
+    required DateTime updatedAt,
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       label = Value(label),
+       username = Value(username),
+       createdAt = Value(createdAt),
+       updatedAt = Value(updatedAt);
+  static Insertable<IdentityRow> custom({
+    Expression<String>? id,
+    Expression<String>? label,
+    Expression<String>? username,
+    Expression<int>? authType,
+    Expression<String>? keyId,
+    Expression<String>? secretRef,
+    Expression<bool>? hostScoped,
+    Expression<DateTime>? createdAt,
+    Expression<DateTime>? updatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (label != null) 'label': label,
+      if (username != null) 'username': username,
+      if (authType != null) 'auth_type': authType,
+      if (keyId != null) 'key_id': keyId,
+      if (secretRef != null) 'secret_ref': secretRef,
+      if (hostScoped != null) 'host_scoped': hostScoped,
+      if (createdAt != null) 'created_at': createdAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  IdentitiesCompanion copyWith({
+    Value<String>? id,
+    Value<String>? label,
+    Value<String>? username,
+    Value<int>? authType,
+    Value<String?>? keyId,
+    Value<String?>? secretRef,
+    Value<bool>? hostScoped,
+    Value<DateTime>? createdAt,
+    Value<DateTime>? updatedAt,
+    Value<int>? rowid,
+  }) {
+    return IdentitiesCompanion(
+      id: id ?? this.id,
+      label: label ?? this.label,
+      username: username ?? this.username,
+      authType: authType ?? this.authType,
+      keyId: keyId ?? this.keyId,
+      secretRef: secretRef ?? this.secretRef,
+      hostScoped: hostScoped ?? this.hostScoped,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (label.present) {
+      map['label'] = Variable<String>(label.value);
+    }
+    if (username.present) {
+      map['username'] = Variable<String>(username.value);
+    }
+    if (authType.present) {
+      map['auth_type'] = Variable<int>(authType.value);
+    }
+    if (keyId.present) {
+      map['key_id'] = Variable<String>(keyId.value);
+    }
+    if (secretRef.present) {
+      map['secret_ref'] = Variable<String>(secretRef.value);
+    }
+    if (hostScoped.present) {
+      map['host_scoped'] = Variable<bool>(hostScoped.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<DateTime>(createdAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('IdentitiesCompanion(')
+          ..write('id: $id, ')
+          ..write('label: $label, ')
+          ..write('username: $username, ')
+          ..write('authType: $authType, ')
+          ..write('keyId: $keyId, ')
+          ..write('secretRef: $secretRef, ')
+          ..write('hostScoped: $hostScoped, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -3288,7 +4857,10 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $HostKeysTable hostKeys = $HostKeysTable(this);
   late final $SnippetsTable snippets = $SnippetsTable(this);
   late final $MemosTable memos = $MemosTable(this);
+  late final $MemoVersionsTable memoVersions = $MemoVersionsTable(this);
   late final $SessionLogsTable sessionLogs = $SessionLogsTable(this);
+  late final $SshKeysTable sshKeys = $SshKeysTable(this);
+  late final $IdentitiesTable identities = $IdentitiesTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -3298,7 +4870,10 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     hostKeys,
     snippets,
     memos,
+    memoVersions,
     sessionLogs,
+    sshKeys,
+    identities,
   ];
 }
 
@@ -3325,6 +4900,7 @@ typedef $$HostsTableCreateCompanionBuilder =
       Value<bool> agentForwarding,
       Value<bool> x11Forwarding,
       Value<String?> startupScript,
+      Value<String?> identityId,
       required DateTime createdAt,
       required DateTime updatedAt,
       Value<int> rowid,
@@ -3352,6 +4928,7 @@ typedef $$HostsTableUpdateCompanionBuilder =
       Value<bool> agentForwarding,
       Value<bool> x11Forwarding,
       Value<String?> startupScript,
+      Value<String?> identityId,
       Value<DateTime> createdAt,
       Value<DateTime> updatedAt,
       Value<int> rowid,
@@ -3467,6 +5044,11 @@ class $$HostsTableFilterComposer extends Composer<_$AppDatabase, $HostsTable> {
 
   ColumnFilters<String> get startupScript => $composableBuilder(
     column: $table.startupScript,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get identityId => $composableBuilder(
+    column: $table.identityId,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -3595,6 +5177,11 @@ class $$HostsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get identityId => $composableBuilder(
+    column: $table.identityId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<DateTime> get createdAt => $composableBuilder(
     column: $table.createdAt,
     builder: (column) => ColumnOrderings(column),
@@ -3708,6 +5295,11 @@ class $$HostsTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<String> get identityId => $composableBuilder(
+    column: $table.identityId,
+    builder: (column) => column,
+  );
+
   GeneratedColumn<DateTime> get createdAt =>
       $composableBuilder(column: $table.createdAt, builder: (column) => column);
 
@@ -3764,6 +5356,7 @@ class $$HostsTableTableManager
                 Value<bool> agentForwarding = const Value.absent(),
                 Value<bool> x11Forwarding = const Value.absent(),
                 Value<String?> startupScript = const Value.absent(),
+                Value<String?> identityId = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
                 Value<DateTime> updatedAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
@@ -3789,6 +5382,7 @@ class $$HostsTableTableManager
                 agentForwarding: agentForwarding,
                 x11Forwarding: x11Forwarding,
                 startupScript: startupScript,
+                identityId: identityId,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
                 rowid: rowid,
@@ -3816,6 +5410,7 @@ class $$HostsTableTableManager
                 Value<bool> agentForwarding = const Value.absent(),
                 Value<bool> x11Forwarding = const Value.absent(),
                 Value<String?> startupScript = const Value.absent(),
+                Value<String?> identityId = const Value.absent(),
                 required DateTime createdAt,
                 required DateTime updatedAt,
                 Value<int> rowid = const Value.absent(),
@@ -3841,6 +5436,7 @@ class $$HostsTableTableManager
                 agentForwarding: agentForwarding,
                 x11Forwarding: x11Forwarding,
                 startupScript: startupScript,
+                identityId: identityId,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
                 rowid: rowid,
@@ -3867,24 +5463,28 @@ typedef $$HostsTableProcessedTableManager =
       HostRow,
       PrefetchHooks Function()
     >;
-typedef $$HostKeysTableCreateCompanionBuilder = HostKeysCompanion Function({
-  required String id,
-  required String hostname,
-  required int port,
-  required String keyType,
-  required String fingerprint,
-  required DateTime pinnedAt,
-  Value<int> rowid,
-});
-typedef $$HostKeysTableUpdateCompanionBuilder = HostKeysCompanion Function({
-  Value<String> id,
-  Value<String> hostname,
-  Value<int> port,
-  Value<String> keyType,
-  Value<String> fingerprint,
-  Value<DateTime> pinnedAt,
-  Value<int> rowid,
-});
+typedef $$HostKeysTableCreateCompanionBuilder =
+    HostKeysCompanion Function({
+      required String id,
+      required String hostname,
+      required int port,
+      required String keyType,
+      required String fingerprint,
+      required DateTime pinnedAt,
+      Value<DateTime?> lastSeenAt,
+      Value<int> rowid,
+    });
+typedef $$HostKeysTableUpdateCompanionBuilder =
+    HostKeysCompanion Function({
+      Value<String> id,
+      Value<String> hostname,
+      Value<int> port,
+      Value<String> keyType,
+      Value<String> fingerprint,
+      Value<DateTime> pinnedAt,
+      Value<DateTime?> lastSeenAt,
+      Value<int> rowid,
+    });
 
 class $$HostKeysTableFilterComposer
     extends Composer<_$AppDatabase, $HostKeysTable> {
@@ -3922,6 +5522,11 @@ class $$HostKeysTableFilterComposer
 
   ColumnFilters<DateTime> get pinnedAt => $composableBuilder(
     column: $table.pinnedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get lastSeenAt => $composableBuilder(
+    column: $table.lastSeenAt,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -3964,6 +5569,11 @@ class $$HostKeysTableOrderingComposer
     column: $table.pinnedAt,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<DateTime> get lastSeenAt => $composableBuilder(
+    column: $table.lastSeenAt,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$HostKeysTableAnnotationComposer
@@ -3994,6 +5604,11 @@ class $$HostKeysTableAnnotationComposer
 
   GeneratedColumn<DateTime> get pinnedAt =>
       $composableBuilder(column: $table.pinnedAt, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get lastSeenAt => $composableBuilder(
+    column: $table.lastSeenAt,
+    builder: (column) => column,
+  );
 }
 
 class $$HostKeysTableTableManager
@@ -4033,6 +5648,7 @@ class $$HostKeysTableTableManager
                 Value<String> keyType = const Value.absent(),
                 Value<String> fingerprint = const Value.absent(),
                 Value<DateTime> pinnedAt = const Value.absent(),
+                Value<DateTime?> lastSeenAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => HostKeysCompanion(
                 id: id,
@@ -4041,6 +5657,7 @@ class $$HostKeysTableTableManager
                 keyType: keyType,
                 fingerprint: fingerprint,
                 pinnedAt: pinnedAt,
+                lastSeenAt: lastSeenAt,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -4051,6 +5668,7 @@ class $$HostKeysTableTableManager
                 required String keyType,
                 required String fingerprint,
                 required DateTime pinnedAt,
+                Value<DateTime?> lastSeenAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => HostKeysCompanion.insert(
                 id: id,
@@ -4059,6 +5677,7 @@ class $$HostKeysTableTableManager
                 keyType: keyType,
                 fingerprint: fingerprint,
                 pinnedAt: pinnedAt,
+                lastSeenAt: lastSeenAt,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0
@@ -4509,6 +6128,200 @@ typedef $$MemosTableProcessedTableManager =
       MemoRow,
       PrefetchHooks Function()
     >;
+typedef $$MemoVersionsTableCreateCompanionBuilder =
+    MemoVersionsCompanion Function({
+      Value<int> id,
+      required String hostId,
+      required String body,
+      required DateTime createdAt,
+      Value<String?> label,
+    });
+typedef $$MemoVersionsTableUpdateCompanionBuilder =
+    MemoVersionsCompanion Function({
+      Value<int> id,
+      Value<String> hostId,
+      Value<String> body,
+      Value<DateTime> createdAt,
+      Value<String?> label,
+    });
+
+class $$MemoVersionsTableFilterComposer
+    extends Composer<_$AppDatabase, $MemoVersionsTable> {
+  $$MemoVersionsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get hostId => $composableBuilder(
+    column: $table.hostId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get body => $composableBuilder(
+    column: $table.body,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get label => $composableBuilder(
+    column: $table.label,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$MemoVersionsTableOrderingComposer
+    extends Composer<_$AppDatabase, $MemoVersionsTable> {
+  $$MemoVersionsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get hostId => $composableBuilder(
+    column: $table.hostId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get body => $composableBuilder(
+    column: $table.body,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get label => $composableBuilder(
+    column: $table.label,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$MemoVersionsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $MemoVersionsTable> {
+  $$MemoVersionsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get hostId =>
+      $composableBuilder(column: $table.hostId, builder: (column) => column);
+
+  GeneratedColumn<String> get body =>
+      $composableBuilder(column: $table.body, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<String> get label =>
+      $composableBuilder(column: $table.label, builder: (column) => column);
+}
+
+class $$MemoVersionsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $MemoVersionsTable,
+          MemoVersionRow,
+          $$MemoVersionsTableFilterComposer,
+          $$MemoVersionsTableOrderingComposer,
+          $$MemoVersionsTableAnnotationComposer,
+          $$MemoVersionsTableCreateCompanionBuilder,
+          $$MemoVersionsTableUpdateCompanionBuilder,
+          (
+            MemoVersionRow,
+            BaseReferences<_$AppDatabase, $MemoVersionsTable, MemoVersionRow>,
+          ),
+          MemoVersionRow,
+          PrefetchHooks Function()
+        > {
+  $$MemoVersionsTableTableManager(_$AppDatabase db, $MemoVersionsTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$MemoVersionsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$MemoVersionsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$MemoVersionsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<String> hostId = const Value.absent(),
+                Value<String> body = const Value.absent(),
+                Value<DateTime> createdAt = const Value.absent(),
+                Value<String?> label = const Value.absent(),
+              }) => MemoVersionsCompanion(
+                id: id,
+                hostId: hostId,
+                body: body,
+                createdAt: createdAt,
+                label: label,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                required String hostId,
+                required String body,
+                required DateTime createdAt,
+                Value<String?> label = const Value.absent(),
+              }) => MemoVersionsCompanion.insert(
+                id: id,
+                hostId: hostId,
+                body: body,
+                createdAt: createdAt,
+                label: label,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$MemoVersionsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $MemoVersionsTable,
+      MemoVersionRow,
+      $$MemoVersionsTableFilterComposer,
+      $$MemoVersionsTableOrderingComposer,
+      $$MemoVersionsTableAnnotationComposer,
+      $$MemoVersionsTableCreateCompanionBuilder,
+      $$MemoVersionsTableUpdateCompanionBuilder,
+      (
+        MemoVersionRow,
+        BaseReferences<_$AppDatabase, $MemoVersionsTable, MemoVersionRow>,
+      ),
+      MemoVersionRow,
+      PrefetchHooks Function()
+    >;
 typedef $$SessionLogsTableCreateCompanionBuilder =
     SessionLogsCompanion Function({
       required String id,
@@ -4844,6 +6657,556 @@ typedef $$SessionLogsTableProcessedTableManager =
       SessionLogRow,
       PrefetchHooks Function()
     >;
+typedef $$SshKeysTableCreateCompanionBuilder =
+    SshKeysCompanion Function({
+      required String id,
+      required String name,
+      required String keyType,
+      required String publicKey,
+      required String fingerprint,
+      required String secretRef,
+      Value<int> source,
+      required DateTime createdAt,
+      required DateTime updatedAt,
+      Value<int> rowid,
+    });
+typedef $$SshKeysTableUpdateCompanionBuilder =
+    SshKeysCompanion Function({
+      Value<String> id,
+      Value<String> name,
+      Value<String> keyType,
+      Value<String> publicKey,
+      Value<String> fingerprint,
+      Value<String> secretRef,
+      Value<int> source,
+      Value<DateTime> createdAt,
+      Value<DateTime> updatedAt,
+      Value<int> rowid,
+    });
+
+class $$SshKeysTableFilterComposer
+    extends Composer<_$AppDatabase, $SshKeysTable> {
+  $$SshKeysTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get keyType => $composableBuilder(
+    column: $table.keyType,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get publicKey => $composableBuilder(
+    column: $table.publicKey,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get fingerprint => $composableBuilder(
+    column: $table.fingerprint,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get secretRef => $composableBuilder(
+    column: $table.secretRef,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$SshKeysTableOrderingComposer
+    extends Composer<_$AppDatabase, $SshKeysTable> {
+  $$SshKeysTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get keyType => $composableBuilder(
+    column: $table.keyType,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get publicKey => $composableBuilder(
+    column: $table.publicKey,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get fingerprint => $composableBuilder(
+    column: $table.fingerprint,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get secretRef => $composableBuilder(
+    column: $table.secretRef,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$SshKeysTableAnnotationComposer
+    extends Composer<_$AppDatabase, $SshKeysTable> {
+  $$SshKeysTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get name =>
+      $composableBuilder(column: $table.name, builder: (column) => column);
+
+  GeneratedColumn<String> get keyType =>
+      $composableBuilder(column: $table.keyType, builder: (column) => column);
+
+  GeneratedColumn<String> get publicKey =>
+      $composableBuilder(column: $table.publicKey, builder: (column) => column);
+
+  GeneratedColumn<String> get fingerprint => $composableBuilder(
+    column: $table.fingerprint,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get secretRef =>
+      $composableBuilder(column: $table.secretRef, builder: (column) => column);
+
+  GeneratedColumn<int> get source =>
+      $composableBuilder(column: $table.source, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $$SshKeysTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $SshKeysTable,
+          SshKeyRow,
+          $$SshKeysTableFilterComposer,
+          $$SshKeysTableOrderingComposer,
+          $$SshKeysTableAnnotationComposer,
+          $$SshKeysTableCreateCompanionBuilder,
+          $$SshKeysTableUpdateCompanionBuilder,
+          (SshKeyRow, BaseReferences<_$AppDatabase, $SshKeysTable, SshKeyRow>),
+          SshKeyRow,
+          PrefetchHooks Function()
+        > {
+  $$SshKeysTableTableManager(_$AppDatabase db, $SshKeysTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$SshKeysTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$SshKeysTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$SshKeysTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<String> name = const Value.absent(),
+                Value<String> keyType = const Value.absent(),
+                Value<String> publicKey = const Value.absent(),
+                Value<String> fingerprint = const Value.absent(),
+                Value<String> secretRef = const Value.absent(),
+                Value<int> source = const Value.absent(),
+                Value<DateTime> createdAt = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => SshKeysCompanion(
+                id: id,
+                name: name,
+                keyType: keyType,
+                publicKey: publicKey,
+                fingerprint: fingerprint,
+                secretRef: secretRef,
+                source: source,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                required String name,
+                required String keyType,
+                required String publicKey,
+                required String fingerprint,
+                required String secretRef,
+                Value<int> source = const Value.absent(),
+                required DateTime createdAt,
+                required DateTime updatedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => SshKeysCompanion.insert(
+                id: id,
+                name: name,
+                keyType: keyType,
+                publicKey: publicKey,
+                fingerprint: fingerprint,
+                secretRef: secretRef,
+                source: source,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$SshKeysTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $SshKeysTable,
+      SshKeyRow,
+      $$SshKeysTableFilterComposer,
+      $$SshKeysTableOrderingComposer,
+      $$SshKeysTableAnnotationComposer,
+      $$SshKeysTableCreateCompanionBuilder,
+      $$SshKeysTableUpdateCompanionBuilder,
+      (SshKeyRow, BaseReferences<_$AppDatabase, $SshKeysTable, SshKeyRow>),
+      SshKeyRow,
+      PrefetchHooks Function()
+    >;
+typedef $$IdentitiesTableCreateCompanionBuilder =
+    IdentitiesCompanion Function({
+      required String id,
+      required String label,
+      required String username,
+      Value<int> authType,
+      Value<String?> keyId,
+      Value<String?> secretRef,
+      Value<bool> hostScoped,
+      required DateTime createdAt,
+      required DateTime updatedAt,
+      Value<int> rowid,
+    });
+typedef $$IdentitiesTableUpdateCompanionBuilder =
+    IdentitiesCompanion Function({
+      Value<String> id,
+      Value<String> label,
+      Value<String> username,
+      Value<int> authType,
+      Value<String?> keyId,
+      Value<String?> secretRef,
+      Value<bool> hostScoped,
+      Value<DateTime> createdAt,
+      Value<DateTime> updatedAt,
+      Value<int> rowid,
+    });
+
+class $$IdentitiesTableFilterComposer
+    extends Composer<_$AppDatabase, $IdentitiesTable> {
+  $$IdentitiesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get label => $composableBuilder(
+    column: $table.label,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get username => $composableBuilder(
+    column: $table.username,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get authType => $composableBuilder(
+    column: $table.authType,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get keyId => $composableBuilder(
+    column: $table.keyId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get secretRef => $composableBuilder(
+    column: $table.secretRef,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get hostScoped => $composableBuilder(
+    column: $table.hostScoped,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$IdentitiesTableOrderingComposer
+    extends Composer<_$AppDatabase, $IdentitiesTable> {
+  $$IdentitiesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get label => $composableBuilder(
+    column: $table.label,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get username => $composableBuilder(
+    column: $table.username,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get authType => $composableBuilder(
+    column: $table.authType,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get keyId => $composableBuilder(
+    column: $table.keyId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get secretRef => $composableBuilder(
+    column: $table.secretRef,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get hostScoped => $composableBuilder(
+    column: $table.hostScoped,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$IdentitiesTableAnnotationComposer
+    extends Composer<_$AppDatabase, $IdentitiesTable> {
+  $$IdentitiesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get label =>
+      $composableBuilder(column: $table.label, builder: (column) => column);
+
+  GeneratedColumn<String> get username =>
+      $composableBuilder(column: $table.username, builder: (column) => column);
+
+  GeneratedColumn<int> get authType =>
+      $composableBuilder(column: $table.authType, builder: (column) => column);
+
+  GeneratedColumn<String> get keyId =>
+      $composableBuilder(column: $table.keyId, builder: (column) => column);
+
+  GeneratedColumn<String> get secretRef =>
+      $composableBuilder(column: $table.secretRef, builder: (column) => column);
+
+  GeneratedColumn<bool> get hostScoped => $composableBuilder(
+    column: $table.hostScoped,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $$IdentitiesTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $IdentitiesTable,
+          IdentityRow,
+          $$IdentitiesTableFilterComposer,
+          $$IdentitiesTableOrderingComposer,
+          $$IdentitiesTableAnnotationComposer,
+          $$IdentitiesTableCreateCompanionBuilder,
+          $$IdentitiesTableUpdateCompanionBuilder,
+          (
+            IdentityRow,
+            BaseReferences<_$AppDatabase, $IdentitiesTable, IdentityRow>,
+          ),
+          IdentityRow,
+          PrefetchHooks Function()
+        > {
+  $$IdentitiesTableTableManager(_$AppDatabase db, $IdentitiesTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$IdentitiesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$IdentitiesTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$IdentitiesTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<String> label = const Value.absent(),
+                Value<String> username = const Value.absent(),
+                Value<int> authType = const Value.absent(),
+                Value<String?> keyId = const Value.absent(),
+                Value<String?> secretRef = const Value.absent(),
+                Value<bool> hostScoped = const Value.absent(),
+                Value<DateTime> createdAt = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => IdentitiesCompanion(
+                id: id,
+                label: label,
+                username: username,
+                authType: authType,
+                keyId: keyId,
+                secretRef: secretRef,
+                hostScoped: hostScoped,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                required String label,
+                required String username,
+                Value<int> authType = const Value.absent(),
+                Value<String?> keyId = const Value.absent(),
+                Value<String?> secretRef = const Value.absent(),
+                Value<bool> hostScoped = const Value.absent(),
+                required DateTime createdAt,
+                required DateTime updatedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => IdentitiesCompanion.insert(
+                id: id,
+                label: label,
+                username: username,
+                authType: authType,
+                keyId: keyId,
+                secretRef: secretRef,
+                hostScoped: hostScoped,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$IdentitiesTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $IdentitiesTable,
+      IdentityRow,
+      $$IdentitiesTableFilterComposer,
+      $$IdentitiesTableOrderingComposer,
+      $$IdentitiesTableAnnotationComposer,
+      $$IdentitiesTableCreateCompanionBuilder,
+      $$IdentitiesTableUpdateCompanionBuilder,
+      (
+        IdentityRow,
+        BaseReferences<_$AppDatabase, $IdentitiesTable, IdentityRow>,
+      ),
+      IdentityRow,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -4856,6 +7219,12 @@ class $AppDatabaseManager {
       $$SnippetsTableTableManager(_db, _db.snippets);
   $$MemosTableTableManager get memos =>
       $$MemosTableTableManager(_db, _db.memos);
+  $$MemoVersionsTableTableManager get memoVersions =>
+      $$MemoVersionsTableTableManager(_db, _db.memoVersions);
   $$SessionLogsTableTableManager get sessionLogs =>
       $$SessionLogsTableTableManager(_db, _db.sessionLogs);
+  $$SshKeysTableTableManager get sshKeys =>
+      $$SshKeysTableTableManager(_db, _db.sshKeys);
+  $$IdentitiesTableTableManager get identities =>
+      $$IdentitiesTableTableManager(_db, _db.identities);
 }

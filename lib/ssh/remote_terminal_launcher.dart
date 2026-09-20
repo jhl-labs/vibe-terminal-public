@@ -213,15 +213,35 @@ else
   vibe_target=\$(tmux -L $serverName -f /dev/null new-session -d -P -F '#{session_id}' -s $quotedName) || exit 1
   [ -n "\$vibe_target" ] || exit 1
 fi
+# 설정 없이(-f /dev/null) 띄운 tmux는 default-terminal이 'screen'이라 내부
+# 프로그램이 8색 터미널로 인식해 ANSI 256색·truecolor가 사라진다. 바깥은
+# xterm-256color PTY이므로 256색 terminfo(가능하면 tmux-256color, 없으면
+# screen-256color)와 RGB 통과(Tc/RGB)를 켠다. COLORTERM은 SSH env로 전달되지
+# 않으므로(AcceptEnv) tmux 전역 환경에 넣어 내부 셸이 truecolor를 알게 한다.
+vibe_term=screen-256color
+if infocmp tmux-256color >/dev/null 2>&1; then vibe_term=tmux-256color; fi
+tmux -L $serverName set-option -g default-terminal "\$vibe_term" >/dev/null 2>&1 || :
+tmux -L $serverName set-option -ga terminal-overrides ',xterm-256color:Tc' >/dev/null 2>&1 || :
+tmux -L $serverName set-option -as terminal-features ',xterm-256color:RGB' >/dev/null 2>&1 || :
+tmux -L $serverName set-environment -g COLORTERM truecolor >/dev/null 2>&1 || :
+if [ "\$vibe_tmux_state" = CREATED ]; then
+  # 방금 만든 첫 셸은 옛 TERM=screen으로 이미 시작됐다. 사용자 작업이 없는
+  # 시점이므로 새 TERM/COLORTERM으로 다시 띄운다. 재개(RESUMED)한 세션은
+  # 실행 중인 작업을 죽이지 않도록 건드리지 않는다.
+  tmux -L $serverName respawn-window -k -t "\$vibe_target" >/dev/null 2>&1 || :
+fi
 tmux -L $serverName set-option -t "\$vibe_target" status off >/dev/null 2>&1 || :
 tmux -L $serverName set-option -t "\$vibe_target" prefix None >/dev/null 2>&1 || :
 tmux -L $serverName set-option -t "\$vibe_target" prefix2 None >/dev/null 2>&1 || :
 # tmux client가 사용하는 alternate screen에는 바깥 터미널의 스크롤백이
-# 없다. mouse를 켜고 WheelUpPane을 직접 바인딩해, Codex처럼 마우스를
-# 요청하는 내부 앱에서도 휠을 tmux history 탐색에 일관되게 사용한다.
+# 없다. mouse를 켜고 WheelUpPane을 직접 바인딩해, Codex처럼 main buffer에서
+# 마우스를 요청하는 인라인 TUI에서도 휠을 tmux history 탐색에 일관되게
+# 사용한다. 단 Claude Code처럼 alternate screen에서 마우스를 요청하는 앱은
+# 자체 화면을 스크롤해야 하므로 휠을 앱으로 넘긴다(send-keys -M). 무조건
+# copy-mode로 들어가면 alt screen에는 history가 없어 휠이 먹통으로 보인다.
 tmux -L $serverName set-option -t "\$vibe_target" mouse on >/dev/null 2>&1 || :
 tmux -L $serverName set-option -t "\$vibe_target" history-limit 10000 >/dev/null 2>&1 || :
-tmux -L $serverName bind-key -T root WheelUpPane 'copy-mode -e; send-keys -X -N 5 scroll-up' >/dev/null 2>&1 || :
+tmux -L $serverName bind-key -T root WheelUpPane "if -Ft= '#{&&:#{alternate_on},#{mouse_any_flag}}' 'send-keys -M' 'copy-mode -e; send-keys -X -N 5 scroll-up'" >/dev/null 2>&1 || :
 tmux -L $serverName set-option -t "\$vibe_target" @vibe_terminal_managed 1 >/dev/null 2>&1 || exit 1
 tmux -L $serverName set-option -t "\$vibe_target" @vibe_terminal_owner $quotedOwnerId >/dev/null 2>&1 || exit 1
 tmux -L $serverName set-option -t "\$vibe_target" @vibe_terminal_session_id $quotedRemoteSessionId >/dev/null 2>&1 || exit 1

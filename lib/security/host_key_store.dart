@@ -5,6 +5,13 @@ import '../data/db/app_database.dart';
 
 enum HostKeyVerdict { trustedNew, trustedKnown, mismatch }
 
+/// known_hosts 가져오기 결과: 가져온 항목 수와 건너뛴 줄 수.
+class KnownHostsImportResult {
+  const KnownHostsImportResult({required this.imported, required this.skipped});
+  final int imported;
+  final int skipped;
+}
+
 class HostKeyStore {
   HostKeyStore(this._db);
   final AppDatabase _db;
@@ -66,5 +73,63 @@ class HostKeyStore {
               ..where((t) => t.hostname.equals(hostname) & t.port.equals(port)))
             .getSingleOrNull();
     return row?.fingerprint;
+  }
+
+  /// 핀된 모든 호스트키를 호스트명순으로 반환한다.
+  Future<List<HostKeyRow>> listAll() => (_db.select(
+    _db.hostKeys,
+  )..orderBy([(t) => OrderingTerm.asc(t.hostname)])).get();
+
+  /// 핀된 호스트키를 삭제한다.
+  Future<void> remove({required String hostname, required int port}) =>
+      (_db.delete(
+        _db.hostKeys,
+      )..where((t) => t.hostname.equals(hostname) & t.port.equals(port))).go();
+
+  /// 핀된 키와 일치하는 연결이 성공했을 때 호출한다.
+  Future<void> touch({required String hostname, required int port}) =>
+      (_db.update(_db.hostKeys)
+            ..where((t) => t.hostname.equals(hostname) & t.port.equals(port)))
+          .write(HostKeysCompanion(lastSeenAt: Value(DateTime.now())));
+
+  /// OpenSSH `known_hosts` 텍스트를 가져온다. 첫 호스트 이름만 쓰고(별칭 무시),
+  /// 해시(`|1|`)·마커(`@…`)·형식이 깨진 줄은 건너뛴다.
+  Future<KnownHostsImportResult> importOpenSshKnownHosts(String content) async {
+    var imported = 0;
+    var skipped = 0;
+    for (final raw in const LineSplitter().convert(content)) {
+      final line = raw.trim();
+      if (line.isEmpty || line.startsWith('#')) continue;
+      final parts = line.split(RegExp(r'\s+'));
+      if (line.startsWith('@') || line.startsWith('|') || parts.length < 3) {
+        skipped++;
+        continue;
+      }
+      final target = _parseHostPort(parts[0].split(',').first);
+      final List<int> keyBytes;
+      try {
+        keyBytes = base64.decode(parts[2]);
+      } on FormatException {
+        skipped++;
+        continue;
+      }
+      await pin(
+        hostname: target.$1,
+        port: target.$2,
+        keyType: parts[1],
+        fingerprint: fingerprintOf(keyBytes),
+      );
+      imported++;
+    }
+    return KnownHostsImportResult(imported: imported, skipped: skipped);
+  }
+
+  /// `[host]:port` → (host, port), 그 외 → (host, 22).
+  (String, int) _parseHostPort(String token) {
+    final match = RegExp(r'^\[(.+)\]:(\d+)$').firstMatch(token);
+    if (match != null) {
+      return (match.group(1)!, int.parse(match.group(2)!));
+    }
+    return (token, 22);
   }
 }

@@ -12,33 +12,57 @@ Future<AgentLaunchSpec?> showAgentLaunchDialog(
   required AgentLaunchPreferences preferences,
   AgentCli initialCli = AgentCli.claude,
   String? initialGoal,
+  String? initialWorkingDirectory,
   required AgentLaunchProfileSaver saveProfile,
   required AgentLaunchProfileRemover removeProfile,
+  ValueChanged<String> onModelUsed = _noopModelUsed,
 }) => showDialog<AgentLaunchSpec>(
   context: context,
   builder: (_) => _AgentLaunchDialog(
     preferences: preferences,
     initialCli: initialCli,
     initialGoal: initialGoal,
+    initialWorkingDirectory: initialWorkingDirectory,
     saveProfile: saveProfile,
     removeProfile: removeProfile,
+    onModelUsed: onModelUsed,
   ),
 );
+
+void _noopModelUsed(String value) {}
+
+/// 셸 메타문자·개행이 없는 모델 이름만 허용한다. `openai/gpt-5`처럼 슬래시가
+/// 들어간 모델 식별자도 통과해야 하므로 영문/숫자/공백 아닌 일반 구두점은 넓게 허용한다.
+String? _validateModel(String? value) {
+  if (value == null || value.trim().isEmpty) return null;
+  final model = value.trim();
+  if (model.length > 200) return '모델 이름은 200자 이하여야 합니다.';
+  if (!RegExp(r'^[A-Za-z0-9][A-Za-z0-9._/:-]*$').hasMatch(model)) {
+    return '모델 이름에 사용할 수 없는 문자가 있습니다';
+  }
+  return null;
+}
 
 class _AgentLaunchDialog extends StatefulWidget {
   const _AgentLaunchDialog({
     required this.preferences,
     required this.initialCli,
     this.initialGoal,
+    this.initialWorkingDirectory,
     required this.saveProfile,
     required this.removeProfile,
+    required this.onModelUsed,
   });
 
   final AgentLaunchPreferences preferences;
   final AgentCli initialCli;
   final String? initialGoal;
+
+  /// 세션이 추적한 현재 작업 디렉터리. worktree 격리의 저장소 폴더 기본값.
+  final String? initialWorkingDirectory;
   final AgentLaunchProfileSaver saveProfile;
   final AgentLaunchProfileRemover removeProfile;
+  final ValueChanged<String> onModelUsed;
 
   @override
   State<_AgentLaunchDialog> createState() => _AgentLaunchDialogState();
@@ -48,7 +72,9 @@ class _AgentLaunchDialogState extends State<_AgentLaunchDialog> {
   final _formKey = GlobalKey<FormState>();
   final _executableController = TextEditingController();
   final _goalController = TextEditingController();
+  final _modelController = TextEditingController();
   late final TextEditingController _branchController;
+  late final TextEditingController _directoryController;
   late final TextEditingController _argumentsController;
   final Map<AgentCli, List<String>> _argumentsByCli = {};
   late AgentCli _cli;
@@ -78,19 +104,26 @@ class _AgentLaunchDialogState extends State<_AgentLaunchDialog> {
         '${now.year}${twoDigits(now.month)}${twoDigits(now.day)}-'
         '${twoDigits(now.hour)}${twoDigits(now.minute)}';
     _branchController = TextEditingController(text: 'vibe/agent-$stamp');
+    _directoryController = TextEditingController(
+      text: widget.initialWorkingDirectory ?? '',
+    );
   }
 
   @override
   void dispose() {
     _executableController.dispose();
     _goalController.dispose();
+    _modelController.dispose();
     _branchController.dispose();
+    _directoryController.dispose();
     _argumentsController.dispose();
     super.dispose();
   }
 
   void _submit() {
     if (!_formKey.currentState!.validate()) return;
+    final model = _modelController.text.trim();
+    if (model.isNotEmpty) widget.onModelUsed(model);
     Navigator.of(context).pop(
       AgentLaunchSpec(
         cli: _cli,
@@ -102,7 +135,12 @@ class _AgentLaunchDialogState extends State<_AgentLaunchDialog> {
             : _goalController.text.trim(),
         isolatedWorktree: _isolated,
         branchName: _isolated ? _branchController.text.trim() : null,
+        repositoryDirectory:
+            _isolated && _directoryController.text.trim().isNotEmpty
+            ? _directoryController.text.trim()
+            : null,
         arguments: _argumentsFromText(),
+        model: model.isEmpty ? null : model,
       ),
     );
   }
@@ -133,6 +171,7 @@ class _AgentLaunchDialogState extends State<_AgentLaunchDialog> {
       _isolated = profile.isolateWorktree;
       _executableController.text = profile.executable ?? '';
       _goalController.text = profile.initialGoal ?? '';
+      _modelController.text = profile.model ?? '';
       _argumentsByCli[cli] = List.of(profile.arguments);
       _argumentsController.text = profile.arguments.join('\n');
     });
@@ -149,6 +188,8 @@ class _AgentLaunchDialogState extends State<_AgentLaunchDialog> {
       initialValue: selected?.name ?? '${_cli.label} 작업',
     );
     if (name == null || !mounted) return;
+    final model = _modelController.text.trim();
+    if (model.isNotEmpty) widget.onModelUsed(model);
     final profile = AgentLaunchProfile(
       id: selected?.id ?? 'agent-${DateTime.now().microsecondsSinceEpoch}',
       name: name,
@@ -159,6 +200,7 @@ class _AgentLaunchDialogState extends State<_AgentLaunchDialog> {
       initialGoal: _goalController.text.trim().isEmpty
           ? null
           : _goalController.text.trim(),
+      model: model.isEmpty ? null : model,
       arguments: List.unmodifiable(_argumentsFromText()),
       isolateWorktree: _isolated,
     );
@@ -296,6 +338,44 @@ class _AgentLaunchDialogState extends State<_AgentLaunchDialog> {
                 },
               ),
               const SizedBox(height: 8),
+              TextFormField(
+                key: const ValueKey('agent-launch-model'),
+                controller: _modelController,
+                decoration: InputDecoration(
+                  labelText: '모델',
+                  hintText: '예: opus, gpt-5, qwen3-coder (비우면 CLI 기본값)',
+                  suffixIcon: widget.preferences.recentModels.isEmpty
+                      ? null
+                      : PopupMenuButton<String>(
+                          key: const ValueKey('agent-launch-model-recent'),
+                          icon: const Icon(Icons.history),
+                          onSelected: (value) =>
+                              setState(() => _modelController.text = value),
+                          itemBuilder: (context) => [
+                            for (final model in widget.preferences.recentModels)
+                              PopupMenuItem(value: model, child: Text(model)),
+                          ],
+                        ),
+                ),
+                validator: _validateModel,
+              ),
+              // OpenCode는 provider 없이 모델 이름만 적으면 못 찾는다. 규칙이
+              // CLI마다 달라, 고른 CLI에 맞는 예시를 그때 보여 준다.
+              if (_cli == AgentCli.opencode) ...[
+                const SizedBox(height: 4),
+                const Padding(
+                  key: ValueKey('agent-launch-model-help'),
+                  padding: EdgeInsets.only(left: 12),
+                  child: Text(
+                    'OpenCode는 provider/model 형식 (예: openai/gpt-5)',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: VibeColors.onSurfaceMuted,
+                    ),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 8),
               CheckboxListTile(
                 contentPadding: EdgeInsets.zero,
                 value: _isolated,
@@ -307,6 +387,16 @@ class _AgentLaunchDialogState extends State<_AgentLaunchDialog> {
                     setState(() => _isolated = value ?? false),
               ),
               if (_isolated) ...[
+                const SizedBox(height: 8),
+                TextFormField(
+                  key: const ValueKey('agent-repository-directory'),
+                  controller: _directoryController,
+                  decoration: const InputDecoration(
+                    labelText: '저장소 폴더',
+                    hintText: '/home/me/project',
+                    helperText: '세션이 파악한 현재 위치입니다. 다르면 Git 저장소 안의 경로로 고치세요.',
+                  ),
+                ),
                 const SizedBox(height: 8),
                 TextFormField(
                   key: const ValueKey('agent-branch-name'),

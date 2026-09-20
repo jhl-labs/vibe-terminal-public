@@ -17,14 +17,16 @@ extension AgentCliPresentation on AgentCli {
 enum AgentShellFlavor { posix, powershell, cmd }
 
 class AgentLaunchSpec {
-  const AgentLaunchSpec({
+  AgentLaunchSpec({
     required this.cli,
     this.isolatedWorktree = false,
     this.branchName,
     this.arguments = const [],
     this.executable,
     this.initialGoal,
-  });
+    this.repositoryDirectory,
+    String? model,
+  }) : model = model?.trim().isEmpty ?? true ? null : model!.trim();
 
   final AgentCli cli;
   final bool isolatedWorktree;
@@ -33,6 +35,13 @@ class AgentLaunchSpec {
   final String? executable;
   final String? initialGoal;
 
+  /// worktree 격리 시 저장소를 찾을 폴더. 사용자가 실행 대화상자에서 확인·수정한
+  /// 값이며, null이면 세션이 추적한 현재 작업 디렉터리를 쓴다.
+  final String? repositoryDirectory;
+
+  /// CLI에 전달할 모델 이름(예: opus, gpt-5). 비워두면 CLI 기본값을 쓴다.
+  final String? model;
+
   AgentWorkspaceContext toWorkspaceContext() => AgentWorkspaceContext(
     cli: cli,
     isolatedWorktree: isolatedWorktree,
@@ -40,6 +49,7 @@ class AgentLaunchSpec {
     arguments: List.unmodifiable(arguments),
     executable: executable,
     initialGoal: initialGoal,
+    model: model,
   );
 }
 
@@ -55,6 +65,7 @@ class AgentWorkspaceContext {
     this.repositoryRoot,
     this.worktreePath,
     this.baseRef,
+    this.model,
   });
 
   final AgentCli cli;
@@ -67,6 +78,9 @@ class AgentWorkspaceContext {
   final String? repositoryRoot;
   final String? worktreePath;
   final String? baseRef;
+
+  /// CLI에 전달할 모델 이름. null이면 CLI 기본값을 쓴다.
+  final String? model;
 
   Map<String, Object?> toJson() => {
     'cli': cli.name,
@@ -82,6 +96,7 @@ class AgentWorkspaceContext {
     if (worktreePath != null && worktreePath!.isNotEmpty)
       'worktreePath': worktreePath,
     if (baseRef != null && baseRef!.isNotEmpty) 'baseRef': baseRef,
+    if (model != null && model!.isNotEmpty) 'model': model,
   };
 
   static AgentWorkspaceContext? fromJson(Object? value) {
@@ -111,6 +126,7 @@ class AgentWorkspaceContext {
       repositoryRoot: _optionalString(value['repositoryRoot']),
       worktreePath: _optionalString(value['worktreePath']),
       baseRef: _optionalString(value['baseRef']),
+      model: _optionalString(value['model']),
     );
   }
 
@@ -234,9 +250,17 @@ class AgentLaunchCommandBuilder {
         '${_agentInvocation(spec, AgentShellFlavor.cmd)})';
   }
 
+  /// CLI별 모델 지정 인자. 현재는 claude/codex/opencode 모두 동일하게
+  /// `--model <value>` 형식을 쓴다.
+  static List<String> modelArgumentsFor(AgentCli cli, String model) => [
+    '--model',
+    model,
+  ];
+
   String _agentInvocation(AgentLaunchSpec spec, AgentShellFlavor shell) {
     final arguments = [
       ...spec.arguments,
+      if (spec.model != null) ...modelArgumentsFor(spec.cli, spec.model!),
       if (spec.initialGoal?.isNotEmpty == true) ...[
         if (spec.cli == AgentCli.opencode)
           '--prompt=${spec.initialGoal!}'

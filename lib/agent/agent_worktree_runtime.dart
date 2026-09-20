@@ -691,8 +691,14 @@ class AgentWorktreeRuntime {
     );
     final repositoryRoot = rootResult.stdout.trim();
     if (rootResult.exitCode != 0 || repositoryRoot.isEmpty) {
+      final where = workingDirectory?.trim();
       throw AgentWorktreeRuntimeException(
-        _failureMessage(rootResult, '현재 위치가 Git 저장소가 아닙니다.'),
+        _failureMessage(
+          rootResult,
+          where == null || where.isEmpty
+              ? '현재 위치가 Git 저장소가 아닙니다. 실행 대화상자에서 저장소 폴더를 지정하세요.'
+              : "'$where'은(는) Git 저장소가 아닙니다. 실행 대화상자에서 저장소 폴더를 확인하세요.",
+        ),
       );
     }
 

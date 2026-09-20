@@ -5,12 +5,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 
 import '../../app/app_version.dart';
+import '../../app/build_features.dart';
 import '../../app/theme.dart';
 import '../../settings/app_settings.dart';
 import '../../settings/shortcut_bindings.dart';
 import '../../state/providers.dart';
 import '../../sync/github_sync_service.dart';
 import '../adaptive/breakpoints.dart';
+import '../shell/right_panel_tools.dart';
 import 'action_bar_editor_page.dart';
 
 Future<void> showVibeTerminalSettings(BuildContext context) {
@@ -56,7 +58,9 @@ class _SettingsPanel extends ConsumerWidget {
     }
     if (features.settingsInteraction) {
       tabs.add(const Tab(icon: Icon(Icons.touch_app_outlined), text: '상호작용'));
-      views.add(_InteractionSettingsTab(settings: settings));
+      views.add(
+        _InteractionSettingsTab(settings: settings, features: features),
+      );
     }
     if (features.settingsShortcut) {
       tabs.add(const Tab(icon: Icon(Icons.keyboard_alt_outlined), text: '단축키'));
@@ -385,13 +389,18 @@ String _formatLineCount(int lines) {
 }
 
 class _InteractionSettingsTab extends ConsumerWidget {
-  const _InteractionSettingsTab({required this.settings});
+  const _InteractionSettingsTab({
+    required this.settings,
+    required this.features,
+  });
 
   final AppSettings settings;
+  final BuildFeatures features;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = ref.read(appSettingsProvider.notifier);
+    final panelTools = allRightPanelToolsForBuild(features);
     return _SettingsTabScroll(
       children: [
         _SettingsSection(
@@ -418,6 +427,27 @@ class _InteractionSettingsTab extends ConsumerWidget {
             ),
           ],
         ),
+        if (panelTools.isNotEmpty)
+          _SettingsSection(
+            title: '우측 패널 표시',
+            description:
+                '도구 스트립에 보일 패널을 고릅니다. 설치 여부와 무관하게 켤 수 있고, '
+                'CLI 설정 패널은 미설치 시 패널 안에서 안내합니다.',
+            children: [
+              for (final tool in panelTools)
+                _SwitchSetting(
+                  title: rightPanelToolLabel(tool),
+                  value: !settings.hiddenRightPanelTools.contains(tool.name),
+                  onChanged: (visible) =>
+                      controller.setRightPanelToolHidden(tool, !visible),
+                  leading: Icon(
+                    rightPanelToolIcon(tool),
+                    size: 18,
+                    color: VibeColors.onSurfaceMuted,
+                  ),
+                ),
+            ],
+          ),
       ],
     );
   }
@@ -1626,7 +1656,8 @@ class _AiSettingsTabState extends ConsumerState<_AiSettingsTab> {
         const SizedBox(height: 24),
         _SettingsSection(
           title: 'AI Chat 동작',
-          description: '터미널 컨텍스트 범위와 시스템 프롬프트를 조정합니다.',
+          description:
+              '화면 컨텍스트, \'로그 포함\'이나 모델 요청으로 붙는 세션 로그 범위, 시스템 프롬프트를 조정합니다.',
           children: [
             _SliderSetting(
               label: '터미널 컨텍스트',
@@ -1640,6 +1671,20 @@ class _AiSettingsTabState extends ConsumerState<_AiSettingsTab> {
               valueLabel: '${ai.maxContextLines}줄',
               onChanged: (value) =>
                   controller.setAiMaxContextLines(value.round()),
+            ),
+            const SizedBox(height: 8),
+            _SliderSetting(
+              label: '세션 로그 컨텍스트',
+              value: ai.maxLogContextLines.toDouble(),
+              min: AiSettings.minLogContextLines.toDouble(),
+              max: AiSettings.maxLogContextLineLimit.toDouble(),
+              divisions:
+                  (AiSettings.maxLogContextLineLimit -
+                      AiSettings.minLogContextLines) ~/
+                  100,
+              valueLabel: '${ai.maxLogContextLines}줄',
+              onChanged: (value) =>
+                  controller.setAiMaxLogContextLines(value.round()),
             ),
             const SizedBox(height: 12),
             TextFormField(
@@ -1975,22 +2020,25 @@ class _SliderSetting extends StatelessWidget {
 class _SwitchSetting extends StatelessWidget {
   const _SwitchSetting({
     required this.title,
-    required this.subtitle,
+    this.subtitle,
     required this.value,
     required this.onChanged,
+    this.leading,
   });
 
   final String title;
-  final String subtitle;
+  final String? subtitle;
   final bool value;
   final ValueChanged<bool>? onChanged;
+  final Widget? leading;
 
   @override
   Widget build(BuildContext context) {
     return SwitchListTile(
       contentPadding: EdgeInsets.zero,
+      secondary: leading,
       title: Text(title),
-      subtitle: Text(subtitle),
+      subtitle: subtitle == null ? null : Text(subtitle!),
       value: value,
       onChanged: onChanged,
     );

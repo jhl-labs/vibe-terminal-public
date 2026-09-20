@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/theme.dart';
-import '../../data/models/host.dart';
 import '../../data/models/snippet.dart';
 import '../../session/session.dart';
 import '../../snippets/placeholder_parser.dart';
@@ -12,8 +11,7 @@ import '../../state/providers.dart';
 import '../snippets/placeholder_form.dart';
 import '../snippets/snippet_edit_page.dart';
 
-/// 우측 패널. 스니펫 탭은 목록/검색/실행/편집/정렬, 정보 탭은 활성 세션의
-/// 호스트·인증·연결 상태와 최근 연결 이벤트를 보여준다.
+/// 우측 패널. 스니펫 목록/검색/실행/편집/정렬을 보여준다.
 class SnippetPanel extends ConsumerStatefulWidget {
   const SnippetPanel({super.key});
 
@@ -21,52 +19,9 @@ class SnippetPanel extends ConsumerStatefulWidget {
   ConsumerState<SnippetPanel> createState() => _SnippetPanelState();
 }
 
-class _SnippetPanelState extends ConsumerState<SnippetPanel>
-    with SingleTickerProviderStateMixin {
-  static const _infoTabIndex = 1;
-
+class _SnippetPanelState extends ConsumerState<SnippetPanel> {
   String _query = '';
-  Timer? _uptimeTimer;
-  late final TabController _tab;
-
-  @override
-  void initState() {
-    super.initState();
-    _tab = TabController(length: 2, vsync: this);
-    // 탭이 바뀌면 uptime 타이머를 켜거나 끄기 위해 다시 build한다.
-    _tab.addListener(_onTabChanged);
-  }
-
-  @override
-  void dispose() {
-    _uptimeTimer?.cancel();
-    _tab
-      ..removeListener(_onTabChanged)
-      ..dispose();
-    super.dispose();
-  }
-
-  void _onTabChanged() {
-    if (mounted) setState(() {});
-  }
-
-  /// 정보 탭의 연결 지속 시간(uptime)은 매초 갱신해야 하지만, 정보 탭이
-  /// 보이고 세션이 연결돼 있을 때만 타이머를 돌린다. 그 외에는 매초 rebuild할
-  /// 이유가 없다.
-  void _syncUptimeTimer(SessionInfo? active) {
-    final shouldRun =
-        _tab.index == _infoTabIndex &&
-        active?.status == SessionStatus.connected &&
-        active?.connectedAt != null;
-    if (shouldRun && _uptimeTimer == null) {
-      _uptimeTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-        if (mounted) setState(() {});
-      });
-    } else if (!shouldRun && _uptimeTimer != null) {
-      _uptimeTimer!.cancel();
-      _uptimeTimer = null;
-    }
-  }
+  bool _gistBusy = false;
 
   SessionInfo? _activeSession() {
     final sessions = ref.read(sessionManagerProvider);
@@ -165,6 +120,116 @@ class _SnippetPanelState extends ConsumerState<SnippetPanel>
     ref.invalidate(snippetListProvider);
   }
 
+  /// 로그인 토큰이 없으면 안내만 하고 null을 돌려준다.
+  String? _requireGitHubToken() {
+    final token = ref.read(appSettingsProvider).cloudSync.github.token.trim();
+    if (token.isEmpty) {
+      _showError('GitHub 로그인이 필요합니다', '설정 > GitHub 탭에서 먼저 로그인해주세요.');
+      return null;
+    }
+    return token;
+  }
+
+  Future<void> _exportToGist() async {
+    final token = _requireGitHubToken();
+    if (token == null) return;
+    setState(() => _gistBusy = true);
+    try {
+      final snippets = await ref.read(snippetRepositoryProvider).getAll();
+      final service = ref.read(gistSyncServiceProvider);
+      final content = service.encodeSnippets(snippets);
+      final existingId = ref.read(appSettingsProvider).snippetGistId.trim();
+      final result = await service.upload(
+        token: token,
+        content: content,
+        gistId: existingId.isEmpty ? null : existingId,
+      );
+      ref.read(appSettingsProvider.notifier).setSnippetGistId(result.gistId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(
+          SnackBar(content: Text('스니펫 ${snippets.length}개를 Gist로 내보냈습니다')),
+        );
+    } catch (e) {
+      _showError('내보내기 실패', e);
+    } finally {
+      if (mounted) setState(() => _gistBusy = false);
+    }
+  }
+
+  Future<void> _importFromGist() async {
+    final token = _requireGitHubToken();
+    if (token == null) return;
+    final currentId = ref.read(appSettingsProvider).snippetGistId;
+    final input = await showDialog<String>(
+      context: context,
+      builder: (ctx) => _GistIdDialog(initialValue: currentId),
+    );
+    if (input == null) return;
+    final gistId = _extractGistId(input);
+    if (gistId == null || gistId.isEmpty) {
+      _showError('가져오기 실패', 'Gist ID 또는 URL을 확인해주세요.');
+      return;
+    }
+    setState(() => _gistBusy = true);
+    try {
+      final service = ref.read(gistSyncServiceProvider);
+      final raw = await service.download(token: token, gistId: gistId);
+      final incoming = service.decodeSnippets(raw);
+      if (!mounted) return;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('가져오기'),
+          content: Text(
+            '${incoming.length}개 항목을 가져옵니다.\n'
+            '같은 id의 스니펫은 Gist 내용으로 덮어씁니다.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('취소'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('가져오기'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+      final repo = ref.read(snippetRepositoryProvider);
+      for (final s in incoming) {
+        await repo.upsert(s);
+      }
+      ref.read(appSettingsProvider.notifier).setSnippetGistId(gistId);
+      ref.invalidate(snippetListProvider);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(
+          SnackBar(content: Text('스니펫 ${incoming.length}개를 가져왔습니다')),
+        );
+    } catch (e) {
+      _showError('가져오기 실패', e);
+    } finally {
+      if (mounted) setState(() => _gistBusy = false);
+    }
+  }
+
+  /// gist 전체 URL(`https://gist.github.com/user/<id>`)이나 id 자체를 받아
+  /// id만 뽑아낸다.
+  String? _extractGistId(String input) {
+    final trimmed = input.trim();
+    if (trimmed.isEmpty) return null;
+    final uri = Uri.tryParse(trimmed);
+    if (uri != null && uri.hasScheme && uri.pathSegments.isNotEmpty) {
+      return uri.pathSegments.last;
+    }
+    return trimmed;
+  }
+
   Widget _snippetTab() {
     final asyncSnippets = ref.watch(snippetListProvider);
     final hostId = _activeSession()?.host.id;
@@ -249,213 +314,6 @@ class _SnippetPanelState extends ConsumerState<SnippetPanel>
     );
   }
 
-  Color _statusColor(SessionStatus s) => switch (s) {
-    SessionStatus.connecting => VibeColors.statusConnecting,
-    SessionStatus.connected => VibeColors.statusConnected,
-    SessionStatus.disconnected => VibeColors.statusDisconnected,
-    SessionStatus.error => VibeColors.statusError,
-  };
-
-  /// connectedAt 기준 경과 시간을 "1h 02m 03s" 형태로 포맷.
-  String _formatUptime(DateTime since) {
-    var seconds = DateTime.now().difference(since).inSeconds;
-    if (seconds < 0) seconds = 0;
-    final h = seconds ~/ 3600;
-    final m = (seconds % 3600) ~/ 60;
-    final s = seconds % 60;
-    if (h > 0) return '${h}h ${_two(m)}m ${_two(s)}s';
-    if (m > 0) return '${m}m ${_two(s)}s';
-    return '${s}s';
-  }
-
-  String _two(int n) => n.toString().padLeft(2, '0');
-
-  String _formatTime(DateTime t) {
-    return '${t.year}-${_two(t.month)}-${_two(t.day)} '
-        '${_two(t.hour)}:${_two(t.minute)}:${_two(t.second)}';
-  }
-
-  /// 세션 상태 변화에 반응하도록 watch로 활성 세션을 찾는다.
-  SessionInfo? _watchActiveSession() {
-    final sessions = ref.watch(sessionManagerProvider);
-    final activeId = ref.watch(activeSessionIdProvider);
-    for (final s in sessions) {
-      if (s.id == activeId) return s;
-    }
-    return null;
-  }
-
-  Widget _infoTab() {
-    final active = _watchActiveSession();
-
-    if (active == null) {
-      return const _EmptyState(
-        icon: Icons.info_outline,
-        title: '세션 정보',
-        message: '활성 세션이 없습니다.\n세션을 선택하면 호스트·인증 방식·연결 상태를 표시합니다.',
-      );
-    }
-
-    final session = active;
-    final host = session.host;
-    final statusColor = _statusColor(session.status);
-    final errorText = session.error ?? session.failure?.message;
-
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(14, 14, 14, 16),
-      children: [
-        Row(
-          children: [
-            Container(
-              width: 10,
-              height: 10,
-              decoration: BoxDecoration(
-                color: statusColor,
-                shape: BoxShape.circle,
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                session.displayName,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: VibeColors.onSurface,
-                  fontWeight: FontWeight.w800,
-                  fontSize: 15,
-                ),
-              ),
-            ),
-            Text(
-              session.status.label,
-              style: TextStyle(
-                color: statusColor,
-                fontWeight: FontWeight.w700,
-                fontSize: 12,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-        _InfoRow(label: '호스트', value: host.alias),
-        _InfoRow(label: '연결 방식', value: host.connectionType.label),
-        _InfoRow(label: '엔드포인트', value: host.endpointLabel, mono: true),
-        if (host.isLocalShell)
-          _InfoRow(label: '셸', value: host.localShellLabel)
-        else ...[
-          _InfoRow(label: '사용자', value: host.username, mono: true),
-          _InfoRow(label: '인증 방식', value: host.authType.label),
-        ],
-        if (session.connectedAt != null) ...[
-          _InfoRow(
-            label: '연결 시각',
-            value: _formatTime(session.connectedAt!),
-            mono: true,
-          ),
-          _InfoRow(
-            label: '지속 시간',
-            value: session.status == SessionStatus.connected
-                ? _formatUptime(session.connectedAt!)
-                : '-',
-            mono: true,
-          ),
-        ],
-        if (errorText != null && errorText.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: VibeColors.statusError.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(
-                color: VibeColors.statusError.withValues(alpha: 0.4),
-              ),
-            ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Icon(
-                  Icons.error_outline,
-                  size: 16,
-                  color: VibeColors.statusError,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    errorText,
-                    style: const TextStyle(
-                      color: VibeColors.statusError,
-                      fontSize: 12,
-                      height: 1.3,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-        const SizedBox(height: 16),
-        const Text(
-          '연결 이벤트',
-          style: TextStyle(
-            color: VibeColors.onSurface,
-            fontWeight: FontWeight.w800,
-            fontSize: 13,
-          ),
-        ),
-        const SizedBox(height: 6),
-        ..._eventRows(session.id),
-      ],
-    );
-  }
-
-  /// 최근 연결 이벤트를 최신순으로 최대 30건 표시한다.
-  List<Widget> _eventRows(String sessionId) {
-    final events = ref.watch(sessionDiagnosticsProvider)[sessionId] ?? const [];
-    if (events.isEmpty) {
-      return const [
-        Text(
-          '아직 기록된 이벤트가 없습니다.',
-          style: TextStyle(color: VibeColors.onSurfaceDim, fontSize: 12),
-        ),
-      ];
-    }
-    return [
-      for (final e in events.reversed.take(30))
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: 2),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                _formatTime(e.at),
-                style: const TextStyle(
-                  color: VibeColors.onSurfaceDim,
-                  fontFamily: kMonoFontFamily,
-                  fontFamilyFallback: kMonoFontFallback,
-                  fontSize: 11,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  e.detail == null
-                      ? e.type.label
-                      : '${e.type.label} (${e.detail})',
-                  style: const TextStyle(
-                    color: VibeColors.onSurface,
-                    fontSize: 12,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-    ];
-  }
-
   /// 길게 눌렀을 때의 동작 시트. [above]/[below]는 현재 목록에서의 이웃으로,
   /// 없으면(맨 위/맨 아래) 해당 이동 항목을 숨긴다.
   void _showActions(Snippet s, {Snippet? above, Snippet? below}) {
@@ -524,26 +382,16 @@ class _SnippetPanelState extends ConsumerState<SnippetPanel>
 
   @override
   Widget build(BuildContext context) {
-    // 세션 상태 변화에 따라 uptime 타이머를 켜고 끈다.
-    _syncUptimeTimer(_watchActiveSession());
     return Container(
       color: VibeColors.surface,
       child: Column(
         children: [
-          const _PanelHeader(),
-          TabBar(
-            controller: _tab,
-            tabs: const [
-              Tab(text: '스니펫'),
-              Tab(text: '정보'),
-            ],
+          _PanelHeader(
+            busy: _gistBusy,
+            onExportGist: _exportToGist,
+            onImportGist: _importFromGist,
           ),
-          Expanded(
-            child: TabBarView(
-              controller: _tab,
-              children: [_snippetTab(), _infoTab()],
-            ),
-          ),
+          Expanded(child: _snippetTab()),
         ],
       ),
     );
@@ -551,17 +399,25 @@ class _SnippetPanelState extends ConsumerState<SnippetPanel>
 }
 
 class _PanelHeader extends StatelessWidget {
-  const _PanelHeader();
+  const _PanelHeader({
+    required this.busy,
+    required this.onExportGist,
+    required this.onImportGist,
+  });
+
+  final bool busy;
+  final VoidCallback onExportGist;
+  final VoidCallback onImportGist;
 
   @override
   Widget build(BuildContext context) {
-    return const Padding(
-      padding: EdgeInsets.fromLTRB(14, 12, 14, 10),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 12, 6, 10),
       child: Row(
         children: [
-          Icon(Icons.code, color: VibeColors.accent, size: 20),
-          SizedBox(width: 10),
-          Expanded(
+          const Icon(Icons.code, color: VibeColors.accent, size: 20),
+          const SizedBox(width: 10),
+          const Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -586,8 +442,94 @@ class _PanelHeader extends StatelessWidget {
               ],
             ),
           ),
+          if (busy)
+            const Padding(
+              padding: EdgeInsets.all(8),
+              child: SizedBox.square(
+                dimension: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            )
+          else
+            PopupMenuButton<VoidCallback>(
+              tooltip: 'Gist 동기화',
+              icon: const Icon(
+                Icons.more_vert,
+                size: 18,
+                color: VibeColors.onSurfaceMuted,
+              ),
+              onSelected: (action) => action(),
+              itemBuilder: (context) => [
+                PopupMenuItem(
+                  value: onExportGist,
+                  child: const Row(
+                    children: [
+                      Icon(Icons.cloud_upload_outlined, size: 18),
+                      SizedBox(width: 8),
+                      Text('Gist로 내보내기'),
+                    ],
+                  ),
+                ),
+                PopupMenuItem(
+                  value: onImportGist,
+                  child: const Row(
+                    children: [
+                      Icon(Icons.cloud_download_outlined, size: 18),
+                      SizedBox(width: 8),
+                      Text('Gist에서 가져오기'),
+                    ],
+                  ),
+                ),
+              ],
+            ),
         ],
       ),
+    );
+  }
+}
+
+/// Gist ID나 전체 URL을 입력받는 작은 다이얼로그.
+class _GistIdDialog extends StatefulWidget {
+  const _GistIdDialog({required this.initialValue});
+
+  final String initialValue;
+
+  @override
+  State<_GistIdDialog> createState() => _GistIdDialogState();
+}
+
+class _GistIdDialogState extends State<_GistIdDialog> {
+  late final _controller = TextEditingController(text: widget.initialValue);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Gist에서 가져오기'),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        decoration: const InputDecoration(
+          labelText: 'Gist ID 또는 URL',
+          hintText: 'https://gist.github.com/user/xxxxxxxx',
+        ),
+        onSubmitted: (v) => Navigator.of(context).pop(v),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('취소'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_controller.text),
+          child: const Text('확인'),
+        ),
+      ],
     );
   }
 }
@@ -667,96 +609,6 @@ class _SnippetTile extends StatelessWidget {
               ],
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-class _InfoRow extends StatelessWidget {
-  const _InfoRow({required this.label, required this.value, this.mono = false});
-
-  final String label;
-  final String value;
-  final bool mono;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 78,
-            child: Text(
-              label,
-              style: const TextStyle(
-                color: VibeColors.onSurfaceDim,
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: SelectableText(
-              value,
-              style: TextStyle(
-                color: VibeColors.onSurface,
-                fontSize: 12.5,
-                height: 1.3,
-                fontFamily: mono ? kMonoFontFamily : null,
-                fontFamilyFallback: mono ? kMonoFontFallback : null,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// 탭에 보여줄 내용이 없을 때의 빈 상태(아이콘 + 제목 + 안내문).
-class _EmptyState extends StatelessWidget {
-  const _EmptyState({
-    required this.icon,
-    required this.title,
-    required this.message,
-  });
-
-  final IconData icon;
-  final String title;
-  final String message;
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(28),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, color: VibeColors.onSurfaceDim, size: 32),
-            const SizedBox(height: 12),
-            Text(
-              title,
-              style: const TextStyle(
-                color: VibeColors.onSurface,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              message,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                color: VibeColors.onSurfaceDim,
-                fontSize: 12,
-                height: 1.35,
-              ),
-            ),
-          ],
         ),
       ),
     );

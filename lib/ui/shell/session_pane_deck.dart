@@ -1,10 +1,14 @@
 import 'package:flutter/material.dart';
 import '../../session/session.dart';
+import '../terminal/action_bar_catalog.dart';
 import '../../session/session_pane_layout.dart';
 import 'panes/pane_activity_frame.dart';
 import 'panes/pane_geometry.dart';
 import 'panes/pane_divider_handle.dart';
 import 'panes/pane_preset_icon.dart';
+
+/// 칸 헤더에 아이콘으로 바로 노출하는 터미널 액션. 나머지 액션은 ⋮ 메뉴로 간다.
+const _kHeaderIconActions = ['retry', 'repaint'];
 
 class SessionPaneDeck extends StatefulWidget {
   const SessionPaneDeck({
@@ -17,18 +21,9 @@ class SessionPaneDeck extends StatefulWidget {
     required this.onActivate,
     required this.terminalBuilder,
     this.onNewSession,
-    this.onControl,
-    this.onBulk,
-    this.onBackground,
-    this.onWorkspace,
-    this.storageError,
-    this.onRetrySave,
-    this.controlEnabled = false,
     this.onCloseSession,
     this.onUndo,
     this.canUndo = false,
-    this.onPreviousSession,
-    this.onNextSession,
     this.minimumPaneSize = const Size(320, 224),
     this.activity = const {},
   });
@@ -40,24 +35,16 @@ class SessionPaneDeck extends StatefulWidget {
   final SessionPaneLayout layout;
   final ValueChanged<SessionPaneLayout> onLayout;
   final ValueChanged<String?> onActivate;
+
+  /// 두 번째 인자는 칸 헤더 빌더. 터미널 액션 맵의 키는 헤더 카탈로그 토큰
+  /// (`retry`, `repaint`, `zoomIn`, `zoomOut`, `zoomReset`)이다.
   final Widget Function(SessionInfo, Widget Function(Map<String, VoidCallback>))
   terminalBuilder;
   final Future<void> Function(String paneId, SessionInfo? duplicate)?
   onNewSession;
-  final VoidCallback? onControl,
-      onBulk,
-      onBackground,
-      onWorkspace,
-      onRetrySave,
-      onUndo;
+  final VoidCallback? onUndo;
   final ValueChanged<SessionInfo>? onCloseSession;
-
-  /// 목록 순서로 이전/다음 세션을 활성화한다(그룹 조작이라 칸 메뉴가 아닌 상단
-  /// 툴바에 둔다). 대상 세션이 이미 칸에 있으면 그 칸으로 포커스가 가고, 없으면
-  /// 포커스된 칸의 세션이 바뀐다. null이면 버튼을 비활성화한다.
-  final VoidCallback? onPreviousSession, onNextSession;
-  final String? storageError;
-  final bool controlEnabled, canUndo;
+  final bool canUndo;
   final Size minimumPaneSize;
 
   /// 세션별 활동 상태. 칸 테두리가 레일의 스피너·Agent 상태와 같이 움직인다.
@@ -85,6 +72,27 @@ class SessionPaneDeckState extends State<SessionPaneDeck> {
       PaneGeometryResolver(minimum: widget.minimumPaneSize);
   bool get _isZoomed => _zoomed.contains(widget.groupId);
 
+  /// deck 내부 표시 상태(확대 여부, 캔버스 크기) 변경 알림. 우측 "화면 분할
+  /// 관리" 패널이 이 값을 듣고 다시 그린다 — 어느 프리셋이 들어가는지는 캔버스
+  /// 크기에 달려 있는데, 그 크기는 배치 편집이 아니라 provider에 없기 때문이다.
+  final revision = ValueNotifier<int>(0);
+
+  /// 현재 그룹이 한 칸 확대 상태인지.
+  bool get isZoomed => _isZoomed;
+
+  /// [preset]을 현재 크기에서 표시할 수 있는지(최소 칸 크기 기준).
+  bool fitsPreset(PanePreset preset) =>
+      _fits(widget.layout.preset(preset, _ids));
+
+  /// 칸에 입력 포커스를 준다(되돌리기 대상이 아닌 조작).
+  void focusPane(String paneId) => _focus(paneId);
+
+  @override
+  void dispose() {
+    revision.dispose();
+    super.dispose();
+  }
+
   @override
   void didUpdateWidget(SessionPaneDeck oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -105,7 +113,7 @@ class SessionPaneDeckState extends State<SessionPaneDeck> {
       _dropPane = null;
       _drag = null;
       _dropSide = null;
-      if (exitZoom) _zoomed.remove(widget.groupId);
+      if (exitZoom && _zoomed.remove(widget.groupId)) revision.value++;
     });
     widget.onLayout(next);
     final id = next.focused.sessionId;
@@ -142,7 +150,7 @@ class SessionPaneDeckState extends State<SessionPaneDeck> {
         .where((id) => !next.slots.contains(id))
         .length;
     _commit(next, exitZoom: true);
-    if (hidden > 0) _notice('$hidden개 세션은 목록에 보관했습니다. 배치 메뉴에서 되돌릴 수 있습니다.');
+    if (hidden > 0) _notice('$hidden개 세션은 목록에 보관했습니다. 화면 분할 관리에서 되돌릴 수 있습니다.');
   }
 
   Future<void> splitFocused(PaneAxis axis) =>
@@ -169,6 +177,7 @@ class SessionPaneDeckState extends State<SessionPaneDeck> {
     setState(() {
       if (!_zoomed.remove(widget.groupId)) _zoomed.add(widget.groupId);
     });
+    revision.value++;
   }
 
   void removeFocused() =>
@@ -329,11 +338,17 @@ class SessionPaneDeckState extends State<SessionPaneDeck> {
     final group = widget.groupId;
     final pane = widget.layout.pane(paneId);
     if (pane == null) return;
+    // 헤더 아이콘으로 나간 액션을 뺀 나머지(줌 등)만 메뉴에 싣는다.
+    final menuActions = [
+      for (final token in terminalActions.keys)
+        if (!_kHeaderIconActions.contains(token)) ?resolveHeaderToken(token),
+    ];
     final command = await showDialog<String>(
       context: context,
       builder: (context) => SimpleDialog(
-        title: const Text('칸 조작'),
+        title: const Text('더보기'),
         children: [
+          const _MenuSection('칸'),
           ListTile(
             leading: const Icon(Icons.vertical_split),
             title: const Text('오른쪽에 나누기'),
@@ -358,26 +373,30 @@ class SessionPaneDeckState extends State<SessionPaneDeck> {
               ),
               onTap: () => Navigator.pop(context, 'swap:${other.id}'),
             ),
-          const Divider(),
-          for (final action in terminalActions.entries)
-            ListTile(
-              title: Text(action.key),
-              onTap: () => Navigator.pop(context, 'terminal:${action.key}'),
-            ),
-          const Divider(),
           ListTile(
             leading: const Icon(Icons.remove_circle_outline),
             title: const Text('이 칸 없애기'),
             subtitle: const Text('세션 연결은 목록에 유지됩니다'),
             onTap: () => Navigator.pop(context, 'remove'),
           ),
-          if (pane.sessionId != null && widget.onCloseSession != null)
-            ListTile(
-              leading: const Icon(Icons.close),
-              title: const Text('세션 닫기'),
-              subtitle: const Text('연결 종료 · 칸 제거와 별개'),
-              onTap: () => Navigator.pop(context, 'close-session'),
-            ),
+          if (menuActions.isNotEmpty ||
+              (pane.sessionId != null && widget.onCloseSession != null)) ...[
+            const Divider(),
+            const _MenuSection('터미널'),
+            for (final action in menuActions)
+              ListTile(
+                leading: Icon(action.icon),
+                title: Text(action.label),
+                onTap: () => Navigator.pop(context, 'terminal:${action.id}'),
+              ),
+            if (pane.sessionId != null && widget.onCloseSession != null)
+              ListTile(
+                leading: const Icon(Icons.close),
+                title: const Text('세션 닫기'),
+                subtitle: const Text('연결 종료 · 칸 제거와 별개'),
+                onTap: () => Navigator.pop(context, 'close-session'),
+              ),
+          ],
         ],
       ),
     );
@@ -464,31 +483,20 @@ class SessionPaneDeckState extends State<SessionPaneDeck> {
               Expanded(
                 child: session == null
                     ? name
-                    : Draggable<PaneSessionDrag>(
-                        dragAnchorStrategy: pointerDragAnchorStrategy,
-                        data: PaneSessionDrag(session.id, widget.groupId),
-                        onDragStarted: () => setState(
-                          () => _drag = PaneSessionDrag(
-                            session.id,
-                            widget.groupId,
-                          ),
-                        ),
-                        onDragEnd: (_) => setState(() {
-                          _drag = null;
-                          _dropPane = null;
-                          _dropSide = null;
-                        }),
-                        feedback: Material(
-                          elevation: 8,
-                          borderRadius: BorderRadius.circular(8),
-                          child: Padding(
-                            padding: const EdgeInsets.all(12),
-                            child: Text(title),
-                          ),
-                        ),
-                        child: name,
-                      ),
+                    : _sessionDraggable(session, title, name),
               ),
+              for (final token in _kHeaderIconActions)
+                if (actions[token] case final callback?)
+                  if (resolveHeaderToken(token) case final def?)
+                    IconButton(
+                      key: ValueKey('pane-$token-${pane.id}'),
+                      tooltip: def.label,
+                      icon: Icon(def.icon),
+                      onPressed: () {
+                        _focus(pane.id);
+                        callback();
+                      },
+                    ),
               IconButton(
                 key: ValueKey('pane-zoom-${pane.id}'),
                 tooltip: _isZoomed ? '분할로 돌아가기' : '이 칸 확대',
@@ -502,7 +510,7 @@ class SessionPaneDeckState extends State<SessionPaneDeck> {
               ),
               IconButton(
                 key: ValueKey('pane-menu-${pane.id}'),
-                tooltip: '칸 조작',
+                tooltip: '더보기',
                 icon: const Icon(Icons.more_vert),
                 onPressed: () => _paneMenu(pane.id, actions),
               ),
@@ -517,113 +525,16 @@ class SessionPaneDeckState extends State<SessionPaneDeck> {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        SizedBox(
-          height: 44,
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
-                TextButton.icon(
-                  key: const ValueKey('pane-layout-picker'),
-                  onPressed: showPresets,
-                  icon: const Icon(Icons.dashboard_customize_outlined),
-                  label: const Text('배치'),
-                ),
-                PopupMenuButton<PaneAxis>(
-                  tooltip: '현재 칸 분할',
-                  onSelected: splitFocused,
-                  itemBuilder: (_) => [
-                    PopupMenuItem(
-                      value: PaneAxis.leftRight,
-                      enabled: widget.layout.count < 4,
-                      child: const Text('오른쪽에 나누기'),
-                    ),
-                    PopupMenuItem(
-                      value: PaneAxis.topBottom,
-                      enabled: widget.layout.count < 4,
-                      child: const Text('아래에 나누기'),
-                    ),
-                  ],
-                  child: const Padding(
-                    padding: EdgeInsets.all(12),
-                    child: Text('분할 ▾'),
-                  ),
-                ),
-                if (_isZoomed)
-                  TextButton.icon(
-                    onPressed: toggleZoom,
-                    icon: const Icon(Icons.fullscreen_exit),
-                    label: const Text('분할로 돌아가기'),
-                  ),
-                IconButton(
-                  key: const ValueKey('pane-session-prev'),
-                  tooltip: '이전 세션',
-                  onPressed: widget.onPreviousSession,
-                  icon: const Icon(Icons.keyboard_arrow_up),
-                ),
-                IconButton(
-                  key: const ValueKey('pane-session-next'),
-                  tooltip: '다음 세션',
-                  onPressed: widget.onNextSession,
-                  icon: const Icon(Icons.keyboard_arrow_down),
-                ),
-                PopupMenuButton<String>(
-                  tooltip: '다른 칸',
-                  onSelected: _focus,
-                  itemBuilder: (_) => [
-                    for (final p in widget.layout.panes)
-                      PopupMenuItem(
-                        value: p.id,
-                        child: Text(
-                          _session(p.sessionId)?.displayName ?? '빈 칸',
-                        ),
-                      ),
-                  ],
-                  icon: const Icon(Icons.tab),
-                ),
-                IconButton(
-                  tooltip: '배치 되돌리기',
-                  onPressed: widget.canUndo ? undo : null,
-                  icon: const Icon(Icons.undo),
-                ),
-                if (widget.storageError != null)
-                  IconButton(
-                    tooltip: '${widget.storageError} · 재시도',
-                    onPressed: widget.onRetrySave,
-                    icon: const Icon(Icons.warning_amber, color: Colors.orange),
-                  ),
-                if (widget.onWorkspace != null)
-                  IconButton(
-                    tooltip: '작업공간 패널 표시',
-                    onPressed: widget.onWorkspace,
-                    icon: const Icon(Icons.folder_open),
-                  ),
-                if (widget.onBulk != null)
-                  IconButton(
-                    tooltip: '여러 세션 조작',
-                    onPressed: widget.onBulk,
-                    icon: const Icon(Icons.checklist),
-                  ),
-                if (widget.onControl != null)
-                  IconButton(
-                    tooltip: widget.controlEnabled ? '외부 제어 실행 중' : '외부 제어',
-                    onPressed: widget.onControl,
-                    icon: const Icon(Icons.lan_outlined),
-                  ),
-                if (widget.onBackground != null)
-                  IconButton(
-                    tooltip: '로컬 백그라운드 작업',
-                    onPressed: widget.onBackground,
-                    icon: const Icon(Icons.settings_backup_restore),
-                  ),
-              ],
-            ),
-          ),
-        ),
         Expanded(
           child: LayoutBuilder(
             builder: (context, bounds) {
-              _size = bounds.biggest;
+              if (_size != bounds.biggest) {
+                _size = bounds.biggest;
+                // 레이아웃 단계라 지금 알리면 안 된다. 다음 프레임에 패널을 깨운다.
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (mounted) revision.value++;
+                });
+              }
               final geometry = _resolver.resolve(_layout, _size);
               _autoCompact = !geometry.fits && _layout.count > 1;
               final shown = _isZoomed
@@ -676,7 +587,7 @@ class SessionPaneDeckState extends State<SessionPaneDeck> {
                           child: const Padding(
                             padding: EdgeInsets.all(6),
                             child: Text(
-                              '공간이 좁아 한 칸으로 표시 중 · 상단에서 다른 칸 선택',
+                              '공간이 좁아 한 칸으로 표시 중 · 칸 헤더나 화면 분할 관리에서 다른 칸 선택',
                               style: TextStyle(fontSize: 11),
                             ),
                           ),
@@ -765,20 +676,20 @@ class SessionPaneDeckState extends State<SessionPaneDeck> {
       if (next != null) _commit(next);
     }
 
-    final touch =
-        Theme.of(context).platform == TargetPlatform.android ||
-        Theme.of(context).platform == TargetPlatform.iOS;
-    final rect = touch
+    // 터치는 손가락 폭만큼 히트 영역을 넓힌다. 칸 사이 간격(8)보다 훨씬 넓어
+    // 터미널 가장자리를 조금 덮지만, 그 자리는 여백이라 입력을 가로채지 않는다.
+    const touchHit = 36.0;
+    final rect = _touch
         ? (horizontal
               ? Rect.fromCenter(
                   center: divider.rect.center,
-                  width: 24,
+                  width: touchHit,
                   height: divider.rect.height,
                 )
               : Rect.fromCenter(
                   center: divider.rect.center,
                   width: divider.rect.width,
-                  height: 24,
+                  height: touchHit,
                 ))
         : divider.rect;
     return Positioned.fromRect(
@@ -803,6 +714,53 @@ class SessionPaneDeckState extends State<SessionPaneDeck> {
       ),
     );
   }
+
+  bool get _touch =>
+      Theme.of(context).platform == TargetPlatform.android ||
+      Theme.of(context).platform == TargetPlatform.iOS;
+
+  /// 헤더를 끌어 세션을 다른 칸으로 옮기는 위젯. 마우스는 바로 끌기 시작하고,
+  /// 터치는 길게 누른 뒤에만 끌리게 해 스크롤·오탭과 충돌하지 않게 한다.
+  /// 터치에서는 피드백을 손가락 위로 띄워 드롭 위치 표시가 가려지지 않게 한다.
+  Widget _sessionDraggable(SessionInfo session, String title, Widget child) {
+    final data = PaneSessionDrag(session.id, widget.groupId);
+    void started() => setState(() => _drag = data);
+    void ended(DraggableDetails _) => setState(() {
+      _drag = null;
+      _dropPane = null;
+      _dropSide = null;
+    });
+    final feedback = Material(
+      elevation: 8,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(padding: const EdgeInsets.all(12), child: Text(title)),
+    );
+    if (_touch) {
+      return LongPressDraggable<PaneSessionDrag>(
+        data: data,
+        hapticFeedbackOnStart: true,
+        dragAnchorStrategy: _touchDragAnchor,
+        onDragStarted: started,
+        onDragEnd: ended,
+        feedback: feedback,
+        child: child,
+      );
+    }
+    return Draggable<PaneSessionDrag>(
+      dragAnchorStrategy: pointerDragAnchorStrategy,
+      data: data,
+      onDragStarted: started,
+      onDragEnd: ended,
+      feedback: feedback,
+      child: child,
+    );
+  }
+
+  static Offset _touchDragAnchor(
+    Draggable<Object> draggable,
+    BuildContext context,
+    Offset position,
+  ) => const Offset(24, 56);
 
   Widget _dropTarget(PaneLeaf pane, Rect rect) {
     return Positioned.fromRect(
@@ -938,4 +896,19 @@ class SessionPaneDeckState extends State<SessionPaneDeck> {
     );
     return identical(next, widget.layout) || !_fits(next) ? null : next;
   }
+}
+
+class _MenuSection extends StatelessWidget {
+  const _MenuSection(this.title);
+  final String title;
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(24, 4, 24, 4),
+    child: Text(
+      title,
+      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+        color: Theme.of(context).colorScheme.onSurfaceVariant,
+      ),
+    ),
+  );
 }

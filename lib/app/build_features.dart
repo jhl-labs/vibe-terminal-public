@@ -14,6 +14,7 @@ class BuildFeatures {
     this.vault = true,
     this.portForward = true,
     this.browser = true,
+    this.customApps = true,
     this.community = true,
     this.logs = true,
     this.x11 = true,
@@ -24,6 +25,7 @@ class BuildFeatures {
     this.settingsShortcut = true,
     this.settingsNotifications = true,
     this.settingsX11 = true,
+    this.updateCheck = false,
     bool? settingsGithub,
     bool? github,
     this.settingsAi = true,
@@ -31,8 +33,11 @@ class BuildFeatures {
   }) : settingsGithub = settingsGithub ?? github ?? true;
 
   static const current = BuildFeatures(
+    // 공개판은 GitHub Release로 배포하므로 업데이트 확인을 항상 켠다.
+    updateCheck: true,
     vault: false,
     browser: false,
+    customApps: false,
     sftp: false,
     portForward: false,
     x11: false,
@@ -49,6 +54,7 @@ class BuildFeatures {
   final bool vault;
   final bool portForward;
   final bool browser;
+  final bool customApps;
   final bool community;
   final bool logs;
   final bool x11;
@@ -64,6 +70,15 @@ class BuildFeatures {
   final bool settingsNotifications;
   final bool settingsX11;
   final bool settingsGithub;
+
+  /// 시작할 때 GitHub Release에서 새 버전을 확인할지 여부.
+  ///
+  /// 다른 플래그와 달리 디버그에서도 기본값이 꺼짐이다. 이 기능은 공개
+  /// 배포판(GitHub Release로 내보내는 빌드)에서만 의미가 있고, 사설 PRO
+  /// 배포판은 스토어와 라이선스 키로 업데이트를 받기 때문이다
+  /// (`docs/11-pro-distribution-and-licensing.md`). 개발 중에 매번 공개
+  /// 저장소를 조회하는 것도 잡음이다.
+  final bool updateCheck;
   final bool settingsAi;
   final bool settingsAbout;
 

@@ -1,5 +1,7 @@
 const defaultSessionGroupId = 'default';
 const defaultSessionGroupName = '기본';
+const appsSessionGroupId = 'apps';
+const appsSessionGroupName = '앱 세션';
 
 class SessionGroup {
   const SessionGroup({required this.id, required this.name});
@@ -9,13 +11,23 @@ class SessionGroup {
     name: defaultSessionGroupName,
   );
 
+  /// 사용자 정의 앱이 여는 세션이 모이는 고정 그룹. 이름 변경·삭제 불가.
+  static const appsGroup = SessionGroup(
+    id: appsSessionGroupId,
+    name: appsSessionGroupName,
+  );
+
   final String id;
   final String name;
 
   bool get isDefault => id == defaultSessionGroupId;
 
-  SessionGroup copyWith({String? name}) =>
-      SessionGroup(id: id, name: cleanName(name ?? this.name, nameFallback));
+  /// 앱이 관리하는 고정 그룹(default, apps). UI에서 편집 메뉴를 숨긴다.
+  bool get isFixed => isDefault || id == appsSessionGroupId;
+
+  SessionGroup copyWith({String? name}) => isFixed
+      ? this
+      : SessionGroup(id: id, name: cleanName(name ?? this.name, nameFallback));
 
   String get nameFallback => isDefault ? defaultSessionGroupName : '그룹';
 
@@ -28,6 +40,7 @@ class SessionGroup {
     final id = rawId.trim();
     if (id.isEmpty) return null;
     if (id == defaultSessionGroupId) return defaultGroup;
+    if (id == appsSessionGroupId) return appsGroup;
 
     final rawName = value['name'];
     return SessionGroup(
@@ -41,11 +54,18 @@ class SessionGroup {
     if (cleaned == null || cleaned.isEmpty) return fallback;
     return cleaned.length <= 40 ? cleaned : cleaned.substring(0, 40).trim();
   }
+
+  @override
+  bool operator ==(Object other) =>
+      other is SessionGroup && other.id == id && other.name == name;
+
+  @override
+  int get hashCode => Object.hash(id, name);
 }
 
 class SessionGroupState {
   const SessionGroupState({
-    this.groups = const [SessionGroup.defaultGroup],
+    this.groups = const [SessionGroup.defaultGroup, SessionGroup.appsGroup],
     this.activeGroupId = defaultSessionGroupId,
   });
 
@@ -84,12 +104,17 @@ List<SessionGroup> normalizeSessionGroups(
 }) {
   final byId = <String, SessionGroup>{};
   byId[defaultSessionGroupId] = SessionGroup.defaultGroup;
+  byId[appsSessionGroupId] = SessionGroup.appsGroup;
 
   for (final group in groups) {
     final id = group.id.trim();
     if (id.isEmpty) continue;
     if (id == defaultSessionGroupId) {
       byId[defaultSessionGroupId] = SessionGroup.defaultGroup;
+      continue;
+    }
+    if (id == appsSessionGroupId) {
+      byId[appsSessionGroupId] = SessionGroup.appsGroup;
       continue;
     }
     byId[id] = SessionGroup(

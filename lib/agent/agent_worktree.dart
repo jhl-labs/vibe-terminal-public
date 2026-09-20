@@ -24,6 +24,7 @@ class AgentWorktreeRecord {
     this.nativeSessionId,
     this.executable,
     this.initialGoal,
+    this.model,
     this.localSessionId,
     this.lastInspectedAt,
     this.lastError,
@@ -46,6 +47,7 @@ class AgentWorktreeRecord {
   final String? nativeSessionId;
   final String? executable;
   final String? initialGoal;
+  final String? model;
   final String? localSessionId;
   final DateTime? lastInspectedAt;
   final String? lastError;
@@ -59,6 +61,7 @@ class AgentWorktreeRecord {
     cli: cli,
     executable: executable,
     initialGoal: initialGoal,
+    model: model,
     isolatedWorktree: true,
     branchName: branchName,
     arguments: List.unmodifiable(arguments),
@@ -84,6 +87,7 @@ class AgentWorktreeRecord {
     cli: cli,
     executable: executable,
     initialGoal: initialGoal,
+    model: model,
     arguments: arguments,
     branchName: branchName,
     baseRef: baseRef,
@@ -117,6 +121,7 @@ class AgentWorktreeRecord {
     'cli': cli.name,
     if (executable != null) 'executable': executable,
     if (initialGoal != null) 'initialGoal': initialGoal,
+    if (model != null) 'model': model,
     if (nativeSessionId != null) 'nativeSessionId': nativeSessionId,
     if (localSessionId != null) 'localSessionId': localSessionId,
     if (arguments.isNotEmpty) 'arguments': arguments,
@@ -191,6 +196,9 @@ class AgentWorktreeRecord {
           : null,
       initialGoal: value['initialGoal'] is String
           ? value['initialGoal'] as String
+          : null,
+      model: value['model'] is String && (value['model'] as String).isNotEmpty
+          ? value['model'] as String
           : null,
       arguments: rawArguments is List
           ? [

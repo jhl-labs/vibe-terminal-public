@@ -9,11 +9,17 @@ class AgentSessionInspection {
     required this.agentHint,
     required this.confidence,
     required this.preview,
+    this.modelHint,
+    this.modelConfidence = AgentDetectionConfidence.none,
   });
 
   final String agentHint;
   final AgentDetectionConfidence confidence;
   final String preview;
+
+  /// 화면에서 감지한 모델 라벨(소문자 정규화). CLI 종류와 무관하게 일반 규칙으로 찾는다.
+  final String? modelHint;
+  final AgentDetectionConfidence modelConfidence;
 
   bool get isConfirmedAgent => confidence == AgentDetectionConfidence.confirmed;
   bool get isPossibleAgent => confidence != AgentDetectionConfidence.none;
@@ -40,7 +46,15 @@ class AgentSessionInspector {
       'codex',
     ),
     (RegExp(r'\bgemini\s+cli\b|\bgoogle\s+gemini\b|\bgemini\s+--\w'), 'gemini'),
-    (RegExp(r'\bopencode\b'), 'opencode'),
+    // 제품명 단독(`opencode`)은 확정 근거로 쓰지 않는다. 다른 Agent 안에서
+    // OpenCode 설정 파일·경로를 다루기만 해도 화면에 흔히 나오기 때문이다.
+    (
+      RegExp(
+        r'welcome\s+to\s+opencode|\bopencode\s+v?\d|\bopencode\s+--\w|'
+        r'\bopencode\s+(?:run|serve|auth|models)\b',
+      ),
+      'opencode',
+    ),
     (RegExp(r'\baider\s+(chat|v?\d)'), 'aider'),
     (RegExp(r'\bfactory\s+droid\b|\bdroid\s+cli\b'), 'droid'),
     (RegExp(r'\bsourcegraph\s+amp\b|\bamp\s+code\b'), 'amp'),
@@ -79,6 +93,7 @@ class AgentSessionInspector {
   static final List<(RegExp, String)> _possiblePatterns = [
     (RegExp(r'\bclaude\b'), 'claude'),
     (RegExp(r'\bcodex\b'), 'codex'),
+    (RegExp(r'\bopencode\b'), 'opencode'),
     (RegExp(r'\bgemini\b'), 'gemini'),
     (RegExp(r'\baider\b'), 'aider'),
     (RegExp(r'\bdroid\b'), 'droid'),
@@ -93,7 +108,222 @@ class AgentSessionInspector {
     (RegExp(r'\bqoder\b'), 'qoder'),
   ];
 
-  static AgentSessionInspection inspect(String screen, {int previewLines = 3}) {
+  // 모델 라벨 감지: 특정 벤더에 종속되지 않은 일반 표기 규칙.
+  //
+  // usesCapture가 true면 group(1)(명시적 대입/플래그 형태)을, false면 전체
+  // 일치(known id shape)를 라벨로 쓴다. 순서를 바꿔도 안전하도록 위치(i==0/1/2)
+  // 대신 각 패턴에 직접 표시해 둔다.
+  static final List<(RegExp pattern, bool usesCapture)>
+  _confirmedModelPatterns = [
+    // {1,}: "o3"처럼 두 글자짜리 알려진 id도 model: 뒤에서 잡아낸다({2,}이면
+    // 최소 3글자가 필요해 o1~o9 같은 짧은 id를 놓친다).
+    (RegExp(r'\bmodel[:=\s]+([\w][\w.\-/:]{1,})', caseSensitive: false), true),
+    (RegExp(r'/model\s+(\S+)', caseSensitive: false), true),
+    (RegExp(r'--model[= ]([\w.\-/:]+)', caseSensitive: false), true),
+    (RegExp(r'\bclaude-[\w.-]+', caseSensitive: false), false),
+    (RegExp(r'\bgpt-[\w.-]+', caseSensitive: false), false),
+    (RegExp(r'\bgemini-[\w.-]+', caseSensitive: false), false),
+    (RegExp(r'\bcodex-[\w.-]+', caseSensitive: false), false),
+    // llama/qwen/deepseek은 패밀리 단어만으로는 "llamas", "qwentin" 같은
+    // 평문과 구분이 안 된다. 숫자(버전)가 뒤따를 때만 confirmed로 인정하고,
+    // 숫자 없는 단독 등장은 _possibleModelPatterns로 possible 처리한다.
+    (
+      RegExp(
+        r'\b(?:llama|qwen|deepseek)(?:[\w.-]*\d[\w.-]*)\b',
+        caseSensitive: false,
+      ),
+      false,
+    ),
+    (
+      RegExp(
+        r'\b(?:Opus|Sonnet|Haiku|Fable)\s*\d(?:\.\d)?\b',
+        caseSensitive: false,
+      ),
+      false,
+    ),
+  ];
+
+  static const List<String> _modelFamilyWords = [
+    'opus',
+    'sonnet',
+    'haiku',
+    'fable',
+    'gpt',
+    'gemini',
+    'qwen',
+    'deepseek',
+    'llama',
+    'mistral',
+    'grok',
+  ];
+
+  static final List<RegExp> _possibleModelPatterns = [
+    for (final word in _modelFamilyWords) _familyWordPattern(word),
+  ];
+
+  static RegExp _familyWordPattern(String word) =>
+      RegExp('\\b${RegExp.escape(word)}\\b', caseSensitive: false);
+
+  /// 선언된 모델에서 뽑은 패밀리 단어가 버전 숫자를 달고 나타나는 형태.
+  /// 내장 llama/qwen/deepseek 규칙과 같은 근거로 confirmed로 인정한다.
+  static RegExp _familyWithVersionPattern(String word) => RegExp(
+    '\\b${RegExp.escape(word)}(?:[\\w.-]*\\d[\\w.-]*)\\b',
+    caseSensitive: false,
+  );
+
+  /// 선언된 모델 라벨에서 패밀리 후보 단어를 뽑는다.
+  ///
+  /// `openai/gpt-5`, `claude-opus-4-1`처럼 구분자가 섞인 식별자를 `/`, `-`,
+  /// `:`로 쪼개고, 너무 짧아 평문과 구분이 안 되는 토큰(2자 이하)과 순수
+  /// 숫자는 버린다.
+  static Set<String> familyWordsFrom(Iterable<String> declaredModels) {
+    final words = <String>{};
+    for (final model in declaredModels) {
+      for (final token in model.toLowerCase().split(RegExp(r'[/:\-]'))) {
+        final trimmed = token.trim();
+        if (trimmed.length < 3) continue;
+        if (RegExp(r'^\d+$').hasMatch(trimmed)) continue;
+        words.add(trimmed);
+      }
+    }
+    return words;
+  }
+
+  /// 화면 텍스트에서 모델 라벨을 감지한다. CLI 종류와 무관한 일반 규칙만 사용한다.
+  ///
+  /// confirmed는 명시적 모델 표기(`model: xxx`, `/model xxx`, `--model xxx`,
+  /// 또는 알려진 모델 id 형태)에서 나오며, 같은 확신도 안에서는 화면 아래쪽(마지막
+  /// 발견 위치)의 값을 우선한다 — 상태 표시줄은 보통 하단에 있기 때문이다.
+  /// possible은 패밀리 단어 단독 등장이며 인벤토리에는 노출하지 않고 UI 힌트로만 쓴다.
+  /// [extraFamilies]는 사용자가 역할에 선언한 모델에서 뽑은 패밀리 단어다.
+  /// 내장 목록에 없는 사내·자체 호스팅 모델 이름도 같은 규칙으로 잡아내려고
+  /// 받는다. 단독 등장은 possible, 버전 숫자가 붙으면 confirmed다.
+  static (String?, AgentDetectionConfidence) detectModel(
+    String screen, {
+    Iterable<String> extraFamilies = const [],
+  }) {
+    final lines = _normalizedLines(screen);
+    final fullText = lines.join('\n');
+    final extras = <String>{
+      for (final word in extraFamilies)
+        if (word.trim().length >= 3 &&
+            !_modelFamilyWords.contains(word.trim().toLowerCase()))
+          word.trim().toLowerCase(),
+    };
+
+    String? bestLabel;
+    int bestStart = -1;
+    for (final word in extras) {
+      for (final match in _familyWithVersionPattern(
+        word,
+      ).allMatches(fullText)) {
+        if (match.start > bestStart) {
+          bestStart = match.start;
+          bestLabel = match.group(0)!;
+        }
+      }
+    }
+    for (final (pattern, usesCapture) in _confirmedModelPatterns) {
+      for (final match in pattern.allMatches(fullText)) {
+        String label;
+        if (usesCapture) {
+          final captured = match.group(1);
+          if (captured == null) continue;
+          if (!_looksLikeModelToken(captured)) {
+            // 오탐 방지: 숫자/대시가 없고 알려진 패밀리 단어도 아니면 건너뛴다.
+            continue;
+          }
+          label = captured;
+        } else {
+          label = match.group(0)!;
+        }
+        if (match.start > bestStart) {
+          bestStart = match.start;
+          bestLabel = label;
+        }
+      }
+    }
+    if (bestLabel != null) {
+      return (
+        _normalizeModelLabel(bestLabel),
+        AgentDetectionConfidence.confirmed,
+      );
+    }
+
+    for (final pattern in [
+      ..._possibleModelPatterns,
+      for (final word in extras) _familyWordPattern(word),
+    ]) {
+      final match = pattern.firstMatch(fullText);
+      if (match != null) {
+        return (
+          _normalizeModelLabel(match.group(0)!),
+          AgentDetectionConfidence.possible,
+        );
+      }
+    }
+    return (null, AgentDetectionConfidence.none);
+  }
+
+  static bool _looksLikeModelToken(String token) {
+    if (RegExp(r'\d').hasMatch(token)) return true;
+    if (token.contains('-')) return true;
+    final lower = token.toLowerCase();
+    return _modelFamilyWords.contains(lower) ||
+        lower == 'claude' ||
+        lower == 'codex';
+  }
+
+  static String _normalizeModelLabel(String label) =>
+      label.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+
+  /// 선언된 모델 라벨과 감지된 모델 라벨이 대소문자 무시 부분 일치하는지 본다.
+  /// 예: 선언 "opus" ⊂ 감지 "claude-opus-4-1".
+  static bool modelMatches(String declared, String detected) {
+    final declaredLower = declared.trim().toLowerCase();
+    final detectedLower = detected.trim().toLowerCase();
+    if (declaredLower.isEmpty || detectedLower.isEmpty) return false;
+    return detectedLower.contains(declaredLower) ||
+        declaredLower.contains(detectedLower);
+  }
+
+  /// 화면 텍스트로 Agent를 판별한다. [title]을 주면 터미널 제목(OSC 0/2)
+  /// 판별도 합친다: 화면의 확정 근거가 있으면 그것을, 없으면 제목을, 제목도
+  /// 없으면 화면의 느슨한 근거를 쓴다 — 제목은 지금 떠 있는 TUI가 직접 쓴
+  /// 값이라 스크롤을 지나간 단어보다 믿을 만하다. 미리보기·모델은 늘 화면에서
+  /// 가져온다. SessionAttentionNotifier의 규칙과 같다.
+  static AgentSessionInspection inspect(
+    String screen, {
+    int previewLines = 3,
+    Iterable<String> extraFamilies = const [],
+    String? title,
+  }) {
+    final fromScreen = _inspectScreen(
+      screen,
+      previewLines: previewLines,
+      extraFamilies: extraFamilies,
+    );
+    if (title == null || fromScreen.isConfirmedAgent) return fromScreen;
+    final fromTitle = inspectTitle(title);
+    if (!fromTitle.isPossibleAgent) return fromScreen;
+    return AgentSessionInspection(
+      agentHint: fromTitle.agentHint,
+      confidence: fromTitle.confidence,
+      preview: fromScreen.preview,
+      modelHint: fromScreen.modelHint,
+      modelConfidence: fromScreen.modelConfidence,
+    );
+  }
+
+  static AgentSessionInspection _inspectScreen(
+    String screen, {
+    required int previewLines,
+    required Iterable<String> extraFamilies,
+  }) {
+    final (modelHint, modelConfidence) = detectModel(
+      screen,
+      extraFamilies: extraFamilies,
+    );
     final lines = _normalizedLines(screen);
     final recent = lines.length <= 60
         ? lines
@@ -105,23 +335,28 @@ class AgentSessionInspector {
     // 단어까지 주워 담으면 엉뚱한 agent로 오인한다.
     final fullText = lines.join('\n').toLowerCase();
 
-    for (final (pattern, hint) in _confirmedPatterns) {
-      if (pattern.hasMatch(fullText)) {
-        return AgentSessionInspection(
-          agentHint: hint,
-          confidence: AgentDetectionConfidence.confirmed,
-          preview: _preview(lines, previewLines),
-        );
-      }
-    }
-    // 고정 문구는 화면 하단에 있으므로 최근 줄만 본다. 지나간 대화 안의
-    // 인용문(예: 문서에 적힌 "esc to interrupt")까지 근거로 삼지 않는다.
+    // 고정 문구(입력창 하단 chrome)는 "지금 떠 있는" TUI의 증거라 스크롤백의
+    // 배너·명령보다 앞선다. 화면 하단에 있으므로 최근 줄만 본다 — 지나간
+    // 대화 안의 인용문(예: 문서에 적힌 "esc to interrupt")까지 근거로 삼지 않는다.
     for (final (pattern, hint) in _chromePatterns) {
       if (pattern.hasMatch(searchable)) {
         return AgentSessionInspection(
           agentHint: hint,
           confidence: AgentDetectionConfidence.confirmed,
           preview: _preview(lines, previewLines),
+          modelHint: modelHint,
+          modelConfidence: modelConfidence,
+        );
+      }
+    }
+    for (final (pattern, hint) in _confirmedPatterns) {
+      if (pattern.hasMatch(fullText)) {
+        return AgentSessionInspection(
+          agentHint: hint,
+          confidence: AgentDetectionConfidence.confirmed,
+          preview: _preview(lines, previewLines),
+          modelHint: modelHint,
+          modelConfidence: modelConfidence,
         );
       }
     }
@@ -131,6 +366,8 @@ class AgentSessionInspector {
           agentHint: hint,
           confidence: AgentDetectionConfidence.possible,
           preview: _preview(lines, previewLines),
+          modelHint: modelHint,
+          modelConfidence: modelConfidence,
         );
       }
     }
@@ -139,12 +376,16 @@ class AgentSessionInspector {
         agentHint: 'agent',
         confidence: AgentDetectionConfidence.possible,
         preview: _preview(lines, previewLines),
+        modelHint: modelHint,
+        modelConfidence: modelConfidence,
       );
     }
     return AgentSessionInspection(
       agentHint: 'unknown',
       confidence: AgentDetectionConfidence.none,
       preview: _preview(lines, previewLines),
+      modelHint: modelHint,
+      modelConfidence: modelConfidence,
     );
   }
 

@@ -17,7 +17,10 @@ class LocalShellPaths {
   }) {
     final cleaned = _clean(value);
     if (cleaned == null) return null;
-    if (cleaned == '~') return keepHome ? '~' : null;
+    // launch(keepHome:false)에서 '~'를 null로 버리면 --cd 인자가 빠져 wsl.exe가
+    // 호출 프로세스의 실제 작업 디렉터리(앱 실행 경로)를 그대로 쓴다. wsl.exe는
+    // '--cd ~'를 홈 디렉터리로 해석하므로 두 경우 모두 '~'를 그대로 넘긴다.
+    if (cleaned == '~') return '~';
     if (cleaned.startsWith('~/')) return p.posix.normalize(cleaned);
     // 복원 데이터에 셸 실행 파일 경로가 작업 디렉터리로 잘못 저장된 경우가
     // 있다. POSIX 절대 경로도 디렉터리로 간주하기 전에 실제 파일이면 버린다.

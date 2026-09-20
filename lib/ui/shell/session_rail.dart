@@ -12,12 +12,14 @@ import '../../agent/agent_launcher.dart';
 import '../../app/app_edition.dart';
 import '../../app/app_version.dart';
 import '../../app/theme.dart';
+import '../../app/update_notifier.dart';
 import '../../session/session.dart';
 import '../../session/session_activity.dart';
 import '../../session/session_attention.dart';
 import '../../session/session_group.dart';
 import '../../state/providers.dart';
 import 'agent_launch_dialog.dart';
+import 'release_notes_dialog.dart';
 import 'remote_session_manager_dialog.dart';
 
 /// 좌측 세로탭 세션 패널. 데스크톱 레일/모바일 drawer 양쪽에서 재사용.
@@ -33,6 +35,9 @@ class SessionRail extends ConsumerWidget {
     this.width = 264,
     this.onCollapse,
     this.onSessionSelected,
+    this.onBulk,
+    this.onPreviousSession,
+    this.onNextSession,
   });
 
   final VoidCallback onNewSession;
@@ -48,6 +53,13 @@ class SessionRail extends ConsumerWidget {
   /// 세션 타일을 탭해 활성 세션을 바꾼 직후 호출된다.
   /// 모바일 drawer에서는 이 콜백으로 drawer를 닫는다(데스크톱은 미지정).
   final VoidCallback? onSessionSelected;
+
+  /// 여러 세션 조작(일괄 닫기 등). null이면 헤더에 버튼을 두지 않는다.
+  final VoidCallback? onBulk;
+
+  /// 목록 순서로 이전/다음 세션을 활성화한다. 세션 전환은 그룹(작업공간)
+  /// 관점의 조작이라 세션 그룹 선택기 옆에 둔다. null이면 비활성화한다.
+  final VoidCallback? onPreviousSession, onNextSession;
 
   Color _statusColor(SessionStatus s) {
     switch (s) {
@@ -136,15 +148,23 @@ class SessionRail extends ConsumerWidget {
 
     switch (action) {
       case _SessionAction.launchAgent:
+        final cwd = await ref
+            .read(sessionManagerProvider.notifier)
+            .currentWorkingDirectoryOf(session.id);
+        if (!context.mounted) return;
         final spec = await showAgentLaunchDialog(
           context,
           preferences: ref.read(appSettingsProvider).agentLaunch,
+          initialWorkingDirectory: cwd,
           saveProfile: ref
               .read(appSettingsProvider.notifier)
               .saveAgentLaunchProfile,
           removeProfile: ref
               .read(appSettingsProvider.notifier)
               .removeAgentLaunchProfile,
+          onModelUsed: ref
+              .read(appSettingsProvider.notifier)
+              .rememberAgentLaunchModel,
         );
         if (spec != null && context.mounted) {
           await onLaunchAgent!(session, spec);
@@ -346,6 +366,17 @@ class SessionRail extends ConsumerWidget {
       );
     }
 
+    // 사용자 정의 앱이 없는 빌드에서는 비어 있는 "앱 세션" 그룹을 감춘다.
+    // 그룹 정규화(normalizeSessionGroups)는 건드리지 않고 표시만 거른다.
+    final hideAppsGroup = (sessionCounts[appsSessionGroupId] ?? 0) == 0;
+    final visibleGroups = [
+      for (final group in groupState.groups)
+        if (!(hideAppsGroup && group.id == appsSessionGroupId)) group,
+    ];
+    final displayGroupId = hideAppsGroup && activeGroupId == appsSessionGroupId
+        ? defaultSessionGroupId
+        : activeGroupId;
+
     return Container(
       width: width,
       color: VibeColors.surface,
@@ -354,10 +385,18 @@ class SessionRail extends ConsumerWidget {
           children: [
             _RailHeader(onOpenSettings: onOpenSettings, onCollapse: onCollapse),
             _GroupSelector(
-              state: groupState,
+              groups: visibleGroups,
+              activeGroupId: displayGroupId,
               sessionCounts: sessionCounts,
               onChanged: (groupId) => _activateGroup(ref, groupId),
               onAddGroup: () => _createGroup(context, ref),
+            ),
+            _RailToolbar(
+              onNewSession: onNewSession,
+              onBulk: onBulk,
+              onPreviousSession: onPreviousSession,
+              onNextSession: onNextSession,
+              onOpenAgentWorktrees: onOpenAgentWorktrees,
             ),
             Consumer(
               builder: (context, summaryRef, child) {
@@ -447,28 +486,6 @@ class SessionRail extends ConsumerWidget {
                       ),
                     ),
             ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 8, 10, 12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (onOpenAgentWorktrees != null) ...[
-                    OutlinedButton.icon(
-                      key: const ValueKey('open-agent-worktrees'),
-                      onPressed: onOpenAgentWorktrees,
-                      icon: const Icon(Icons.account_tree_outlined, size: 18),
-                      label: const Text('Agent 작업공간'),
-                    ),
-                    const SizedBox(height: 8),
-                  ],
-                  FilledButton.icon(
-                    onPressed: onNewSession,
-                    icon: const Icon(Icons.add, size: 18),
-                    label: const Text('새 세션'),
-                  ),
-                ],
-              ),
-            ),
           ],
         ),
       ),
@@ -525,13 +542,16 @@ class _SessionMenuItemBody extends StatelessWidget {
 
 class _GroupSelector extends StatelessWidget {
   const _GroupSelector({
-    required this.state,
+    required this.groups,
+    required this.activeGroupId,
     required this.sessionCounts,
     required this.onChanged,
     required this.onAddGroup,
   });
 
-  final SessionGroupState state;
+  /// 드롭다운에 보일 그룹 목록. 빌드에 따라 숨긴 그룹은 빠져 있다.
+  final List<SessionGroup> groups;
+  final String activeGroupId;
   final Map<String, int> sessionCounts;
   final ValueChanged<String> onChanged;
   final VoidCallback onAddGroup;
@@ -555,7 +575,7 @@ class _GroupSelector extends StatelessWidget {
                 ),
                 child: DropdownButtonHideUnderline(
                   child: DropdownButton<String>(
-                    value: state.activeGroupId,
+                    value: activeGroupId,
                     isExpanded: true,
                     dropdownColor: VibeColors.surfaceHigh,
                     icon: const Icon(
@@ -564,11 +584,11 @@ class _GroupSelector extends StatelessWidget {
                       size: 19,
                     ),
                     selectedItemBuilder: (context) => [
-                      for (final group in state.groups)
+                      for (final group in groups)
                         _SelectedGroupLabel(group: group),
                     ],
                     items: [
-                      for (final group in state.groups)
+                      for (final group in groups)
                         DropdownMenuItem(
                           value: group.id,
                           child: _GroupMenuLabel(
@@ -586,7 +606,6 @@ class _GroupSelector extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(width: 6),
           Tooltip(
             message: '세션 그룹 추가',
             child: SizedBox.square(
@@ -598,6 +617,90 @@ class _GroupSelector extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 세션 그룹 선택기 바로 아래에 두는 도구 모음. 새 세션 만들기, 여러 세션
+/// 조작, 이전/다음 세션 전환, Agent 작업공간 열기를 아이콘 한 줄로 모아
+/// 하단 전용 버튼(예전 "새 세션" 풀폭 버튼)을 대신한다.
+class _RailToolbar extends StatelessWidget {
+  const _RailToolbar({
+    required this.onNewSession,
+    this.onBulk,
+    this.onPreviousSession,
+    this.onNextSession,
+    this.onOpenAgentWorktrees,
+  });
+
+  final VoidCallback onNewSession;
+  final VoidCallback? onBulk;
+  final VoidCallback? onPreviousSession;
+  final VoidCallback? onNextSession;
+  final VoidCallback? onOpenAgentWorktrees;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(6, 0, 6, 10),
+      child: Row(
+        children: [
+          _RailToolbarButton(
+            key: const ValueKey('rail-toolbar-new-session'),
+            tooltip: '새 세션',
+            icon: Icons.add,
+            onPressed: onNewSession,
+          ),
+          _RailToolbarButton(
+            key: const ValueKey('rail-toolbar-bulk'),
+            tooltip: '여러 세션 조작',
+            icon: Icons.checklist,
+            onPressed: onBulk,
+          ),
+          _RailToolbarButton(
+            key: const ValueKey('rail-toolbar-prev'),
+            tooltip: '이전 세션',
+            icon: Icons.keyboard_arrow_up,
+            onPressed: onPreviousSession,
+          ),
+          _RailToolbarButton(
+            key: const ValueKey('rail-toolbar-next'),
+            tooltip: '다음 세션',
+            icon: Icons.keyboard_arrow_down,
+            onPressed: onNextSession,
+          ),
+          if (onOpenAgentWorktrees != null)
+            _RailToolbarButton(
+              key: const ValueKey('rail-toolbar-agent-worktrees'),
+              tooltip: 'Agent 작업공간',
+              icon: Icons.account_tree_outlined,
+              onPressed: onOpenAgentWorktrees,
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RailToolbarButton extends StatelessWidget {
+  const _RailToolbarButton({
+    super.key,
+    required this.tooltip,
+    required this.icon,
+    required this.onPressed,
+  });
+
+  final String tooltip;
+  final IconData icon;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Tooltip(
+        message: tooltip,
+        child: IconButton(onPressed: onPressed, icon: Icon(icon, size: 19)),
       ),
     );
   }
@@ -646,9 +749,7 @@ class _GroupMenuLabel extends StatelessWidget {
     return Row(
       children: [
         Icon(
-          group.isDefault
-              ? Icons.folder_special_outlined
-              : Icons.folder_outlined,
+          group.isFixed ? Icons.folder_special_outlined : Icons.folder_outlined,
           color: VibeColors.onSurfaceMuted,
           size: 18,
         ),
@@ -681,14 +782,64 @@ class _GroupMenuLabel extends StatelessWidget {
   }
 }
 
-class _RailHeader extends StatelessWidget {
+/// 버전 라벨 옆의 `↑ 0.13.1` 배지. 새 버전이 있을 때만 그려지고, 누르면
+/// 릴리즈 페이지를 연다. 시작 다이얼로그를 "나중에"로 닫은 뒤에도 업데이트가
+/// 있다는 사실이 눈에 남도록 한다.
+class _UpdateBadge extends StatelessWidget {
+  const _UpdateBadge({required this.version, required this.onTap});
+
+  final String version;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: 'v$version 업데이트가 있습니다. 눌러서 릴리즈 열기',
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(999),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+          decoration: BoxDecoration(
+            color: VibeColors.accent.withValues(alpha: 0.16),
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.arrow_upward_rounded,
+                size: 10,
+                color: VibeColors.accent,
+              ),
+              const SizedBox(width: 2),
+              Text(
+                version,
+                style: const TextStyle(
+                  color: VibeColors.accent,
+                  fontFamily: kMonoFontFamily,
+                  fontFamilyFallback: kMonoFontFallback,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RailHeader extends ConsumerWidget {
   const _RailHeader({required this.onOpenSettings, this.onCollapse});
 
   final VoidCallback onOpenSettings;
   final VoidCallback? onCollapse;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final pendingUpdate = ref.watch(pendingUpdateProvider);
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
       child: Row(
@@ -711,14 +862,47 @@ class _RailHeader extends StatelessWidget {
                 ),
                 const SizedBox(height: 2),
                 // 에디션(Core/Pro)과 버전. 빌드 번호 등 상세는 설정 > About.
-                Text(
-                  appEditionLabel(AppEdition.current, kAppVersion),
-                  style: const TextStyle(
-                    color: VibeColors.onSurfaceDim,
-                    fontFamily: kMonoFontFamily,
-                    fontFamilyFallback: kMonoFontFallback,
-                    fontSize: 11,
-                  ),
+                Row(
+                  children: [
+                    Flexible(
+                      // Core(공개판)에서는 클릭으로 릴리즈 노트를 연다. Pro는
+                      // GitHub Release로 배포하지 않으므로 아무 일도 하지
+                      // 않는다.
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: AppEdition.current == AppEdition.core
+                            ? () => showReleaseNotesDialog(
+                                context: context,
+                                currentVersion: kAppVersion,
+                                load: ref
+                                    .read(updateCheckerProvider)
+                                    .listReleases,
+                                openUrl: ref.read(externalUrlLauncherProvider),
+                              )
+                            : null,
+                        child: Text(
+                          appEditionLabel(AppEdition.current, kAppVersion),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: VibeColors.onSurfaceDim,
+                            fontFamily: kMonoFontFamily,
+                            fontFamilyFallback: kMonoFontFallback,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ),
+                    ),
+                    if (pendingUpdate != null) ...[
+                      const SizedBox(width: 6),
+                      _UpdateBadge(
+                        version: pendingUpdate.version,
+                        onTap: () => ref.read(externalUrlLauncherProvider)(
+                          pendingUpdate.url,
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
               ],
             ),
@@ -959,6 +1143,18 @@ class _SessionTileState extends State<_SessionTile> {
                       shape: BoxShape.circle,
                     ),
                   ),
+                  if (widget.session.appId != null) ...[
+                    const SizedBox(width: 6),
+                    Tooltip(
+                      message: '앱 세션',
+                      child: Icon(
+                        Icons.apps_outlined,
+                        key: Key('session-app-badge-${widget.session.id}'),
+                        size: 16,
+                        color: VibeColors.onSurfaceDim,
+                      ),
+                    ),
+                  ],
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
@@ -1195,8 +1391,10 @@ extension on SessionAttentionState {
 /// 레일 안의 다른 행 위·아래에 놓으면 순서가 바뀌고, 터미널 칸
 /// ([SessionPaneDeck]의 [DragTarget]) 위에 놓으면 그 칸에 배치된다.
 ///
-/// 클릭/탭은 세션 선택으로 남기고, 행 드래그는 모든 입력 장치에서 길게 눌러
-/// 시작한다. 길게 누른 뒤 움직이지 않고 떼면 컨텍스트 메뉴를 연다.
+/// 클릭/탭은 세션 선택으로 남긴다. 마우스(데스크톱)는 slop 이상 움직이면 바로
+/// 끌리고(즉시 인식하는 [Draggable]은 탭을 가로채므로 [Draggable.affinity]로
+/// 거리 기준 인식), 터치는 스크롤과 겹치지 않도록 길게 눌러 끈다. 터치에서
+/// 길게 누른 뒤 움직이지 않고 떼면 컨텍스트 메뉴를 연다.
 class _SessionList extends StatefulWidget {
   const _SessionList({
     required this.groupId,
@@ -1244,6 +1442,11 @@ class _SessionListState extends State<_SessionList>
     _ticker.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  bool get _touch {
+    final platform = Theme.of(context).platform;
+    return platform == TargetPlatform.android || platform == TargetPlatform.iOS;
   }
 
   bool _accepts(PaneSessionDrag drag) =>
@@ -1329,6 +1532,25 @@ class _SessionListState extends State<_SessionList>
     final data = PaneSessionDrag(session.id, widget.groupId);
     final feedback = _feedback(session);
     final whenDragging = Opacity(opacity: .35, child: tile);
+    if (!_touch) {
+      return Draggable<PaneSessionDrag>(
+        data: data,
+        // 축 지정 → 포인터가 slop 이상 움직여야 드래그가 시작되어 클릭(탭)이
+        // 살아남는다. 일단 시작되면 어느 방향으로든 끌 수 있다.
+        affinity: Axis.vertical,
+        dragAnchorStrategy: pointerDragAnchorStrategy,
+        feedback: feedback,
+        childWhenDragging: whenDragging,
+        onDragStarted: () => _draggedIndex = _indexOf(session.id),
+        onDragUpdate: (details) => _updateAutoScroll(details.globalPosition),
+        onDragEnd: (_) {
+          _draggedIndex = null;
+          _stopAutoScroll();
+          _setSlot(null);
+        },
+        child: tile,
+      );
+    }
     Offset? dragStart;
     return LongPressDraggable<PaneSessionDrag>(
       data: data,

@@ -261,6 +261,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     String? remoteSessionId,
     String? localSessionId,
     AgentWorkspaceContext? agentWorkspace,
+    String? appId,
   }) => SessionInfo(
     id: id,
     host: host,
@@ -271,6 +272,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     remoteSessionId: host.keepsRemoteSession ? remoteSessionId : null,
     localSessionId: localSessionId,
     agentWorkspace: agentWorkspace,
+    appId: appId,
   );
 
   /// 새 세션을 열고 연결을 시도한다. 생성한 sessionId를 반환한다.
@@ -286,6 +288,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     String? localSessionId,
     bool persistentLocal = true,
     AgentWorkspaceContext? agentWorkspace,
+    String? appId,
   }) async {
     var resolvedLocalId = localSessionId;
     if (host.isLocalShell &&
@@ -309,6 +312,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       remoteSessionId: resolvedRemoteSessionId,
       localSessionId: resolvedLocalId,
       agentWorkspace: agentWorkspace,
+      appId: appId,
     );
     final engine = session.engine;
     _configureSessionTracking(id, host, engine);
@@ -590,14 +594,9 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     var workspace = spec.toWorkspaceContext();
     if (spec.isolatedWorktree) {
       await _agentWorktreeInitialization;
-      final workingDirectory = source.host.isLocalShell
-          ? await _currentLocalWorkingDirectory(source.id, source) ??
-                _cleanWorkingDirectory(source.host.workingDirectory)
-          : _cleanWorkingDirectory(
-              _sessionStates[source.id]?.workingDirectory ??
-                  source.restoredContext?.workingDirectory ??
-                  source.host.workingDirectory,
-            );
+      final workingDirectory =
+          _cleanWorkingDirectory(spec.repositoryDirectory) ??
+          await currentWorkingDirectoryOf(source.id);
       final location = await _worktreeRuntime.resolveLocation(
         host: source.host,
         preferredSessionId: source.id,
@@ -612,6 +611,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         cli: spec.cli,
         executable: spec.executable,
         initialGoal: spec.initialGoal,
+        model: spec.model,
         arguments: List.unmodifiable(spec.arguments),
         branchName: spec.branchName!.trim(),
         baseRef: location.baseRef,
@@ -1664,6 +1664,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       AgentLaunchSpec(
         cli: entry.cli,
         executable: entry.executable,
+        model: entry.model,
         arguments: entry.nativeSessionId == null
             ? entry.arguments
             : nativeAgentResumeArguments(
@@ -2132,6 +2133,22 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     return cleaned == null || cleaned.isEmpty ? null : cleaned;
   }
 
+  /// 세션의 현재 작업 디렉터리. 로컬 셸은 OS에서, 원격은 셸 통합(OSC 7)이나
+  /// 키 입력 추적으로 파악한 값이며 모르면 호스트 설정 폴더로 돌아간다.
+  Future<String?> currentWorkingDirectoryOf(String sessionId) async {
+    final source = _sessionById(sessionId);
+    if (source == null) return null;
+    if (source.host.isLocalShell) {
+      return await _currentLocalWorkingDirectory(sessionId, source) ??
+          _cleanWorkingDirectory(source.host.workingDirectory);
+    }
+    return _cleanWorkingDirectory(
+      _sessionStates[sessionId]?.workingDirectory ??
+          source.restoredContext?.workingDirectory ??
+          source.host.workingDirectory,
+    );
+  }
+
   /// 로컬 셸의 현재 작업 디렉터리를 결정한다.
   ///
   /// 키 입력 추적기는 자동완성·히스토리 뒤에 경로를 잃으므로, 살아 있는
@@ -2341,6 +2358,14 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       if (current.handleInput(data)) {
         _schedulePersistOpenSessions();
       }
+    };
+    // 셸 통합(OSC 7)이 있으면 키 입력 추측 대신 셸이 보고한 실제 cwd를 쓴다.
+    // 자동완성·cd -·tmux 재접속처럼 추적기가 놓치는 이동을 모두 바로잡는다.
+    engine.onWorkingDirectoryChange = (path) {
+      final current = _sessionStates[id];
+      if (current == null || current.workingDirectory == path) return;
+      current.syncWorkingDirectory(path);
+      _schedulePersistOpenSessions();
     };
   }
 
@@ -3100,7 +3125,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       sessions: [
         for (final session in state)
           if (!_userClosed.contains(session.id) &&
-              session.status != SessionStatus.error)
+              session.status != SessionStatus.error &&
+              session.appId == null)
             RestoredSessionEntry(
               id: session.id,
               hostId: session.host.id,
@@ -3134,6 +3160,17 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   String? _firstSessionIdInGroup(List<SessionInfo> sessions, String groupId) {
     for (final session in sessions) {
       if (session.groupId == groupId) return session.id;
+    }
+    return null;
+  }
+
+  /// 세션이 지금 기록 중인 로그 id. 복원된 세션이라 아직 새 로그가 없으면
+  /// 이전 로그 id로 대신한다. AI Chat이 스크롤 밖 출력을 읽을 때 쓴다.
+  String? logIdOf(String sessionId) {
+    final live = _sessionLogIds[sessionId];
+    if (live != null) return live;
+    for (final session in state) {
+      if (session.id == sessionId) return session.restoredContext?.logId;
     }
     return null;
   }

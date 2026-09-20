@@ -36,7 +36,7 @@ import '../../ssh/ssh_service.dart';
 import '../../state/providers.dart';
 import '../adaptive/breakpoints.dart';
 import '../hosts/host_edit_page.dart';
-import '../hosts/host_list_page.dart';
+import '../hosts/host_picker.dart';
 import '../security/host_key_prompt.dart';
 import '../security/keyboard_interactive_prompt.dart';
 import '../settings/settings_sheet.dart';
@@ -49,67 +49,34 @@ import 'agent_integration_dialog.dart';
 import 'agent_workspace_files_dialog.dart';
 import 'ai_chat_panel.dart';
 import '../../cli_config/cli_config_home.dart';
-import '../../cli_config/cli_installation_provider.dart';
 import 'cli_config_panel.dart';
 import 'command_palette.dart';
 import 'community_panel.dart';
 import 'log_viewer_panel.dart';
 import 'memo_panel.dart';
+import 'pane_layout_panel.dart';
+import 'right_panel_tools.dart';
+import 'session_info_panel.dart';
 import 'session_rail.dart';
 import 'snippet_panel.dart';
 
-/// 플랫폼이 실제로 지원하는 도구만 레일에 올린다. 빌드 플래그는 플랫폼을
-/// 구분하지 않으므로, 플러그인이 없거나(Linux 웹뷰) 기능 자체가 데스크톱
-/// 전용인(X11) 도구는 여기서 걸러 빈 패널이 노출되지 않게 한다.
-
 List<RightPanelTool> _enabledRightPanelTools(
   BuildFeatures features,
-  Set<CliConfigApp> installedCliApps,
+  AppSettings settings,
 ) {
+  final ordered = applyRightPanelToolOrder(
+    allRightPanelToolsForBuild(features),
+    settings.rightPanelToolOrder,
+  );
   return [
-    if (features.snippets) RightPanelTool.snippets,
-    if (features.aiChat) RightPanelTool.aiChat,
-    if (features.memo) RightPanelTool.memo,
-    if (features.claudeSettings &&
-        installedCliApps.contains(CliConfigApp.claude))
-      RightPanelTool.claudeSettings,
-    if (features.codexSettings && installedCliApps.contains(CliConfigApp.codex))
-      RightPanelTool.codexSettings,
-    if (features.opencodeSettings &&
-        installedCliApps.contains(CliConfigApp.opencode))
-      RightPanelTool.opencodeSettings,
-    if (features.community && features.github) RightPanelTool.community,
-    if (features.logs) RightPanelTool.logs,
+    for (final tool in ordered)
+      if (!settings.hiddenRightPanelTools.contains(tool.name)) tool,
   ];
 }
 
-IconData _rightPanelToolIcon(RightPanelTool tool) {
-  return switch (tool) {
-    RightPanelTool.snippets => Icons.code,
-    RightPanelTool.aiChat => Icons.auto_awesome,
-    RightPanelTool.memo => Icons.sticky_note_2_outlined,
-    RightPanelTool.claudeSettings => appIconFor(CliConfigApp.claude),
-    RightPanelTool.codexSettings => appIconFor(CliConfigApp.codex),
-    RightPanelTool.opencodeSettings => appIconFor(CliConfigApp.opencode),
-    RightPanelTool.community => Icons.groups_2_outlined,
-    RightPanelTool.logs => Icons.receipt_long_outlined,
-  };
-}
+IconData _rightPanelToolIcon(RightPanelTool tool) => rightPanelToolIcon(tool);
 
-/// 도구 이름. Pro 전용 앱(PRO_EDITION.md)은 `(PRO)`를 붙여 툴팁·명령 팔레트·
-/// 모바일 도구 메뉴에서 바로 구분되게 한다.
-String _rightPanelToolLabel(RightPanelTool tool) {
-  return switch (tool) {
-    RightPanelTool.snippets => '스니펫',
-    RightPanelTool.aiChat => 'AI Chat',
-    RightPanelTool.memo => '메모',
-    RightPanelTool.claudeSettings => 'Claude Settings',
-    RightPanelTool.codexSettings => 'Codex Settings',
-    RightPanelTool.opencodeSettings => 'OpenCode Settings',
-    RightPanelTool.community => 'Community',
-    RightPanelTool.logs => '로그',
-  };
-}
+String _rightPanelToolLabel(RightPanelTool tool) => rightPanelToolLabel(tool);
 
 Map<ShortcutActivator, VoidCallback> _appShortcutCallbacks(
   AppSettings settings,
@@ -134,6 +101,55 @@ class AppShell extends ConsumerStatefulWidget {
 
 class _AppShellState extends ConsumerState<AppShell> {
   final _paneDeckKey = GlobalKey<SessionPaneDeckState>();
+
+  /// 좌측 레일의 "여러 세션 조작" 버튼.
+  void _showSessionBulk(BuildContext context) => showSessionBulkDialog(
+    context,
+    registry: ref.read(sessionPortRegistryProvider),
+    close: ref.read(sessionManagerProvider.notifier).closeSession,
+  );
+
+  /// 좌측 레일의 이전/다음 세션 버튼. 현재 그룹에 세션이 2개 이상일 때만 활성.
+  VoidCallback? _cycleSessionHandler(int delta) {
+    final groupId = ref.read(sessionGroupProvider).activeGroupId;
+    final count = ref
+        .read(sessionManagerProvider)
+        .where((s) => s.groupId == groupId)
+        .length;
+    return count > 1 ? () => cycleActiveSession(ref, delta) : null;
+  }
+
+  /// 우측 "화면 분할 관리" 앱. 배치는 provider를 watch해 즉시 반영하고,
+  /// 편집 자체는 명령 팔레트와 같은 [_paneDeckKey] 경로로 deck에 맡긴다.
+  Widget _buildPaneLayoutPanel(BuildContext context) {
+    final groupId = ref.watch(sessionGroupProvider).activeGroupId;
+    final sessions = ref
+        .watch(sessionManagerProvider)
+        .where((s) => s.groupId == groupId)
+        .toList();
+    final layouts = ref.watch(sessionPaneLayoutsProvider);
+    final layout = layouts[groupId] ?? const SessionPaneLayout();
+    final features = ref.watch(buildFeaturesProvider);
+    return PaneLayoutPanel(
+      deck: _paneDeckKey,
+      sessions: sessions,
+      layout: layout,
+      canUndo: ref.read(sessionPaneLayoutsProvider.notifier).canUndo(groupId),
+      storageError: ref.watch(sessionPaneStorageErrorProvider),
+      onRetrySave: ref.read(sessionPaneLayoutsProvider.notifier).retrySave,
+      onWorkspace: _workspacePanels.isEmpty
+          ? null
+          : () => setState(() => _workspaceOpen = !_workspaceOpen),
+      onControl: features.externalControl ? _showExternalControl : null,
+      controlEnabled: _controlServer?.running == true,
+      onBackground: features.localBackgroundSessions
+          ? _openLocalBackgroundSessions
+          : null,
+      // 모바일은 전체 폭 endDrawer라 조작 뒤 닫아야 바뀐 배치가 보인다.
+      onAfterAction: context.isCompact ? _closeMobileEndDrawer : null,
+    );
+  }
+
   Map<String, VoidCallback> get _paneShortcuts => {
     'commandPalette': () {
       final sessions = ref.read(sessionManagerProvider);
@@ -146,7 +162,7 @@ class _AppShellState extends ConsumerState<AppShell> {
           active: sessions.where((s) => s.id == activeId).firstOrNull,
           availableTools: _enabledRightPanelTools(
             ref.read(buildFeaturesProvider),
-            ref.read(installedCliAppsProvider).asData?.value ?? const {},
+            ref.read(appSettingsProvider),
           ),
           compact: context.isCompact,
         ),
@@ -210,12 +226,16 @@ class _AppShellState extends ConsumerState<AppShell> {
               preferences: ref.read(appSettingsProvider).agentLaunch,
               initialCli: worktree.cli,
               initialGoal: goal,
+              initialWorkingDirectory: worktree.repositoryRoot,
               saveProfile: ref
                   .read(appSettingsProvider.notifier)
                   .saveAgentLaunchProfile,
               removeProfile: ref
                   .read(appSettingsProvider.notifier)
                   .removeAgentLaunchProfile,
+              onModelUsed: ref
+                  .read(appSettingsProvider.notifier)
+                  .rememberAgentLaunchModel,
             );
             if (spec == null || !mounted) return;
             try {
@@ -343,6 +363,9 @@ class _AppShellState extends ConsumerState<AppShell> {
             if (isolated && branch is! String) {
               throw ArgumentError('격리된 Agent의 branch를 지정하세요.');
             }
+            // 제어 서버가 이미 거른 값이지만, spawn을 직접 부르는 경로도
+            // 같은 규칙을 지나도록 여기서 한 번 더 정규화한다.
+            final model = validateSpawnModel(params['model']);
             return ref
                 .read(sessionManagerProvider.notifier)
                 .launchAgentSession(
@@ -352,6 +375,7 @@ class _AppShellState extends ConsumerState<AppShell> {
                     isolatedWorktree: isolated,
                     branchName: branch is String ? branch : null,
                     arguments: rawArgs is List ? rawArgs.cast<String>() : [],
+                    model: model,
                   ),
                   onHostKey: (a, t, fp, v) => _onHostKey(context, a, t, fp, v),
                 );
@@ -448,10 +472,7 @@ class _AppShellState extends ConsumerState<AppShell> {
   }
 
   Future<void> _newSession(BuildContext context, WidgetRef ref) async {
-    final host = await Navigator.push<Host>(
-      context,
-      MaterialPageRoute(builder: (_) => const HostListPage(pickMode: true)),
-    );
+    final host = await showHostPicker(context);
     if (host == null || !context.mounted) return;
     final id = await ref
         .read(sessionManagerProvider.notifier)
@@ -922,16 +943,24 @@ class _AppShellState extends ConsumerState<AppShell> {
 
     Future<void> launch(AgentCli cli) async {
       if (active == null || !context.mounted) return;
+      final cwd = await ref
+          .read(sessionManagerProvider.notifier)
+          .currentWorkingDirectoryOf(active.id);
+      if (!context.mounted) return;
       final spec = await showAgentLaunchDialog(
         context,
         preferences: ref.read(appSettingsProvider).agentLaunch,
         initialCli: cli,
+        initialWorkingDirectory: cwd,
         saveProfile: ref
             .read(appSettingsProvider.notifier)
             .saveAgentLaunchProfile,
         removeProfile: ref
             .read(appSettingsProvider.notifier)
             .removeAgentLaunchProfile,
+        onModelUsed: ref
+            .read(appSettingsProvider.notifier)
+            .rememberAgentLaunchModel,
       );
       if (spec != null && context.mounted) {
         await _launchAgentSession(context, ref, active, spec);
@@ -1241,29 +1270,6 @@ class _AppShellState extends ConsumerState<AppShell> {
       activeId: activeId,
       layout: layout,
       terminalBuilder: terminal,
-      onPreviousSession: visibleSessions.length > 1
-          ? () => cycleActiveSession(ref, -1)
-          : null,
-      onNextSession: visibleSessions.length > 1
-          ? () => cycleActiveSession(ref, 1)
-          : null,
-      onWorkspace: _workspacePanels.isEmpty
-          ? null
-          : () => setState(() => _workspaceOpen = !_workspaceOpen),
-      onControl: ref.watch(buildFeaturesProvider).externalControl
-          ? _showExternalControl
-          : null,
-      onBackground: ref.watch(buildFeaturesProvider).localBackgroundSessions
-          ? _openLocalBackgroundSessions
-          : null,
-      storageError: ref.watch(sessionPaneStorageErrorProvider),
-      onRetrySave: ref.read(sessionPaneLayoutsProvider.notifier).retrySave,
-      onBulk: () => showSessionBulkDialog(
-        context,
-        registry: ref.read(sessionPortRegistryProvider),
-        close: ref.read(sessionManagerProvider.notifier).closeSession,
-      ),
-      controlEnabled: _controlServer?.running == true,
       onLayout: (next) {
         if (!ref.read(sessionPaneLayoutsProvider).containsKey(activeGroupId)) {
           ref
@@ -1300,12 +1306,7 @@ class _AppShellState extends ConsumerState<AppShell> {
     }
     final target = initial.pane(paneId);
     if (target == null) return;
-    final Host? host =
-        duplicate?.host ??
-        await Navigator.push<Host>(
-          context,
-          MaterialPageRoute(builder: (_) => const HostListPage(pickMode: true)),
-        );
+    final Host? host = duplicate?.host ?? await showHostPicker(context);
     if (host == null ||
         !context.mounted ||
         !ref.read(sessionGroupProvider).contains(group)) {
@@ -1384,10 +1385,7 @@ class _AppShellState extends ConsumerState<AppShell> {
     ];
     final features = ref.watch(buildFeaturesProvider);
     final settings = ref.watch(appSettingsProvider);
-    final availableTools = _enabledRightPanelTools(
-      features,
-      ref.watch(installedCliAppsProvider).asData?.value ?? const {},
-    );
+    final availableTools = _enabledRightPanelTools(features, settings);
     // 수동 lookup: collection 패키지 없이 안전하게 처리
     SessionInfo? active;
     for (final s in sessions) {
@@ -1594,6 +1592,12 @@ class _AppShellState extends ConsumerState<AppShell> {
                   },
                   // 세션을 고르면 drawer를 닫아 바로 터미널이 보이게 한다.
                   onSessionSelected: _closeMobileDrawer,
+                  onBulk: () {
+                    _closeMobileDrawer();
+                    _showSessionBulk(context);
+                  },
+                  onPreviousSession: _cycleSessionHandler(-1),
+                  onNextSession: _cycleSessionHandler(1),
                 ),
               ),
             ),
@@ -1613,6 +1617,7 @@ class _AppShellState extends ConsumerState<AppShell> {
                         _closeMobileEndDrawer();
                         showVibeTerminalSettings(context);
                       },
+                      paneLayoutPanel: _buildPaneLayoutPanel(context),
                     ),
                   ),
                 ),
@@ -1641,6 +1646,9 @@ class _AppShellState extends ConsumerState<AppShell> {
                     _reviewAgentChanges(context, ref, session),
                 onOpenAgentWorktrees: () => _openAgentWorktrees(context, ref),
                 onOpenSettings: () => showVibeTerminalSettings(context),
+                onBulk: () => _showSessionBulk(context),
+                onPreviousSession: _cycleSessionHandler(-1),
+                onNextSession: _cycleSessionHandler(1),
               ),
               const _PaneDivider(),
               Expanded(child: centerArea),
@@ -1656,6 +1664,7 @@ class _AppShellState extends ConsumerState<AppShell> {
                   const _PaneDivider(),
                   _ResizableRightPanel(
                     onOpenSettings: () => showVibeTerminalSettings(context),
+                    paneLayoutPanel: _buildPaneLayoutPanel(context),
                   ),
                 ],
               ],
@@ -1725,6 +1734,9 @@ class _ResizableLeftPanel extends ConsumerStatefulWidget {
     required this.onReviewAgentChanges,
     required this.onOpenAgentWorktrees,
     required this.onOpenSettings,
+    this.onBulk,
+    this.onPreviousSession,
+    this.onNextSession,
   });
 
   final VoidCallback onNewSession;
@@ -1734,6 +1746,7 @@ class _ResizableLeftPanel extends ConsumerStatefulWidget {
   final Future<void> Function(SessionInfo session) onReviewAgentChanges;
   final VoidCallback onOpenAgentWorktrees;
   final VoidCallback onOpenSettings;
+  final VoidCallback? onBulk, onPreviousSession, onNextSession;
 
   @override
   ConsumerState<_ResizableLeftPanel> createState() =>
@@ -1804,6 +1817,9 @@ class _ResizableLeftPanelState extends ConsumerState<_ResizableLeftPanel> {
               onOpenSettings: widget.onOpenSettings,
               onCollapse: () =>
                   ref.read(leftPanelCollapsedProvider.notifier).collapse(),
+              onBulk: widget.onBulk,
+              onPreviousSession: widget.onPreviousSession,
+              onNextSession: widget.onNextSession,
             ),
           ),
           if (canResize)
@@ -1913,9 +1929,13 @@ class _LeftPanelResizeHandle extends StatelessWidget {
 }
 
 class _ResizableRightPanel extends ConsumerStatefulWidget {
-  const _ResizableRightPanel({required this.onOpenSettings});
+  const _ResizableRightPanel({
+    required this.onOpenSettings,
+    required this.paneLayoutPanel,
+  });
 
   final VoidCallback? onOpenSettings;
+  final Widget paneLayoutPanel;
 
   @override
   ConsumerState<_ResizableRightPanel> createState() =>
@@ -1968,7 +1988,10 @@ class _ResizableRightPanelState extends ConsumerState<_ResizableRightPanel> {
       child: Stack(
         children: [
           Positioned.fill(
-            child: _RightPanelContent(onOpenSettings: widget.onOpenSettings),
+            child: _RightPanelContent(
+              onOpenSettings: widget.onOpenSettings,
+              paneLayoutPanel: widget.paneLayoutPanel,
+            ),
           ),
           if (canResize)
             _RightPanelResizeHandle(
@@ -2040,7 +2063,7 @@ class _PaneDivider extends StatelessWidget {
   }
 }
 
-class _ToolStrip extends StatelessWidget {
+class _ToolStrip extends ConsumerWidget {
   const _ToolStrip({
     required this.panelState,
     required this.availableTools,
@@ -2051,33 +2074,84 @@ class _ToolStrip extends StatelessWidget {
   final List<RightPanelTool> availableTools;
   final ValueChanged<RightPanelTool> onToggleTool;
 
+  Future<void> _showContextMenu(
+    BuildContext context,
+    WidgetRef ref,
+    Offset globalPosition,
+  ) async {
+    final features = ref.read(buildFeaturesProvider);
+    final hidden = ref.read(appSettingsProvider).hiddenRightPanelTools;
+    final selected = await showMenu<RightPanelTool>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        globalPosition.dx,
+        globalPosition.dy,
+        globalPosition.dx,
+        globalPosition.dy,
+      ),
+      items: [
+        for (final tool in allRightPanelToolsForBuild(features))
+          CheckedPopupMenuItem(
+            value: tool,
+            checked: !hidden.contains(tool.name),
+            child: Text(rightPanelToolLabel(tool)),
+          ),
+      ],
+    );
+    if (selected == null) return;
+    final wasHidden = hidden.contains(selected.name);
+    ref
+        .read(appSettingsProvider.notifier)
+        .setRightPanelToolHidden(selected, !wasHidden);
+  }
+
+  void _reorder(WidgetRef ref, int oldIndex, int newIndex) {
+    final order = [for (final tool in availableTools) tool.name];
+    final moved = order.removeAt(oldIndex);
+    order.insert(newIndex, moved);
+    ref.read(appSettingsProvider.notifier).setRightPanelToolOrder(order);
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     if (availableTools.isEmpty) return const SizedBox.shrink();
     return Container(
       width: 52,
       color: VibeColors.surface,
       child: SafeArea(
-        // 도구가 창 높이보다 많아지면(개발 빌드는 전 기능이 켜진다) 잘리지
-        // 않고 스크롤되게 한다.
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onSecondaryTapUp: (details) =>
+              _showContextMenu(context, ref, details.globalPosition),
+          // ReorderableListView는 스스로 스크롤을 처리하므로, 도구가 창
+          // 높이보다 많아져도(개발 빌드는 전 기능이 켜진다) 잘리지 않는다.
+          // 고정한 사용자 정의 앱은 드래그 정렬 대상이 아니라서
+          // ReorderableListView 바깥(아래)에 따로 쌓는다 — 그래야 재정렬
+          // 인덱스가 enum 도구 개수와 정확히 일치한다.
+          child: ReorderableListView(
+            buildDefaultDragHandles: false,
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            onReorderItem: (oldIndex, newIndex) =>
+                _reorder(ref, oldIndex, newIndex),
             children: [
-              const SizedBox(height: 8),
-              for (final tool in availableTools) ...[
-                Builder(
-                  builder: (context) {
-                    return _ToolButton(
-                      tooltip: _rightPanelToolLabel(tool),
-                      active: panelState.open && panelState.tool == tool,
-                      icon: _rightPanelToolIcon(tool),
-                      onPressed: () => onToggleTool(tool),
-                    );
-                  },
+              for (final (index, tool) in availableTools.indexed)
+                ReorderableDragStartListener(
+                  key: ValueKey('tool-strip-${tool.name}'),
+                  index: index,
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Builder(
+                      builder: (context) {
+                        return _ToolButton(
+                          tooltip: _rightPanelToolLabel(tool),
+                          active: panelState.open && panelState.tool == tool,
+                          icon: rightPanelToolIcon(tool),
+                          onPressed: () => onToggleTool(tool),
+                        );
+                      },
+                    ),
+                  ),
                 ),
-                const SizedBox(height: 4),
-              ],
             ],
           ),
         ),
@@ -2139,17 +2213,21 @@ class _ToolButton extends StatelessWidget {
 }
 
 class _RightPanelContent extends ConsumerWidget {
-  const _RightPanelContent({required this.onOpenSettings});
+  const _RightPanelContent({
+    required this.onOpenSettings,
+    required this.paneLayoutPanel,
+  });
 
   final VoidCallback? onOpenSettings;
+
+  /// 앱 셸 상태(deck 키·도구 콜백)가 필요해 셸이 만들어 넘긴다.
+  final Widget paneLayoutPanel;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final features = ref.watch(buildFeaturesProvider);
-    final availableTools = _enabledRightPanelTools(
-      features,
-      ref.watch(installedCliAppsProvider).asData?.value ?? const {},
-    );
+    final settings = ref.watch(appSettingsProvider);
+    final availableTools = _enabledRightPanelTools(features, settings);
     if (availableTools.isEmpty) return const SizedBox.shrink();
 
     final requestedTool = ref.watch(rightPanelProvider).tool;
@@ -2158,8 +2236,10 @@ class _RightPanelContent extends ConsumerWidget {
         : availableTools.first;
 
     return switch (visibleTool) {
+      RightPanelTool.paneLayout => paneLayoutPanel,
       RightPanelTool.aiChat => AiChatPanel(onOpenSettings: onOpenSettings),
       RightPanelTool.snippets => const SnippetPanel(),
+      RightPanelTool.sessionInfo => const SessionInfoPanel(),
       RightPanelTool.memo => const MemoPanel(),
       RightPanelTool.claudeSettings => const CliConfigPanel(
         app: CliConfigApp.claude,

@@ -17,7 +17,10 @@ import 'terminal_sideband.dart';
 class TerminalEngine {
   TerminalEngine({int maxLines = 5000})
     : terminal = Terminal(maxLines: maxLines) {
-    terminal.onTitleChange = (title) => onTitleChange?.call(title);
+    terminal.onTitleChange = (title) {
+      _title = title;
+      onTitleChange?.call(title);
+    };
   }
 
   static const _clearSessionScreen = '\x1b[?1049l\x1b[2J\x1b[3J\x1b[H';
@@ -32,6 +35,15 @@ class TerminalEngine {
 
   /// 프로그램이 OSC 0/2로 터미널 제목을 바꿀 때 호출된다(Agent 판별용).
   ValueChanged<String>? onTitleChange;
+
+  String? _title;
+
+  /// 마지막으로 보고된 터미널 제목. 리스너를 나중에 붙인 쪽(세션 선택 UI 등)도
+  /// 지금 떠 있는 프로그램을 알 수 있게 보관한다.
+  String? get title => _title;
+
+  /// 셸 통합이 OSC 7로 현재 작업 디렉터리를 보고할 때 호출된다(절대 경로).
+  ValueChanged<String>? onWorkingDirectoryChange;
 
   /// 터미널에서 세션 핸들로 전송되는 입력.
   ValueChanged<String>? onInput;
@@ -59,6 +71,8 @@ class TerminalEngine {
   final List<String> _pendingOutput = [];
   Timer? _outputFlushTimer;
   final TerminalSidebandDecoder _sidebandDecoder = TerminalSidebandDecoder();
+  final TerminalWorkingDirectoryDecoder _cwdDecoder =
+      TerminalWorkingDirectoryDecoder();
 
   /// [handle]을 터미널에 연결한다. 출력·입력·리사이즈를 양방향 연결한다.
   /// [onClosed]는 출력 스트림이 종료(연결 끊김)되면 호출된다.
@@ -72,6 +86,7 @@ class TerminalEngine {
     _outputFlushTimer = null;
     _pendingOutput.clear();
     _sidebandDecoder.reset();
+    _cwdDecoder.reset();
     _handle = handle;
     final resizer = _resizeDispatcher = TerminalResizeDispatcher(handle.resize);
     _replaying = false;
@@ -92,6 +107,10 @@ class TerminalEngine {
         for (final message in _sidebandDecoder.add(data)) {
           onSidebandMessage?.call(message);
         }
+      }
+      // 재생 중이라도 마지막 cwd 보고는 현재 위치를 뜻하므로 그대로 반영한다.
+      for (final path in _cwdDecoder.add(data)) {
+        onWorkingDirectoryChange?.call(path);
       }
       _pendingOutput.add(data);
       _outputFlushTimer ??= Timer(_outputCoalesceWindow, _flushPendingOutput);

@@ -167,6 +167,7 @@ class AiSettings {
     required this.httpsProxy,
     required this.customPrompt,
     required this.maxContextLines,
+    required this.maxLogContextLines,
     required this.chatFontFamily,
     required this.chatFontSize,
   });
@@ -175,6 +176,12 @@ class AiSettings {
   static const customHeadersSecretRef = 'vibe_terminal.ai.custom_headers';
   static const minContextLines = 50;
   static const maxContextLineLimit = 500;
+
+  /// 세션 로그 컨텍스트 줄 수 범위. 상한은 세션 로그 저장소가 평문으로
+  /// 돌려주는 최대 줄 수(5000)와 같다.
+  static const minLogContextLines = 200;
+  static const maxLogContextLineLimit = 5000;
+  static const defaultLogContextLines = 2000;
   static const minChatFontSize = 10.0;
   static const maxChatFontSize = 20.0;
 
@@ -187,6 +194,9 @@ class AiSettings {
   final String httpsProxy;
   final String customPrompt;
   final int maxContextLines;
+
+  /// AI Chat이 세션 로그를 붙일 때 로그 끝에서 읽는 최대 줄 수.
+  final int maxLogContextLines;
   final String chatFontFamily;
   final double chatFontSize;
 
@@ -200,6 +210,7 @@ class AiSettings {
     httpsProxy: '',
     customPrompt: '',
     maxContextLines: maxContextLineLimit,
+    maxLogContextLines: defaultLogContextLines,
     chatFontFamily: kMonoFontFamily,
     chatFontSize: 13,
   );
@@ -226,6 +237,7 @@ class AiSettings {
     String? httpsProxy,
     String? customPrompt,
     int? maxContextLines,
+    int? maxLogContextLines,
     String? chatFontFamily,
     double? chatFontSize,
   }) {
@@ -241,6 +253,9 @@ class AiSettings {
       customPrompt: customPrompt ?? this.customPrompt,
       maxContextLines: (maxContextLines ?? this.maxContextLines)
           .clamp(minContextLines, maxContextLineLimit)
+          .toInt(),
+      maxLogContextLines: (maxLogContextLines ?? this.maxLogContextLines)
+          .clamp(minLogContextLines, maxLogContextLineLimit)
           .toInt(),
       chatFontFamily: chatFontFamily ?? this.chatFontFamily,
       chatFontSize: (chatFontSize ?? this.chatFontSize).clamp(
@@ -264,6 +279,7 @@ class AiSettings {
     'httpsProxy': httpsProxy,
     'customPrompt': customPrompt,
     'maxContextLines': maxContextLines,
+    'maxLogContextLines': maxLogContextLines,
     'chatFontFamily': chatFontFamily,
     'chatFontSize': chatFontSize,
   };
@@ -294,6 +310,7 @@ class AiSettings {
           httpsProxy: json['httpsProxy'] as String?,
           customPrompt: json['customPrompt'] as String?,
           maxContextLines: (json['maxContextLines'] as num?)?.round(),
+          maxLogContextLines: (json['maxLogContextLines'] as num?)?.round(),
           chatFontFamily: json['chatFontFamily'] as String?,
           chatFontSize: (json['chatFontSize'] as num?)?.toDouble(),
         );
@@ -740,6 +757,7 @@ class AgentLaunchProfile {
     required this.isolateWorktree,
     this.executable,
     this.initialGoal,
+    this.model,
   });
 
   final String id;
@@ -750,12 +768,16 @@ class AgentLaunchProfile {
   final String? executable;
   final String? initialGoal;
 
+  /// 이 프로필로 실행할 때 쓸 모델 이름. null이면 CLI 기본값을 쓴다.
+  final String? model;
+
   Map<String, Object?> toJson() => {
     'id': id,
     'name': name,
     'cliName': cliName,
     if (executable != null) 'executable': executable,
     if (initialGoal != null) 'initialGoal': initialGoal,
+    if (model != null) 'model': model,
     'arguments': arguments,
     'isolateWorktree': isolateWorktree,
   };
@@ -788,6 +810,7 @@ class AgentLaunchProfile {
       cliName: cliName,
       executable: _profileString(value['executable'], 1000),
       initialGoal: _profileString(value['initialGoal'], 8000),
+      model: _profileString(value['model'], 200),
       arguments: List.unmodifiable(arguments),
       isolateWorktree: value['isolateWorktree'] != false,
     );
@@ -835,6 +858,7 @@ class AgentLaunchPreferences {
     required this.defaultArguments,
     this.profiles = const [],
     this.runProfiles = const [],
+    this.recentModels = const [],
   });
 
   final bool isolateByDefault;
@@ -845,10 +869,15 @@ class AgentLaunchPreferences {
   final List<AgentLaunchProfile> profiles;
   final List<AgentRunProfile> runProfiles;
 
+  /// 최근 사용한 모델 이름, 최신순, 최대 8개, 중복 없음.
+  final List<String> recentModels;
+
   static const defaultSettings = AgentLaunchPreferences(
     isolateByDefault: true,
     defaultArguments: {},
   );
+
+  static const maxRecentModels = 8;
 
   List<String> argumentsFor(String cliName) =>
       List.unmodifiable(defaultArguments[cliName] ?? const <String>[]);
@@ -858,12 +887,27 @@ class AgentLaunchPreferences {
     Map<String, List<String>>? defaultArguments,
     List<AgentLaunchProfile>? profiles,
     List<AgentRunProfile>? runProfiles,
+    List<String>? recentModels,
   }) => AgentLaunchPreferences(
     isolateByDefault: isolateByDefault ?? this.isolateByDefault,
     defaultArguments: defaultArguments ?? this.defaultArguments,
     profiles: profiles ?? this.profiles,
     runProfiles: runProfiles ?? this.runProfiles,
+    recentModels: recentModels ?? this.recentModels,
   );
+
+  AgentLaunchPreferences withRecentModel(String model) {
+    final trimmed = model.trim();
+    if (trimmed.isEmpty) return this;
+    final next = <String>[
+      trimmed,
+      for (final existing in recentModels)
+        if (existing != trimmed) existing,
+    ];
+    return copyWith(
+      recentModels: List.unmodifiable(next.take(maxRecentModels)),
+    );
+  }
 
   AgentLaunchPreferences withArguments(String cliName, List<String> values) {
     final next = <String, List<String>>{
@@ -910,6 +954,7 @@ class AgentLaunchPreferences {
       'profiles': [for (final profile in profiles) profile.toJson()],
     if (runProfiles.isNotEmpty)
       'runProfiles': [for (final profile in runProfiles) profile.toJson()],
+    if (recentModels.isNotEmpty) 'recentModels': recentModels,
   };
 
   factory AgentLaunchPreferences.fromJson(Map<String, Object?>? json) {
@@ -944,11 +989,23 @@ class AgentLaunchPreferences {
         }
       }
     }
+    final recentModels = <String>[];
+    if (json['recentModels'] is List) {
+      for (final value in (json['recentModels'] as List).take(
+        AgentLaunchPreferences.maxRecentModels,
+      )) {
+        if (value is String && value.trim().isNotEmpty) {
+          final trimmed = value.trim();
+          if (!recentModels.contains(trimmed)) recentModels.add(trimmed);
+        }
+      }
+    }
     return AgentLaunchPreferences(
       isolateByDefault: json['isolateByDefault'] as bool? ?? true,
       defaultArguments: Map.unmodifiable(parsed),
       profiles: List.unmodifiable(profiles),
       runProfiles: List.unmodifiable(runProfiles),
+      recentModels: List.unmodifiable(recentModels),
     );
   }
 }
@@ -974,6 +1031,11 @@ class AppSettings {
     required this.cloudSync,
     required this.ai,
     required this.agentLaunch,
+    required this.hiddenRightPanelTools,
+    required this.snippetGistId,
+    required this.rightPanelToolOrder,
+    required this.pinnedCustomAppIds,
+    required this.customAppInputAcknowledgedIds,
   });
 
   final TerminalThemePreset terminalTheme;
@@ -1017,6 +1079,26 @@ class AppSettings {
 
   final AgentLaunchPreferences agentLaunch;
 
+  /// 사용자가 우측 도구 스트립에서 숨긴 [RightPanelTool]의 이름 집합
+  /// (`RightPanelTool.name`). VSCode의 액티비티 바 항목 숨기기와 같은
+  /// 개념으로, 빌드 피처/설치 여부와 무관하게 사용자가 직접 고른다.
+  final Set<String> hiddenRightPanelTools;
+
+  /// 스니펫 export/import가 계속 갱신할 gist id. 비어 있으면 다음 내보내기
+  /// 때 새 gist를 만든다.
+  final String snippetGistId;
+
+  /// 사용자가 드래그로 재배치한 우측 도구 스트립 순서
+  /// (`RightPanelTool.name` 목록). 여기 없는 도구는 자연 순서 뒤에 붙는다.
+  final List<String> rightPanelToolOrder;
+
+  /// 사용자가 우측 도구 스트립에 고정한 사용자 정의 앱 id 목록. enum 도구
+  /// 뒤에 이 순서대로 아이콘이 붙는다.
+  final List<String> pinnedCustomAppIds;
+
+  /// `input` 권한 앱을 처음 시작할 때의 확인을 사용자가 이미 허용한 앱 id 목록.
+  final List<String> customAppInputAcknowledgedIds;
+
   static const defaultSettings = AppSettings(
     terminalTheme: TerminalThemePreset.vibeDark,
     terminalFontFamily: kMonoFontFamily,
@@ -1037,6 +1119,11 @@ class AppSettings {
     cloudSync: CloudSyncSettings.defaultSettings,
     ai: AiSettings.defaultSettings,
     agentLaunch: AgentLaunchPreferences.defaultSettings,
+    hiddenRightPanelTools: <String>{},
+    snippetGistId: '',
+    rightPanelToolOrder: <String>[],
+    pinnedCustomAppIds: <String>[],
+    customAppInputAcknowledgedIds: <String>[],
   );
 
   static const fontFamilies = [
@@ -1094,6 +1181,11 @@ class AppSettings {
     CloudSyncSettings? cloudSync,
     AiSettings? ai,
     AgentLaunchPreferences? agentLaunch,
+    Set<String>? hiddenRightPanelTools,
+    String? snippetGistId,
+    List<String>? rightPanelToolOrder,
+    List<String>? pinnedCustomAppIds,
+    List<String>? customAppInputAcknowledgedIds,
   }) => AppSettings(
     terminalTheme: terminalTheme ?? this.terminalTheme,
     terminalFontFamily: terminalFontFamily ?? this.terminalFontFamily,
@@ -1130,6 +1222,12 @@ class AppSettings {
     cloudSync: cloudSync ?? this.cloudSync,
     ai: ai ?? this.ai,
     agentLaunch: agentLaunch ?? this.agentLaunch,
+    hiddenRightPanelTools: hiddenRightPanelTools ?? this.hiddenRightPanelTools,
+    snippetGistId: snippetGistId ?? this.snippetGistId,
+    rightPanelToolOrder: rightPanelToolOrder ?? this.rightPanelToolOrder,
+    pinnedCustomAppIds: pinnedCustomAppIds ?? this.pinnedCustomAppIds,
+    customAppInputAcknowledgedIds:
+        customAppInputAcknowledgedIds ?? this.customAppInputAcknowledgedIds,
   );
 
   Map<String, Object?> toJson() => {
@@ -1152,6 +1250,11 @@ class AppSettings {
     'cloudSync': cloudSync.toJson(),
     'ai': ai.toJson(),
     'agentLaunch': agentLaunch.toJson(),
+    'hiddenRightPanelTools': hiddenRightPanelTools.toList(),
+    'snippetGistId': snippetGistId,
+    'rightPanelToolOrder': rightPanelToolOrder,
+    'pinnedCustomAppIds': pinnedCustomAppIds,
+    'customAppInputAcknowledgedIds': customAppInputAcknowledgedIds,
   };
 
   factory AppSettings.fromJson(Map<String, Object?> json) {
@@ -1244,6 +1347,13 @@ class AppSettings {
       cloudSync: CloudSyncSettings.fromJson(syncJson),
       ai: AiSettings.fromJson(aiJson),
       agentLaunch: AgentLaunchPreferences.fromJson(agentLaunchJson),
+      hiddenRightPanelTools: stringList(json['hiddenRightPanelTools'])?.toSet(),
+      snippetGistId: json['snippetGistId'] as String?,
+      rightPanelToolOrder: stringList(json['rightPanelToolOrder']),
+      pinnedCustomAppIds: stringList(json['pinnedCustomAppIds']),
+      customAppInputAcknowledgedIds: stringList(
+        json['customAppInputAcknowledgedIds'],
+      ),
     );
   }
 }

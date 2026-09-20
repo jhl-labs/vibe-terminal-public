@@ -76,6 +76,8 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   String? _composingText;
   String _recentHardwareText = '';
   DateTime? _recentHardwareTextAt;
+  String _unconfirmedHardwareText = '';
+  DateTime? _unconfirmedHardwareTextAt;
   String _recentCommittedText = '';
   DateTime? _recentCommittedTextAt;
   String _lastCommittedText = '';
@@ -87,6 +89,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   bool _altModifierActive = false;
   bool _metaModifierActive = false;
   bool _shiftModifierActive = false;
+  // 마지막 하드웨어 키 입력 후 [_deferredClearKeyQuietWindow] 동안 살아 있는
+  // 타이머. 활성이면 그 키의 IME 조합 갱신이 아직 도착 중일 수 있다.
+  Timer? _hardwareKeyQuietTimer;
   Timer? _imeIdleCommitTimer;
   Timer? _imeBufferClearTimer;
   Timer? _selectionCopyTimer;
@@ -303,12 +308,25 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   //
   // 이 창이 너무 길면(과거엔 2초) IME로만 확정된 글자('a')가 남긴 잔여가, 잠시 뒤
   // 같은 글자를 **일부러 다시 친** 하드웨어 입력까지 "중복"으로 오판해 드롭한다.
-  // 실제 에코는 하드웨어 폴백 지연(24ms) 안에 도착하므로, 같은 keypress의 에코는
+  // 실제 에코는 하드웨어 폴백 지연(120ms) 안에 도착하므로, 같은 keypress의 에코는
   // 확실히 잡되 사용자의 빠른 반복 입력('dd', 'aa' 등)은 살리도록 짧게 잡는다.
   // (증상: 빠르게 치면 몇몇 글자 누락, 천천히 치면 정상 — 이슈 #2)
   static const _hardwareTextDedupWindow = Duration(milliseconds: 200);
-  static const _hardwareTextFallbackDelay = Duration(milliseconds: 24);
+  // 하드웨어 키 폴백 대기. IME 채널이 살아 있으면 같은 키의 텍스트가 이 전에
+  // 도착해 폴백은 발동하지 않으므로, 이 값은 타이핑 지연이 아니라 "IME 조합
+  // 갱신을 얼마나 기다려 줄지"다. 예전 24ms는 세션 수십 개로 프레임이 밀리면
+  // 조합 갱신보다 먼저 만료돼, IME가 소비한 키의 라틴 자판값('ㅎ'의 'g')이
+  // 서버로 새어 나갔다. 그래도 놓치면 [_retractUnconfirmedHardwareText]가
+  // 되돌린다.
+  static const _hardwareTextFallbackDelay = Duration(milliseconds: 120);
+  // 하드웨어 경로로 이미 보냈지만 IME 채널의 확인(같은 문자 에코)을 아직 받지
+  // 못한 텍스트를 기억하는 창. 이 안에 비ASCII IME 텍스트가 오면 그 하드웨어
+  // 문자는 IME가 소비한 키의 라틴 자판값이었던 것이므로 되돌린다.
+  static const _unconfirmedHardwareTextWindow = Duration(seconds: 1);
   static const _imeIdleCommitDelay = Duration(milliseconds: 450);
+  // 미룬 버퍼 clear가 발동하기 직전에 키가 눌렸다면 그 키의 IME 조합 갱신이
+  // 아직 도착하지 않았을 수 있는 창. 하드웨어 폴백(120ms)보다 넉넉히 잡는다.
+  static const _deferredClearKeyQuietWindow = Duration(milliseconds: 250);
   static const _selectionCopyDelay = Duration(milliseconds: 120);
   static const _staleImePrefixWindow = Duration(seconds: 5);
   static const _inputTracePath = String.fromEnvironment(
@@ -336,6 +354,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   void dispose() {
     _imeIdleCommitTimer?.cancel();
     _imeBufferClearTimer?.cancel();
+    _hardwareKeyQuietTimer?.cancel();
     _selectionCopyTimer?.cancel();
     _pasteLongPressTimer?.cancel();
     _terminalController.removeListener(_handleTerminalSelectionChanged);
@@ -748,6 +767,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
       return;
     }
     _scrollTerminalToBottomOnInput();
+    _retractUnconfirmedHardwareText(text);
     _restoreStaleImePrefixIfNeeded(text);
 
     if (_shouldBufferImeText(value)) {
@@ -973,8 +993,17 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   /// [_scheduleDeferredBufferClear]로 미룬다. 입력이 이어지는 동안 플랫폼
   /// 버퍼를 건드리지 않으므로 조합 상태가 깨질 틈이 없다. 모바일 IME는 기존
   /// 동작(즉시 clear)을 유지한다.
+  ///
+  /// Linux(GTK/ibus)도 같은 공용 C++ TextInputModel을 쓴다. 키 이벤트는 Dart가
+  /// 먼저 받고 그 뒤 IM 컨텍스트(ibus, 비동기)로 넘어가며, preedit 갱신은 플랫폼
+  /// 모델에 즉시 반영되는 반면 우리 clear(setEditingState)는 채널을 거쳐 늦게
+  /// 닿는다. 빠르게 치면 다음 음절의 preedit-start 뒤에 clear가 덮어써져 모델이
+  /// composing 플래그를 잃고, 이후 갱신이 anchor 자리를 치환해 `한하한`처럼
+  /// 자모 찌꺼기가 남는다(test/ui/session_terminal_view_linux_ime_sim_test.dart).
+  /// 그래서 Linux도 clear를 입력이 멈춘 뒤로 미룬다.
   bool get _defersTextInputBufferClear =>
-      defaultTargetPlatform == TargetPlatform.windows;
+      defaultTargetPlatform == TargetPlatform.windows ||
+      defaultTargetPlatform == TargetPlatform.linux;
 
   /// 버퍼 내용이 전부 서버로 전송돼 미룬 clear만 남은 상태인지.
   bool get _textInputBufferReleased => _imeBufferClearTimer?.isActive ?? false;
@@ -1003,6 +1032,15 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
       if (!mounted) return;
       final value = _logicalInputValue();
       if (value.text != expected.text || _hasActiveComposing(value)) return;
+      // 편집값은 멈췄지만 방금 키가 눌렸다면 그 키의 조합 갱신이 IME에서
+      // 아직 오는 중일 수 있다(키 이벤트는 IME보다 먼저 Dart에 닿는다). 지금
+      // clear를 보내면 플랫폼 모델의 새 preedit 위로 덮어써져 찌꺼기가
+      // 생기므로, 키 입력이 잠잠해질 때까지 다시 미룬다.
+      if (_hardwareKeyQuietTimer?.isActive ?? false) {
+        _traceInput('deferredClear postponed after recent key');
+        _scheduleDeferredBufferClear();
+        return;
+      }
       _traceInput('deferredClear "${value.text}"');
       _clearTextInputBuffer();
     });
@@ -1082,6 +1120,30 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     _traceInput('hardwareText send "$text"');
     widget.session.engine.terminal.textInput(text);
     _rememberHardwareText(text);
+    _unconfirmedHardwareText += text;
+    _unconfirmedHardwareTextAt = DateTime.now();
+  }
+
+  /// IME 채널에서 비ASCII 텍스트가 도착했는데, 직전에 하드웨어 경로로 보낸 라틴
+  /// 문자가 아직 IME 에코로 확인되지 않았다면 그 문자는 IME가 소비한 키의 자판값
+  /// ('ㅎ'을 치려던 'g')이 새어 나간 것이다. 폴백 타이머가 조합 갱신보다 먼저
+  /// 발동할 만큼 프레임이 밀린 경우에 해당하므로 백스페이스로 되돌린다.
+  void _retractUnconfirmedHardwareText(String imeText) {
+    _clearStaleTextBuffers();
+    final leaked = _unconfirmedHardwareText;
+    if (leaked.isEmpty || !_containsNonAscii(imeText)) return;
+    if (imeText.startsWith(leaked)) return;
+    _traceInput('hardwareText retract "$leaked" before ime "$imeText"');
+    for (var i = 0; i < leaked.length; i++) {
+      widget.session.engine.terminal.keyInput(TerminalKey.backspace);
+    }
+    _unconfirmedHardwareText = '';
+    _unconfirmedHardwareTextAt = null;
+    // 되돌린 문자는 더 이상 IME 에코 중복 제거 대상이 아니다.
+    if (_recentHardwareText.startsWith(leaked)) {
+      _recentHardwareText = _recentHardwareText.substring(leaked.length);
+      if (_recentHardwareText.isEmpty) _recentHardwareTextAt = null;
+    }
   }
 
   bool _flushPendingAsciiTextInput(TextEditingValue value) {
@@ -1109,6 +1171,13 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     _recentHardwareText = _recentHardwareText.substring(text.length);
     if (_recentHardwareText.isEmpty) {
       _recentHardwareTextAt = null;
+    }
+    // IME 채널이 같은 문자를 에코했으므로 하드웨어 전송이 확인됐다.
+    if (_unconfirmedHardwareText.startsWith(text)) {
+      _unconfirmedHardwareText = _unconfirmedHardwareText.substring(
+        text.length,
+      );
+      if (_unconfirmedHardwareText.isEmpty) _unconfirmedHardwareTextAt = null;
     }
     return true;
   }
@@ -1173,6 +1242,12 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
       _lastCommittedText = '';
       _lastCommittedTextAt = null;
     }
+    final unconfirmed = _unconfirmedHardwareTextAt;
+    if (unconfirmed != null &&
+        now.difference(unconfirmed) > _unconfirmedHardwareTextWindow) {
+      _unconfirmedHardwareText = '';
+      _unconfirmedHardwareTextAt = null;
+    }
     final lastClearedIme = _lastClearedImeTextAt;
     if (lastClearedIme != null &&
         now.difference(lastClearedIme) > _staleImePrefixWindow) {
@@ -1183,6 +1258,11 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
 
   void _rememberLastClearedImeText(String text) {
     if (!_containsNonAscii(text)) return;
+    // 비한글 경계(공백·`/` 등)로 끝난 텍스트는 조합이 살아 있지 않아 IME가 clear
+    // 뒤에 같은 값을 다시 밀어 넣을 일이 없다. 이런 값을 복원 후보로 남기면
+    // 사용자가 같은 단어를 다시 칠 때(`한 한 `) 두 번째 입력이 "이미 보낸
+    // prefix"로 오판돼 통째로 삼켜진다. 한글로 끝나 재푸시가 가능한 경우만 기억.
+    if (_endsAtImeCommitBoundary(text)) return;
     _lastClearedImeText = text;
     _lastClearedImeTextAt = DateTime.now();
   }
@@ -1249,6 +1329,8 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
+    _hardwareKeyQuietTimer?.cancel();
+    _hardwareKeyQuietTimer = Timer(_deferredClearKeyQuietWindow, () {});
     _scrollTerminalToBottomOnInput();
     final key = _terminalKeyFor(event.logicalKey);
     final ctrl =
@@ -1609,6 +1691,10 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   /// `괜찮은` + Enter 뒤 새 줄에서 `괜`을 치면 이전 줄 기준으로 백스페이스
   /// 두 개가 새 줄로 나갔다.
   void _forgetSentPrefixAfterTerminalKey() {
+    // Enter·커서 이동 뒤에는 하드웨어로 보낸 문자가 더 이상 커서 앞에 없으므로
+    // 되돌리기 후보에서도 제외한다(백스페이스가 엉뚱한 글자를 지우지 않게).
+    _unconfirmedHardwareText = '';
+    _unconfirmedHardwareTextAt = null;
     if (_sentTextInputPrefix.isEmpty && _lastClearedImeText.isEmpty) return;
     _traceInput(
       'terminal key drops shadow sent="$_sentTextInputPrefix" '
@@ -1924,12 +2010,14 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     void zoomOut() => zoom.zoomOut(widget.session.id);
     void zoomReset() => zoom.reset(widget.session.id);
 
+    // 키는 헤더 카탈로그 토큰(`retry`, `repaint`, `zoomIn`…). 칸 헤더가
+    // 어떤 액션을 아이콘으로 빼고 어떤 것을 ⋮ 메뉴에 둘지 토큰으로 고른다.
     final paneActions = <String, VoidCallback>{};
     for (final token in settings.terminalHeaderItems) {
       final definition = resolveHeaderToken(token);
       final callback = switch (token) {
         // 분할 화면(칸 헤더)에서는 이전/다음 세션이 칸 조작이 아니라 그룹 조작이라
-        // 상단 툴바(SessionPaneDeck)가 맡는다. 칸 메뉴에는 넣지 않는다.
+        // 좌측 세션 레일이 맡는다. 칸 메뉴에는 넣지 않는다.
         'sessionPrev' || 'sessionNext' => null,
         'retry' => widget.onRetry,
         'zoomIn' => zoomIn,
@@ -1939,7 +2027,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
         _ => null,
       };
       if (definition != null && callback != null) {
-        paneActions[definition.label] = callback;
+        paneActions[token] = callback;
       }
     }
     final paneHeader = widget.paneHeaderBuilder?.call(paneActions);
@@ -1963,6 +2051,17 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
             onEditHost: widget.onEditHost,
             onFallbackToCmd: widget.onFallbackToCmd,
             isPowershellFallbackAvailable: widget.isPowershellFallbackAvailable,
+            onForgetHostKey: widget.onRetry == null
+                ? null
+                : () async {
+                    final host = widget.session.host;
+                    await ref
+                        .read(hostKeyStoreProvider)
+                        .remove(hostname: host.hostname, port: host.port);
+                    if (!mounted) return;
+                    ref.invalidate(knownHostListProvider);
+                    widget.onRetry!();
+                  },
           ),
         );
       case SessionStatus.disconnected:
@@ -2628,6 +2727,7 @@ class _SessionErrorView extends StatelessWidget {
     required this.onEditHost,
     required this.onFallbackToCmd,
     required this.isPowershellFallbackAvailable,
+    this.onForgetHostKey,
   });
 
   final Failure? failure;
@@ -2636,6 +2736,7 @@ class _SessionErrorView extends StatelessWidget {
   final VoidCallback? onEditHost;
   final VoidCallback? onFallbackToCmd;
   final bool isPowershellFallbackAvailable;
+  final VoidCallback? onForgetHostKey;
 
   String get _title => switch (failure) {
     LocalShellMissingExecutableFailure() => '로컬 셸 실행 파일 누락',
@@ -2724,6 +2825,13 @@ class _SessionErrorView extends StatelessWidget {
                       ),
                       icon: const Icon(Icons.content_copy),
                       label: const Text('실행 파일 경로 복사'),
+                    ),
+                  if (failure is HostKeyMismatchFailure &&
+                      onForgetHostKey != null)
+                    OutlinedButton.icon(
+                      onPressed: onForgetHostKey,
+                      icon: const Icon(Icons.delete_sweep_outlined),
+                      label: const Text('저장된 키 삭제 후 다시 시도'),
                     ),
                   if (onRetry != null)
                     FilledButton.icon(

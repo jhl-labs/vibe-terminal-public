@@ -85,6 +85,10 @@ abstract class Host with _$Host {
     @Default(LocalShellType.powershell) LocalShellType localShellType,
     String? workingDirectory,
     String? credentialRef,
+
+    /// 인증 원본 Identity. null이면 로컬 셸이거나 아직 Identity로 옮기지
+    /// 않은 호스트라 username/authType/credentialRef를 그대로 쓴다.
+    String? identityId,
     String? jumpHostId,
 
     /// kubectl을 실행할 위치. [KubernetesGateway.sshHost]면

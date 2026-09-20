@@ -5,9 +5,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/theme.dart';
 import '../../data/models/memo.dart';
+import '../../data/models/memo_version.dart';
 import '../../data/repositories/memo_repository.dart';
 import '../../session/session.dart';
 import '../../state/providers.dart';
+import 'memo_history_view.dart';
 
 /// 저장 상태. 헤더에 작게 표시해 편집이 실제로 저장됐는지 알 수 있게 한다.
 enum _SaveStatus { idle, saving, saved, failed }
@@ -54,6 +56,9 @@ class _MemoPanelState extends ConsumerState<MemoPanel>
 
   /// dispose 시점에는 ref.read가 불안전하므로 저장소를 미리 캐시해 둔다.
   MemoRepository? _repo;
+
+  /// 버전 히스토리 화면이 편집기를 대체하고 있는지. null이면 편집기.
+  Future<List<MemoVersion>>? _history;
 
   @override
   void initState() {
@@ -142,6 +147,10 @@ class _MemoPanelState extends ConsumerState<MemoPanel>
       });
       return;
     }
+    // 본문 저장이 끝난 뒤 자동 버전으로 남긴다. 실패해도 본문 저장과 무관.
+    try {
+      await repo.autoSnapshot(hostId, body, now);
+    } catch (_) {}
     if (!mounted) return;
     setState(() {
       _failedSave = null;
@@ -178,6 +187,76 @@ class _MemoPanelState extends ConsumerState<MemoPanel>
     setState(() => _pickedHostId = hostId);
   }
 
+  // ── 버전 히스토리 ──────────────────────────────────────────────────────
+
+  void _openHistory(String hostId) {
+    _saveTimer?.cancel();
+    unawaited(_flush());
+    final versions = ref.read(memoRepositoryProvider).listVersions(hostId);
+    setState(() {
+      _history = versions;
+    });
+  }
+
+  void _closeHistory() => setState(() => _history = null);
+
+  /// 툴바의 "버전 저장": 짧은 라벨을 받아 현재 본문을 수동 버전으로 남긴다.
+  Future<void> _saveVersion(String hostId) async {
+    final label = await showDialog<String>(
+      context: context,
+      builder: (ctx) => _VersionLabelDialog(),
+    );
+    if (label == null || !mounted) return;
+    _saveTimer?.cancel();
+    await _flush();
+    final repo = _repo;
+    if (repo == null || !mounted) return;
+    try {
+      await repo.snapshot(
+        hostId,
+        _controller.text,
+        DateTime.now(),
+        label: label.trim().isEmpty ? null : label.trim(),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.maybeOf(
+        context,
+      )?.showSnackBar(SnackBar(content: Text('버전 저장 실패: $e')));
+      return;
+    }
+    if (!mounted) return;
+    if (_history != null) _openHistory(hostId);
+  }
+
+  /// 선택한 버전으로 본문을 되돌린다. 되돌리기 직전 본문은 라벨을 붙여
+  /// 남긴다 — 자동 버전으로 남기면 복원 직후 자동 저장이 10분 병합 규칙으로
+  /// 그 버전을 덮어써 버린다.
+  Future<void> _restoreVersion(String hostId, MemoVersion v) async {
+    final repo = _repo;
+    if (repo == null) return;
+    if (_controller.text != v.body) {
+      try {
+        await repo.snapshot(
+          hostId,
+          _controller.text,
+          DateTime.now(),
+          label: '복원 전',
+        );
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    _controller.text = v.body;
+    _dirty = true;
+    setState(() => _history = null);
+    await _flush();
+  }
+
+  Future<void> _deleteVersion(String hostId, MemoVersion v) async {
+    await _repo?.deleteVersion(v.id);
+    if (mounted) _openHistory(hostId);
+  }
+
   /// 목록으로 돌아간다. 보류 중인 편집은 먼저 저장한다.
   void _backToList() {
     _saveTimer?.cancel();
@@ -206,6 +285,7 @@ class _MemoPanelState extends ConsumerState<MemoPanel>
 
     // host가 바뀌면 이전 메모를 flush하고 새 host 메모를 로드한다.
     if (hostId != null && hostId != _requestedHostId) {
+      _history = null;
       if (_loadedHostId != null) {
         _saveTimer?.cancel();
         unawaited(_flush());
@@ -247,6 +327,14 @@ class _MemoPanelState extends ConsumerState<MemoPanel>
       body = _LoadError(error: _loadError!, onRetry: () => _loadFor(hostId));
     } else if (_loadedHostId != hostId) {
       body = const Center(child: CircularProgressIndicator());
+    } else if (_history != null) {
+      body = MemoHistoryView(
+        versions: _history!,
+        currentBody: _controller.text,
+        onRestore: (v) => _restoreVersion(hostId, v),
+        onDelete: (v) => _deleteVersion(hostId, v),
+        onBack: _closeHistory,
+      );
     } else {
       body = Padding(
         padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
@@ -290,6 +378,12 @@ class _MemoPanelState extends ConsumerState<MemoPanel>
             onBack: active == null && _pickedHostId != null
                 ? _backToList
                 : null,
+            onSaveVersion: hostId != null && _loadedHostId == hostId
+                ? () => unawaited(_saveVersion(hostId))
+                : null,
+            onHistory: hostId != null && _loadedHostId == hostId
+                ? () => _openHistory(hostId)
+                : null,
           ),
           Expanded(child: body),
         ],
@@ -310,6 +404,8 @@ class _MemoHeader extends StatelessWidget {
     required this.saveStatus,
     required this.onRetry,
     required this.onBack,
+    this.onSaveVersion,
+    this.onHistory,
   });
 
   final String? hostAlias;
@@ -317,6 +413,10 @@ class _MemoHeader extends StatelessWidget {
   final _SaveStatus saveStatus;
   final VoidCallback onRetry;
   final VoidCallback? onBack;
+
+  /// 우측 툴바. 메모가 로드된 host가 있을 때만 활성화된다.
+  final VoidCallback? onSaveVersion;
+  final VoidCallback? onHistory;
 
   @override
   Widget build(BuildContext context) {
@@ -382,8 +482,70 @@ class _MemoHeader extends StatelessWidget {
           ),
           const SizedBox(width: 8),
           _SaveStatusChip(status: saveStatus, onRetry: onRetry),
+          if (onSaveVersion != null || onHistory != null) ...[
+            const SizedBox(width: 4),
+            IconButton(
+              tooltip: '버전 저장',
+              onPressed: onSaveVersion,
+              icon: const Icon(Icons.bookmark_add_outlined, size: 18),
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            ),
+            IconButton(
+              tooltip: '버전 히스토리',
+              onPressed: onHistory,
+              icon: const Icon(Icons.history, size: 18),
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            ),
+          ],
         ],
       ),
+    );
+  }
+}
+
+/// "버전 저장" 라벨 입력. 비워두면 라벨 없는 수동 버전으로 남긴다.
+class _VersionLabelDialog extends StatefulWidget {
+  @override
+  State<_VersionLabelDialog> createState() => _VersionLabelDialogState();
+}
+
+class _VersionLabelDialogState extends State<_VersionLabelDialog> {
+  final _label = TextEditingController();
+
+  @override
+  void dispose() {
+    _label.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('버전 저장'),
+      content: TextField(
+        key: const Key('memo-version-label'),
+        controller: _label,
+        autofocus: true,
+        decoration: const InputDecoration(
+          labelText: '라벨 (선택)',
+          hintText: '예: 배포 전',
+        ),
+        onSubmitted: (v) => Navigator.of(context).pop(v),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('취소'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_label.text),
+          child: const Text('저장'),
+        ),
+      ],
     );
   }
 }

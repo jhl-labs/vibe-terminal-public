@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'custom_headers.dart';
 import 'secret_masker.dart';
+import 'session_log_request.dart';
 import '../settings/app_settings.dart';
 
 enum AiChatRole { user, assistant }
@@ -14,12 +15,17 @@ class AiChatMessage {
     required this.content,
     required this.createdAt,
     this.isError = false,
+    this.contextNote,
   });
 
   final AiChatRole role;
   final String content;
   final DateTime createdAt;
   final bool isError;
+
+  /// 답변에 어떤 추가 컨텍스트가 쓰였는지 말풍선 아래에 작게 보여 주는 안내.
+  /// 예: "세션 로그 마지막 2000줄 참조". 모델에 다시 보내지는 않는다.
+  final String? contextNote;
 }
 
 enum AiChatFailureKind {
@@ -170,6 +176,7 @@ class AiChatService {
     AiCancelToken? cancelToken,
     String? additionalSystemPrompt,
     String? systemPromptOverride,
+    String? sessionLogContext,
   }) async {
     if (!settings.isConfigured) {
       throw AiChatException(
@@ -187,6 +194,7 @@ class AiChatService {
           sessionLabel: sessionLabel,
           terminalContext: terminalContext,
           additionalSystemPrompt: additionalSystemPrompt,
+          sessionLogContext: sessionLogContext,
         );
 
     return switch (settings.provider) {
@@ -224,7 +232,10 @@ class AiChatService {
     required String sessionLabel,
     required String terminalContext,
     String? additionalSystemPrompt,
+    String? sessionLogContext,
   }) {
+    final hasLog =
+        sessionLogContext != null && sessionLogContext.trim().isNotEmpty;
     final buffer = StringBuffer()
       ..writeln(
         'You are Vibe Terminal AI Chat, an agent assisting inside a terminal app.',
@@ -273,7 +284,30 @@ class AiChatService {
       )
       ..writeln(
         'Prefer concise, actionable Korean answers unless the user asks otherwise.',
-      )
+      );
+
+    // 화면 컨텍스트만으로 부족할 때 모델이 세션 로그를 요청하는 프로토콜.
+    // 로그가 이미 붙어 있으면 다시 요청하지 말라고 못 박는다.
+    if (hasLog) {
+      buffer.writeln(
+        'The full session log (older output that has scrolled off the screen) is attached below the terminal context. Use it as the primary source for questions about earlier work. Do not request the session log again.',
+      );
+    } else {
+      buffer
+        ..writeln(
+          'The terminal context only shows what is currently on screen. Older output that has scrolled away is kept in a session log. If the user asks about earlier work (for example "summarize what happened in the previous claude session", "what did I run before", "find the earlier error") and the screen is not enough, do not guess: reply with ONLY a fenced block with language `${SessionLogRequest.fenceLanguage}` containing a JSON object, and the app will attach the log and ask you again.',
+        )
+        ..writeln(
+          'Session log request schema: {"lines": <${SessionLogRequest.minLines}-${SessionLogRequest.maxLines}, how many trailing lines to read, default ${SessionLogRequest.defaultLines}>, "grep": <optional case-insensitive substring to keep only matching lines with context>}. Example:',
+        )
+        ..writeln('```${SessionLogRequest.fenceLanguage}')
+        ..writeln(
+          '{"lines": ${SessionLogRequest.defaultLines}, "grep": "error"}',
+        )
+        ..writeln('```');
+    }
+
+    buffer
       ..writeln()
       ..writeln('Active session: $sessionLabel')
       ..writeln('Recent terminal context begins below.')
@@ -285,6 +319,17 @@ class AiChatService {
             : maskTerminalSecrets(terminalContext),
       )
       ..writeln('--- terminal context end ---');
+
+    if (hasLog) {
+      buffer
+        ..writeln()
+        ..writeln(
+          'Session log begins below. Lines prefixed with `[input]` are user-entered terminal input; other lines are terminal output. It may be truncated at the top; `...` marks omitted lines.',
+        )
+        ..writeln('--- session log begin ---')
+        ..writeln(maskTerminalSecrets(sessionLogContext))
+        ..writeln('--- session log end ---');
+    }
 
     final customPrompt = settings.customPrompt.trim();
     if (customPrompt.isNotEmpty) {

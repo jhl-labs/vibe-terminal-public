@@ -6,31 +6,41 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../app/theme.dart';
 import '../../data/models/host.dart';
+import '../../data/repositories/identity_repository.dart';
 import '../../kubernetes/kubernetes_exec_relay.dart';
 import '../../ssh/ssh_credentials.dart';
 import '../../state/providers.dart';
+import '../keychain/identity_edit_sheet.dart';
+import '../keychain/ssh_key_create_sheet.dart';
+import '../keychain/ssh_key_import_sheet.dart';
+
+/// 호스트 편집 결과. 공개키를 새로 붙였으면 목록 페이지가 서버 등록을 제안한다.
+class HostEditResult {
+  const HostEditResult({this.suggestInstallHostId, this.suggestInstallKeyId});
+
+  /// 새 공개키 바인딩이 생긴 호스트 id. 없으면 null.
+  final String? suggestInstallHostId;
+
+  /// 서버에 등록을 제안할 키체인 키 id. 없으면 null.
+  final String? suggestInstallKeyId;
+}
 
 class HostEditPage extends ConsumerStatefulWidget {
-  const HostEditPage({super.key, this.existing, this.privateKeyImporter});
+  const HostEditPage({super.key, this.existing});
 
   final Host? existing;
-  final Future<String?> Function()? privateKeyImporter;
 
   @override
   ConsumerState<HostEditPage> createState() => _HostEditPageState();
 }
 
 class _HostEditPageState extends ConsumerState<HostEditPage> {
-  static const _invalidPrivateKeyMessage = '개인키 형식 또는 키 암호를 확인하세요';
-
   final _formKey = GlobalKey<FormState>();
   final _alias = TextEditingController();
   final _hostname = TextEditingController();
   final _port = TextEditingController(text: '22');
   final _username = TextEditingController();
   final _password = TextEditingController();
-  final _privateKeyPem = TextEditingController();
-  final _keyPassphrase = TextEditingController();
   final _workingDirectory = TextEditingController();
   final _startupScript = TextEditingController();
   final _kubernetesContext = TextEditingController();
@@ -49,8 +59,10 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
   bool _agentForwarding = false;
   bool _x11Forwarding = false;
   bool _saving = false;
-  String? _privateKeyImportStatus;
-  String? _privateKeyValidationError;
+  // 공유 Identity를 쓸지(true), 이 호스트 전용 자격증명을 쓸지(false).
+  bool _useSharedIdentity = false;
+  String? _identityId; // 공유 Identity 선택
+  String? _selectedKeyId; // 호스트 전용 공개키 인증에서 고른 키
 
   bool get _editing => widget.existing != null;
   bool get _isSsh => _connectionType != HostConnectionType.localShell;
@@ -77,11 +89,15 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
         : 'SSH, Kubernetes Pod 경유 SSH 또는 이 기기의 로컬 셸 프로필을 저장합니다.';
   }
 
-  bool get _canKeepCredential =>
-      _editing &&
-      _isSsh &&
-      widget.existing?.authType == _authType &&
-      widget.existing?.credentialRef != null;
+  // 기존 전용 자격증명을 비워둔 채 유지할 수 있는지. 공유 Identity 호스트의
+  // credentialRef는 Identity에서 덧씌운 값이라 전용 자격증명으로 치지 않는다.
+  bool get _canKeepCredential {
+    final existing = widget.existing;
+    if (existing == null || !_isSsh || _useSharedIdentity) return false;
+    final identityId = existing.identityId;
+    if (identityId != null && !identityId.startsWith('host-')) return false;
+    return existing.authType == _authType && existing.credentialRef != null;
+  }
 
   @override
   void initState() {
@@ -94,6 +110,12 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
     _username.text = existing.username;
     _connectionType = existing.connectionType;
     _authType = existing.authType;
+    // 저장소가 만든 host-<id> Identity면 전용 모드, 그 외는 공유 Identity 모드.
+    final identityId = existing.identityId;
+    if (identityId != null && !identityId.startsWith('host-')) {
+      _useSharedIdentity = true;
+      _identityId = identityId;
+    }
     _localShellType = existing.localShellType;
     _jumpHostId = existing.jumpHostId;
     _kubernetesGateway = existing.kubernetesGateway;
@@ -119,8 +141,6 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
       _port,
       _username,
       _password,
-      _privateKeyPem,
-      _keyPassphrase,
       _workingDirectory,
       _startupScript,
       _kubernetesContext,
@@ -173,22 +193,7 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
 
   String? _validatePrivateKey(String? value) {
     if (!_isSsh || _authType != HostAuthType.publicKey) return null;
-    if (_privateKeyValidationError != null) {
-      return _privateKeyValidationError;
-    }
-    final privateKeyPem = value?.trim() ?? '';
-    if (privateKeyPem.isEmpty) {
-      return _canKeepCredential ? null : '개인키 PEM을 입력하세요';
-    }
-    try {
-      SshCredentialPayload.validatePublicKey(
-        privateKeyPem,
-        passphrase: _keyPassphrase.text,
-      );
-    } catch (_) {
-      return _invalidPrivateKeyMessage;
-    }
-    return null;
+    return value == null ? '키를 선택하세요' : null;
   }
 
   String _localUsername() =>
@@ -229,51 +234,6 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
     return file.xFile.readAsString();
   }
 
-  Future<void> _importPrivateKey() async {
-    try {
-      final pem = await (widget.privateKeyImporter ?? _pickPrivateKeyPem)
-          .call();
-      if (pem == null) return;
-      setState(() {
-        _privateKeyPem.text = pem.trimRight();
-        _privateKeyImportStatus = '개인키 파일을 불러왔습니다';
-        _privateKeyValidationError = null;
-      });
-    } on FormatException catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _privateKeyValidationError = _invalidPrivateKeyMessage;
-      });
-      _formKey.currentState!.validate();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('$_invalidPrivateKeyMessage: ${e.message}')),
-      );
-    } on ArgumentError catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _privateKeyValidationError = _invalidPrivateKeyMessage;
-      });
-      _formKey.currentState!.validate();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('$_invalidPrivateKeyMessage: ${e.message}')),
-      );
-    } on UnsupportedError catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _privateKeyValidationError = _invalidPrivateKeyMessage;
-      });
-      _formKey.currentState!.validate();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('$_invalidPrivateKeyMessage: ${e.message}')),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('개인키를 불러오지 못했습니다: $e')));
-    }
-  }
-
   Future<void> _save() async {
     FocusScope.of(context).unfocus();
     if (!_formKey.currentState!.validate()) return;
@@ -283,39 +243,51 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
       final existing = widget.existing;
       final id =
           existing?.id ?? DateTime.now().microsecondsSinceEpoch.toString();
-      var credRef = existing?.credentialRef;
       final secureStore = ref.read(secureStoreProvider);
+      final previousRef = existing?.credentialRef;
 
       // 자격증명은 secureStore에만 저장하고 DB에는 credentialRef만 기록한다.
-      // 기존 호스트 편집에서는 인증 방식이 같고 입력을 비워두면 기존 credentialRef를 유지한다.
-      if (_isSsh && _authType != HostAuthType.keyboardInteractive) {
-        final shouldWriteCredential =
-            !_canKeepCredential ||
-            _password.text.isNotEmpty ||
-            _privateKeyPem.text.trim().isNotEmpty;
-        if (shouldWriteCredential) {
-          credRef ??= 'cred-$id';
-          final secret = switch (_authType) {
-            HostAuthType.password => SshCredentialPayload.password(
-              _password.text,
-            ),
-            HostAuthType.publicKey => SshCredentialPayload.publicKey(
-              privateKeyPem: _privateKeyPem.text.trim(),
-              passphrase: _keyPassphrase.text,
-            ),
-            HostAuthType.keyboardInteractive => throw StateError(
-              'keyboard-interactive에는 저장 자격증명이 없습니다',
-            ),
-          };
-          await secureStore.writeSecret(credRef, secret);
+      // 공유 Identity 모드에서는 username/authType이 표시용 사본이고 저장소가
+      // Identity를 join해 채운다. 전용 모드에서 비밀번호는 cred-<id>에 두고,
+      // 공개키는 키체인 키의 secretRef를 그대로 참조한다.
+      String? credRef;
+      String? identityId;
+      var username = _isSsh ? _username.text.trim() : _localUsername();
+      var authType = _isSsh ? _authType : HostAuthType.password;
+      if (_isSsh && _useSharedIdentity) {
+        identityId = _identityId;
+        final identity = await ref
+            .read(identityRepositoryProvider)
+            .getById(identityId!);
+        username = identity?.username ?? username;
+        authType = identity?.authType ?? authType;
+      } else if (_isSsh) {
+        switch (_authType) {
+          case HostAuthType.password:
+            // 이전 참조는 이전 인증도 비밀번호였을 때만 비밀번호 비밀이다.
+            // (레거시 공개키 호스트는 cred-<id>를 키체인 키가 소유한다.)
+            credRef =
+                existing?.authType == HostAuthType.password &&
+                    previousRef?.startsWith('cred-') == true
+                ? previousRef
+                : null;
+            // 기존 호스트 편집에서 인증 방식이 같고 입력을 비워두면 유지한다.
+            if (!_canKeepCredential || _password.text.isNotEmpty) {
+              credRef ??= await _freshPasswordRef(id);
+              await secureStore.writeSecret(
+                credRef,
+                SshCredentialPayload.password(_password.text),
+              );
+            }
+          case HostAuthType.publicKey:
+            final key = await ref
+                .read(sshKeyRepositoryProvider)
+                .getById(_selectedKeyId!);
+            credRef = key?.secretRef;
+          case HostAuthType.keyboardInteractive:
+            credRef = null;
         }
-      } else {
-        if (credRef != null) {
-          await secureStore.deleteSecret(credRef);
-        }
-        credRef = null;
       }
-
       final now = DateTime.now();
       final hostname = _isSsh ? _hostname.text.trim() : 'localhost';
       final alias = _alias.text.trim();
@@ -339,9 +311,10 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
                   : alias,
               hostname: hostname,
               port: _isSsh ? int.parse(_port.text.trim()) : 0,
-              username: _isSsh ? _username.text.trim() : _localUsername(),
+              username: username,
+              identityId: identityId,
               connectionType: _connectionType,
-              authType: _isSsh ? _authType : HostAuthType.password,
+              authType: authType,
               localShellType: _localShellType,
               workingDirectory: workingDirectory,
               startupScript: startupScript,
@@ -370,9 +343,10 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
               remoteSessionPersistence: _isSsh && _keepRemoteSession
                   ? RemoteSessionPersistence.tmux
                   : RemoteSessionPersistence.none,
+              // 공유 Identity를 골랐으면 그 Identity의 인증 방식이 기준이다.
               agentForwarding:
                   _isSsh &&
-                  _authType == HostAuthType.publicKey &&
+                  authType == HostAuthType.publicKey &&
                   _agentForwarding,
               x11Forwarding:
                   _isSsh &&
@@ -385,13 +359,37 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
               updatedAt: now,
             ),
           );
-      if (mounted) Navigator.pop(context);
-    } on FormatException {
+      // 전용(host-<id>) Identity에서 공유 Identity로 바꿨으면 남은 전용 Identity를
+      // 저장소를 통해 정리한다. 저장소는 비밀번호 비밀만 지우므로 키체인 키가
+      // 소유한 비밀(레거시 cred-<id>)은 건드리지 않는다.
+      if (_isSsh &&
+          _useSharedIdentity &&
+          existing != null &&
+          existing.identityId == 'host-${existing.id}') {
+        try {
+          await ref
+              .read(identityRepositoryProvider)
+              .delete(existing.identityId!);
+        } on IdentityInUseException {
+          // 다른 호스트가 아직 참조하면 남겨 둔다.
+        }
+      }
       if (!mounted) return;
-      setState(() {
-        _privateKeyValidationError = _invalidPrivateKeyMessage;
-      });
-      _formKey.currentState?.validate();
+      // 공개키를 새로 붙였으면 목록 페이지가 서버에 공개키 등록을 제안한다.
+      final newKeyBinding =
+          _isSsh &&
+          !_useSharedIdentity &&
+          _authType == HostAuthType.publicKey &&
+          (existing == null || existing.authType != HostAuthType.publicKey);
+      Navigator.pop(
+        context,
+        newKeyBinding
+            ? HostEditResult(
+                suggestInstallHostId: id,
+                suggestInstallKeyId: _selectedKeyId,
+              )
+            : const HostEditResult(),
+      );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -400,6 +398,16 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
     } finally {
       if (mounted) setState(() => _saving = false);
     }
+  }
+
+  /// 전용 비밀번호를 저장할 새 참조. 레거시 공개키 호스트는 키체인 키가
+  /// `cred-<id>`를 소유하므로, 그 경우 덮어쓰지 않도록 `cred-<id>-pw`를 쓴다.
+  Future<String> _freshPasswordRef(String id) async {
+    final candidate = 'cred-$id';
+    final owner = await ref
+        .read(sshKeyRepositoryProvider)
+        .findBySecretRef(candidate);
+    return owner == null ? candidate : '$candidate-pw';
   }
 
   static String? _optionalText(TextEditingController controller) {
@@ -517,38 +525,143 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
       validator: _validateHostname,
     ),
     const SizedBox(height: 12),
-    Row(
+    TextFormField(
+      controller: _port,
+      decoration: const InputDecoration(
+        labelText: '포트',
+        prefixIcon: Icon(Icons.numbers),
+      ),
+      keyboardType: TextInputType.number,
+      textInputAction: TextInputAction.next,
+      validator: _validatePort,
+    ),
+  ];
+
+  /// 공유 Identity 드롭다운 + 새 Identity 버튼.
+  /// 화면에 반영되는 인증 방식. 공유 Identity를 골랐으면 그 Identity의 방식,
+  /// 아니면 이 호스트 전용 선택값이다. (agent forwarding 노출 판단에 쓴다.)
+  HostAuthType _effectiveAuthType() {
+    if (!_useSharedIdentity) return _authType;
+    final identities = ref.watch(identityListProvider).value ?? const [];
+    for (final identity in identities) {
+      if (identity.id == _identityId) return identity.authType;
+    }
+    return _authType;
+  }
+
+  Widget _buildIdentityDropdown() {
+    final identities = ref.watch(identityListProvider).value ?? const [];
+    return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Expanded(
-          child: TextFormField(
-            controller: _port,
-            decoration: const InputDecoration(
-              labelText: '포트',
-              prefixIcon: Icon(Icons.numbers),
+          child: DropdownButtonFormField<String>(
+            key: const ValueKey('host-identity'),
+            initialValue: identities.any((i) => i.id == _identityId)
+                ? _identityId
+                : null,
+            decoration: InputDecoration(
+              labelText: 'Identity',
+              prefixIcon: const Icon(Icons.person_outline),
+              helperText: identities.isEmpty ? '저장된 Identity가 없습니다.' : null,
             ),
-            keyboardType: TextInputType.number,
-            textInputAction: TextInputAction.next,
-            validator: _validatePort,
+            items: [
+              for (final i in identities)
+                DropdownMenuItem(
+                  value: i.id,
+                  child: Text('${i.label} · ${i.summary}'),
+                ),
+            ],
+            validator: (v) => v == null ? 'Identity를 선택하세요' : null,
+            onChanged: _saving ? null : (v) => setState(() => _identityId = v),
           ),
         ),
-        const SizedBox(width: 12),
-        Expanded(
-          flex: 2,
-          child: TextFormField(
-            controller: _username,
-            decoration: const InputDecoration(
-              labelText: '사용자명',
-              prefixIcon: Icon(Icons.person_outline),
-            ),
-            textInputAction: TextInputAction.next,
-            validator: (value) =>
-                _isSsh ? _required(value, '사용자명을 입력하세요') : null,
-          ),
+        const SizedBox(width: 8),
+        IconButton(
+          tooltip: '새 Identity',
+          icon: const Icon(Icons.person_add_alt),
+          onPressed: _saving
+              ? null
+              : () async {
+                  final created = await showIdentityEditSheet(context, ref);
+                  if (created != null && mounted) {
+                    setState(() => _identityId = created.id);
+                  }
+                },
         ),
       ],
-    ),
-  ];
+    );
+  }
+
+  /// 호스트 전용 공개키 인증: 키체인 키 선택 + 만들기/가져오기.
+  Widget _buildKeyPicker() {
+    final keys = ref.watch(sshKeyListProvider).value ?? const [];
+    // 기존 전용 공개키 호스트면 credentialRef와 같은 secretRef의 키를 미리 고른다.
+    final previousRef = widget.existing?.credentialRef;
+    if (_selectedKeyId == null && previousRef != null) {
+      for (final k in keys) {
+        if (k.secretRef == previousRef) {
+          _selectedKeyId = k.id;
+          break;
+        }
+      }
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 12),
+        DropdownButtonFormField<String>(
+          key: const ValueKey('host-ssh-key'),
+          initialValue: keys.any((k) => k.id == _selectedKeyId)
+              ? _selectedKeyId
+              : null,
+          decoration: InputDecoration(
+            labelText: 'SSH 키',
+            prefixIcon: const Icon(Icons.vpn_key_outlined),
+            helperText: keys.isEmpty ? '키체인에 키가 없습니다. 만들거나 가져오세요.' : null,
+          ),
+          items: [
+            for (final k in keys)
+              DropdownMenuItem(
+                value: k.id,
+                child: Text('${k.name} · ${k.shortFingerprint}'),
+              ),
+          ],
+          validator: _validatePrivateKey,
+          onChanged: _saving ? null : (v) => setState(() => _selectedKeyId = v),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          children: [
+            OutlinedButton.icon(
+              onPressed: _saving
+                  ? null
+                  : () async {
+                      final key = await showSshKeyCreateSheet(context, ref);
+                      if (key != null && mounted) {
+                        setState(() => _selectedKeyId = key.id);
+                      }
+                    },
+              icon: const Icon(Icons.add),
+              label: const Text('키 만들기'),
+            ),
+            OutlinedButton.icon(
+              onPressed: _saving
+                  ? null
+                  : () => showSshKeyImportSheet(
+                      context,
+                      ref,
+                      pickFile: _pickPrivateKeyPem,
+                    ),
+              icon: const Icon(Icons.file_download_outlined),
+              label: const Text('가져오기'),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
 
   /// kubectl 실행 위치 드롭다운의 값. 로컬/WSL은 고정 키, SSH 호스트는 id.
   static const _gatewayLocalKey = 'local';
@@ -801,8 +914,6 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
                           : (values) {
                               setState(() {
                                 _connectionType = values.single;
-                                _privateKeyValidationError = null;
-                                _privateKeyImportStatus = null;
                                 if (_connectionType ==
                                     HostConnectionType.localShell) {
                                   _fillDefaultWorkingDirectory();
@@ -853,118 +964,88 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
                         ),
                       ],
                       const SizedBox(height: 12),
-                      DropdownButtonFormField<HostAuthType>(
-                        initialValue: _authType,
-                        decoration: const InputDecoration(
-                          labelText: '인증 방식',
-                          prefixIcon: Icon(Icons.key_outlined),
-                        ),
-                        items: const [
-                          DropdownMenuItem(
-                            value: HostAuthType.password,
-                            child: Text('비밀번호'),
-                          ),
-                          DropdownMenuItem(
-                            value: HostAuthType.publicKey,
-                            child: Text('공개키'),
-                          ),
-                          DropdownMenuItem(
-                            value: HostAuthType.keyboardInteractive,
-                            child: Text('키보드 인터랙티브 / 2FA'),
+                      SegmentedButton<bool>(
+                        segments: const [
+                          ButtonSegment(value: false, label: Text('이 호스트 전용')),
+                          ButtonSegment(
+                            value: true,
+                            label: Text('저장된 Identity'),
                           ),
                         ],
-                        onChanged: _saving
+                        selected: {_useSharedIdentity},
+                        onSelectionChanged: _saving
                             ? null
-                            : (value) {
-                                if (value == null) return;
-                                setState(() {
-                                  _authType = value;
-                                  if (value != HostAuthType.publicKey) {
-                                    _agentForwarding = false;
-                                  }
-                                  _privateKeyValidationError = null;
-                                  _privateKeyImportStatus = null;
-                                });
-                              },
+                            : (v) =>
+                                  setState(() => _useSharedIdentity = v.single),
                       ),
-                      if (_authType == HostAuthType.password)
+                      const SizedBox(height: 12),
+                      if (_useSharedIdentity)
+                        _buildIdentityDropdown()
+                      else ...[
                         TextFormField(
-                          controller: _password,
-                          decoration: InputDecoration(
-                            labelText: '비밀번호',
-                            prefixIcon: const Icon(Icons.lock_outline),
-                            helperText: _canKeepCredential
-                                ? '비워두면 기존 비밀번호를 유지합니다'
-                                : null,
+                          controller: _username,
+                          decoration: const InputDecoration(
+                            labelText: '사용자명',
+                            prefixIcon: Icon(Icons.person_outline),
                           ),
-                          obscureText: true,
-                          textInputAction: TextInputAction.done,
-                          validator: _validatePassword,
-                          onFieldSubmitted: (_) => _saving ? null : _save(),
-                        )
-                      else if (_authType == HostAuthType.publicKey)
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            const SizedBox(height: 12),
-                            Align(
-                              alignment: Alignment.centerLeft,
-                              child: OutlinedButton.icon(
-                                onPressed: _saving ? null : _importPrivateKey,
-                                icon: const Icon(Icons.file_open),
-                                label: const Text('키 파일 선택'),
-                              ),
+                          textInputAction: TextInputAction.next,
+                          validator: (value) => _required(value, '사용자명을 입력하세요'),
+                        ),
+                        const SizedBox(height: 12),
+                        DropdownButtonFormField<HostAuthType>(
+                          key: const ValueKey('host-auth-type'),
+                          initialValue: _authType,
+                          decoration: const InputDecoration(
+                            labelText: '인증 방식',
+                            prefixIcon: Icon(Icons.key_outlined),
+                          ),
+                          items: const [
+                            DropdownMenuItem(
+                              value: HostAuthType.password,
+                              child: Text('비밀번호'),
                             ),
-                            TextFormField(
-                              controller: _privateKeyPem,
-                              decoration: InputDecoration(
-                                labelText: '개인키 PEM',
-                                prefixIcon: const Icon(Icons.vpn_key_outlined),
-                                helperText:
-                                    _privateKeyImportStatus ??
-                                    (_canKeepCredential
-                                        ? '비워두면 기존 개인키를 유지합니다'
-                                        : '키 파일을 선택하거나 개인키 본문을 붙여넣으세요'),
-                              ),
-                              minLines: 5,
-                              maxLines: 8,
-                              textInputAction: TextInputAction.newline,
-                              validator: _validatePrivateKey,
-                              onChanged: (_) {
-                                if (_privateKeyValidationError == null &&
-                                    _privateKeyImportStatus == null) {
-                                  return;
-                                }
-                                setState(() {
-                                  _privateKeyValidationError = null;
-                                  _privateKeyImportStatus = null;
-                                });
-                              },
+                            DropdownMenuItem(
+                              value: HostAuthType.publicKey,
+                              child: Text('공개키'),
                             ),
-                            TextFormField(
-                              controller: _keyPassphrase,
-                              decoration: const InputDecoration(
-                                labelText: '키 암호',
-                                prefixIcon: Icon(Icons.password),
-                                helperText: '암호가 없는 키면 비워두세요',
-                              ),
-                              obscureText: true,
-                              textInputAction: TextInputAction.done,
-                              onChanged: (_) {
-                                if (_privateKeyValidationError != null) {
-                                  setState(
-                                    () => _privateKeyValidationError = null,
-                                  );
-                                }
-                                _formKey.currentState?.validate();
-                              },
-                              onFieldSubmitted: (_) => _saving ? null : _save(),
+                            DropdownMenuItem(
+                              value: HostAuthType.keyboardInteractive,
+                              child: Text('키보드 인터랙티브 / 2FA'),
                             ),
                           ],
-                        )
-                      else
-                        const _KeyboardInteractiveHint(),
-                      if (_authType == HostAuthType.publicKey) ...[
+                          onChanged: _saving
+                              ? null
+                              : (value) {
+                                  if (value == null) return;
+                                  setState(() {
+                                    _authType = value;
+                                    if (value != HostAuthType.publicKey) {
+                                      _agentForwarding = false;
+                                    }
+                                  });
+                                },
+                        ),
+                        if (_authType == HostAuthType.password)
+                          TextFormField(
+                            controller: _password,
+                            decoration: InputDecoration(
+                              labelText: '비밀번호',
+                              prefixIcon: const Icon(Icons.lock_outline),
+                              helperText: _canKeepCredential
+                                  ? '비워두면 기존 비밀번호를 유지합니다'
+                                  : null,
+                            ),
+                            obscureText: true,
+                            textInputAction: TextInputAction.done,
+                            validator: _validatePassword,
+                            onFieldSubmitted: (_) => _saving ? null : _save(),
+                          )
+                        else if (_authType == HostAuthType.publicKey)
+                          _buildKeyPicker()
+                        else
+                          const _KeyboardInteractiveHint(),
+                      ],
+                      if (_effectiveAuthType() == HostAuthType.publicKey) ...[
                         const SizedBox(height: 8),
                         Material(
                           color: Colors.transparent,

@@ -527,6 +527,16 @@ class SshService {
           if (knownFp != null) {
             final matches = fp == knownFp;
             hostkeyPassed = matches;
+            if (matches) {
+              // 성공한 연결의 마지막 확인 시각을 갱신한다. lastSeenAt은 best-effort
+              // 기록일 뿐이므로 결과를 기다리지 않고, 실패해도 연결에 영향을 주거나
+              // 처리되지 않은 비동기 오류로 노출되지 않도록 삼킨다.
+              unawaited(
+                hostKeyStore
+                    .touch(hostname: host.hostname, port: host.port)
+                    .catchError((_) {}),
+              );
+            }
             return matches;
           }
 

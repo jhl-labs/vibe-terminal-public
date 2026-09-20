@@ -86,6 +86,7 @@ class SessionInfo {
     this.localSessionId,
     this.fellBackToDirectSsh = false,
     this.agentWorkspace,
+    this.appId,
   });
 
   final String id;
@@ -114,6 +115,10 @@ class SessionInfo {
   /// 앱에서 시작한 Agent와 격리 worktree의 복원 가능한 실행 메타데이터.
   final AgentWorkspaceContext? agentWorkspace;
 
+  /// 사용자 정의 앱에서 연 세션임을 표시하는 식별자. null이면 일반 세션.
+  /// 앱 세션은 복원 스냅샷에 저장되지 않는다.
+  final String? appId;
+
   String get displayName {
     final cleaned = title?.trim();
     if (cleaned != null && cleaned.isNotEmpty) return cleaned;
@@ -132,6 +137,7 @@ class SessionInfo {
     Object? localSessionId = _unchanged,
     bool? fellBackToDirectSsh,
     Object? agentWorkspace = _unchanged,
+    Object? appId = _unchanged,
   }) => SessionInfo(
     id: id,
     host: host,
@@ -157,5 +163,6 @@ class SessionInfo {
     agentWorkspace: identical(agentWorkspace, _unchanged)
         ? this.agentWorkspace
         : agentWorkspace as AgentWorkspaceContext?,
+    appId: identical(appId, _unchanged) ? this.appId : appId as String?,
   );
 }
