@@ -2,7 +2,10 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart' show PointerSignalEvent;
+import 'package:flutter/rendering.dart' show BoxHitTestResult;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:xterm/xterm.dart';
@@ -18,6 +21,7 @@ import '../../settings/shortcut_bindings.dart';
 import '../../state/providers.dart';
 import '../adaptive/breakpoints.dart';
 import 'action_bar_catalog.dart';
+import 'terminal_native_ime.dart';
 import 'terminal_selection_overlay.dart';
 
 /// 세션 하나의 터미널 화면. 줌(핀치/단축키)과 keep-alive를 담당한다.
@@ -47,7 +51,8 @@ class SessionTerminalView extends ConsumerStatefulWidget {
 }
 
 class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
-    with AutomaticKeepAliveClientMixin {
+    with AutomaticKeepAliveClientMixin
+    implements TerminalNativeImeClient {
   // Android/iOS IME 중 일부는 연결된 편집값을 완전히 비우면 한글 조합 세션까지
   // 초기화해 영문 자판으로 돌아간다. 터미널의 논리 입력 버퍼가 비어 있을 때도
   // 플랫폼 편집값은 보이지 않는 anchor 한 글자를 유지한다. 아래의
@@ -73,7 +78,24 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   bool _clearingInput = false;
   // 조합(composing) 중이라 아직 서버로 보내지 않은 한글 꼬리.
   // xterm처럼 터미널 커서 위치에 로컬로 표시해 "입력이 안 보이는" 문제를 없앤다.
-  String? _composingText;
+  //
+  // setState가 아니라 ValueNotifier로 둔다. 자모 하나마다 도착하는 조합 갱신이
+  // 세션 뷰 전체(TerminalView 포함)를 리빌드하면 세션 다수·저사양 PC에서
+  // 글자가 밀린다. 오버레이만 ValueListenableBuilder로 갈아끼운다.
+  final _composing = ValueNotifier<String?>(null);
+  // Windows 네이티브 IME 브리지([TerminalNativeIme])가 알려 준 조합 문자열.
+  // 브리지가 켜져 있으면 한글 조합은 EditableText를 거치지 않으므로 기존
+  // [_composing] 경로와 분리해 둔다.
+  final _nativeComposing = ValueNotifier<String?>(null);
+  late final Listenable _composingListenable = Listenable.merge([
+    _composing,
+    _nativeComposing,
+  ]);
+  AppSettings? _overlaySettings;
+  double? _overlayFontSize;
+  // 셀 크기 측정(TextPainter) 캐시. 글꼴 설정이 같으면 재측정하지 않는다.
+  Size? _cellSizeCache;
+  Object? _cellSizeCacheKey;
   String _recentHardwareText = '';
   DateTime? _recentHardwareTextAt;
   String _unconfirmedHardwareText = '';
@@ -98,10 +120,13 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   // xterm Terminal 은 Flutter Listenable 이 아니므로 출력·reflow 갱신을 선택
   // 오버레이의 ListenableBuilder 에 전달하는 브리지. 선택이 있을 때만 알린다.
   final _terminalChangeBridge = _ChangeBridge();
-  Timer? _pasteLongPressTimer;
+  Timer? _terminalLongPressTimer;
   Offset? _pointerDownGlobal;
-  static const _pasteLongPressDelay = Duration(milliseconds: 500);
-  static const _pasteLongPressSlop = 18.0;
+  static const _terminalLongPressDelay = Duration(milliseconds: 500);
+  static const _terminalLongPressSlop = 18.0;
+
+  // 메뉴는 손을 뗄 때 연다. 누른 채 드래그하는 글자 선택을 가로채지 않는다.
+  bool _longPressMenuPending = false;
   final Map<int, Offset> _activePointers = {};
   double _pinchBaseDistance = 0;
   double _pinchBaseFontSize = 14;
@@ -168,6 +193,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
       localY: local.dy,
       viewportHeight: viewport.height,
       lineHeight: lineHeight,
+      edgeExtent: context.isCompact ? 32 : 0,
     );
   }
 
@@ -178,6 +204,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   CellOffset? _selectionModeAnchor;
 
   void _enableSelectionMode() {
+    _inputFocusNode.unfocus();
     if (_selectionMode) return;
     setState(() {
       _selectionMode = true;
@@ -231,7 +258,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   /// 제스처와 무관한 정적 스냅샷에서 안정적으로 복사할 수 있게 한다.
   void _openCopySheet() {
     final text = widget.session.engine.terminal.buffer.getText().trimRight();
-    final settings = ref.read(appSettingsProvider);
+    final settings = widget.session.terminalPreferences.applyTo(
+      ref.read(appSettingsProvider),
+    );
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -276,6 +305,25 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
       viewport: render.size,
       lineHeight: render.lineHeight,
     );
+  }
+
+  /// 선택 핸들 위에서 받은 휠/트랙패드 스크롤을 아래 터미널에 그대로 전달한다.
+  /// 핸들은 터미널 위 Stack 형제라 히트 테스트가 핸들에서 멈추므로, 터미널
+  /// 서브트리를 다시 히트 테스트해 같은 이벤트를 보낸다. 스크롤백(일반 셸)과
+  /// 앱으로 보내는 휠(TUI) 모두 터미널 자체 경로가 처리한다.
+  void _forwardPointerSignalToTerminal(PointerSignalEvent event) {
+    final box = _terminalViewKey.currentContext?.findRenderObject();
+    if (box is! RenderBox || !box.attached || !box.hasSize) return;
+    final result = BoxHitTestResult();
+    final hit = result.addWithPaintTransform(
+      transform: box.getTransformTo(null),
+      position: event.position,
+      hitTest: (result, position) => box.hitTest(result, position: position),
+    );
+    if (!hit) return;
+    for (final entry in result.path) {
+      entry.target.handleEvent(event.transformed(entry.transform), entry);
+    }
   }
 
   void _selectAll() {
@@ -339,6 +387,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   @override
   void initState() {
     super.initState();
+    _installTextInputChannelTrace();
     _terminalShortcutManager = _TerminalShortcutManager(
       onTerminalKey: (context, event) =>
           _handleTerminalKeyEvent(context, _inputFocusNode, event),
@@ -347,16 +396,20 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     _terminalController.addListener(_handleTerminalSelectionChanged);
     widget.session.engine.terminal.addListener(_handleTerminalChanged);
     _inputController.addListener(_handleCommittedTextInput);
+    _inputFocusNode.addListener(_handleInputFocusChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) => _requestFocus());
   }
 
   @override
   void dispose() {
+    TerminalNativeIme.instance.dispose(this);
+    _composing.dispose();
+    _nativeComposing.dispose();
     _imeIdleCommitTimer?.cancel();
     _imeBufferClearTimer?.cancel();
     _hardwareKeyQuietTimer?.cancel();
     _selectionCopyTimer?.cancel();
-    _pasteLongPressTimer?.cancel();
+    _terminalLongPressTimer?.cancel();
     _terminalController.removeListener(_handleTerminalSelectionChanged);
     widget.session.engine.terminal.removeListener(_handleTerminalChanged);
     _terminalChangeBridge.dispose();
@@ -375,7 +428,11 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   }
 
   void _handleTerminalSelectionChanged() {
-    if (!ref.read(appSettingsProvider).copyOnSelection) return;
+    if (!widget.session.terminalPreferences
+        .applyTo(ref.read(appSettingsProvider))
+        .copyOnSelection) {
+      return;
+    }
     final selection = _terminalController.selection;
     if (selection == null) {
       _selectionCopyTimer?.cancel();
@@ -393,7 +450,11 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   String? _selectedText() {
     final selection = _terminalController.selection;
     if (selection == null) return null;
-    final text = widget.session.engine.terminal.buffer.getText(selection);
+    // TUI 화면을 이어붙인 드래그 선택은 화면 밖까지 이어지므로 버퍼가 아니라
+    // 이어붙인 텍스트를 쓴다.
+    final text =
+        _terminalController.selectionTextOverride ??
+        widget.session.engine.terminal.buffer.getText(selection);
     if (text.trim().isEmpty) return null;
     return text;
   }
@@ -460,7 +521,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     if (!mounted || !context.mounted) return false;
     final text = data?.text;
     if (text == null || text.isEmpty) return false;
-    final settings = ref.read(appSettingsProvider);
+    final settings = widget.session.terminalPreferences.applyTo(
+      ref.read(appSettingsProvider),
+    );
     if (settings.confirmMultilinePaste && _isMultilineText(text)) {
       final confirmed = await _confirmMultilinePaste(context, text);
       if (!confirmed) return false;
@@ -516,6 +579,14 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   /// xterm와 동일한 방식('mmmmmmmmmm' 측정)으로 단일 셀 크기를 계산한다.
   /// composing 오버레이를 터미널 커서 셀에 맞춰 배치하는 데 쓴다.
   Size _terminalCellSize(AppSettings settings, double fontSize) {
+    final key = Object.hash(
+      fontSize,
+      settings.terminalLineHeight,
+      settings.terminalFontFamily,
+      Object.hashAll(settings.fontFallback),
+    );
+    final cached = _cellSizeCache;
+    if (cached != null && _cellSizeCacheKey == key) return cached;
     const probe = 'mmmmmmmmmm';
     final painter = TextPainter(
       text: TextSpan(
@@ -532,12 +603,94 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     )..layout();
     final size = Size(painter.maxIntrinsicWidth / probe.length, painter.height);
     painter.dispose();
+    _cellSizeCache = size;
+    _cellSizeCacheKey = key;
     return size;
   }
 
   /// 조합 중인 한글을 터미널 커서 위치에 밑줄과 함께 표시한다(전송 전 로컬 echo).
   Widget _buildComposingOverlay(AppSettings settings, double fontSize) {
-    final composing = _composingText;
+    _overlaySettings = settings;
+    _overlayFontSize = fontSize;
+    return ListenableBuilder(
+      listenable: _composingListenable,
+      builder: (context, _) => _composingOverlayFor(
+        _nativeComposing.value ?? _composing.value,
+        settings,
+        fontSize,
+      ),
+    );
+  }
+
+  void _handleInputFocusChanged() {
+    if (_inputFocusNode.hasFocus) {
+      TerminalNativeIme.instance.attach(this);
+      _updateNativeImeCaretRect();
+    } else {
+      TerminalNativeIme.instance.detach(this);
+    }
+  }
+
+  @override
+  void handleNativeImeCommit(String text) {
+    if (!mounted) return;
+    _traceInput('nativeIme commit "$text"');
+    _retractUnconfirmedHardwareText(text);
+    if (_terminalController.selection != null) {
+      _terminalController.clearSelection();
+    }
+    widget.session.engine.terminal.textInput(_applyStickyCtrl(text));
+    _scrollTerminalToBottomOnInput();
+  }
+
+  @override
+  void handleNativeImeComposing(String text) {
+    if (!mounted) return;
+    _traceInput('nativeIme composing "$text"');
+    final normalized = text.isEmpty ? null : text;
+    if (normalized != null) {
+      _retractUnconfirmedHardwareText(normalized);
+      _updateNativeImeCaretRect();
+    }
+    if (_nativeComposing.value != normalized) {
+      _nativeComposing.value = normalized;
+    }
+  }
+
+  /// IME 후보 창(한자 변환 등)을 터미널 커서 셀에 붙인다. 조합 오버레이와 같은
+  /// 좌표계(EditableText 레이어의 원점 = 터미널 padding 원점)를 쓴다.
+  void _updateNativeImeCaretRect() {
+    final settings = _overlaySettings;
+    final fontSize = _overlayFontSize;
+    final box = _editableTextKey.currentContext?.findRenderObject();
+    if (settings == null ||
+        fontSize == null ||
+        box is! RenderBox ||
+        !box.attached ||
+        !box.hasSize) {
+      return;
+    }
+    final buffer = widget.session.engine.terminal.buffer;
+    final cell = _terminalCellSize(settings, fontSize);
+    final origin = box.localToGlobal(
+      Offset(buffer.cursorX * cell.width, buffer.cursorY * cell.height),
+    );
+    final ratio = View.of(context).devicePixelRatio;
+    TerminalNativeIme.instance.setCaretRect(
+      Rect.fromLTWH(
+        origin.dx * ratio,
+        origin.dy * ratio,
+        cell.width * ratio,
+        cell.height * ratio,
+      ),
+    );
+  }
+
+  Widget _composingOverlayFor(
+    String? composing,
+    AppSettings settings,
+    double fontSize,
+  ) {
     if (composing == null) return const SizedBox.shrink();
     final buffer = widget.session.engine.terminal.buffer;
     final cell = _terminalCellSize(settings, fontSize);
@@ -587,21 +740,24 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   }
 
   void _handlePointerDown(PointerDownEvent event) {
+    // 모바일 입력은 키보드 버튼으로 요청하고 마우스 클릭 포커스는 유지한다.
     if (widget.session.status == SessionStatus.connected &&
-        _activePointers.isEmpty) {
-      _requestFocus();
+        _activePointers.isEmpty &&
+        event.kind == PointerDeviceKind.mouse) {
+      _requestFocus(explicitKeyboard: true);
     }
+    _longPressMenuPending = false;
     _activePointers[event.pointer] = event.position;
     _syncPinchBase();
     if (_activePointers.length >= 2) {
-      _pasteLongPressTimer?.cancel();
+      _longPressMenuPending = false;
+      _terminalLongPressTimer?.cancel();
       return;
     }
     _pointerDownGlobal = event.position;
-    _pasteLongPressTimer?.cancel();
-    _pasteLongPressTimer = Timer(_pasteLongPressDelay, () {
-      final down = _pointerDownGlobal;
-      if (down != null) _maybeShowPasteMenu(down);
+    _terminalLongPressTimer?.cancel();
+    _terminalLongPressTimer = Timer(_terminalLongPressDelay, () {
+      _longPressMenuPending = true;
     });
   }
 
@@ -610,26 +766,50 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     _activePointers[event.pointer] = event.position;
     final start = _pointerDownGlobal;
     if (start != null &&
-        (event.position - start).distance > _pasteLongPressSlop) {
-      _pasteLongPressTimer?.cancel();
+        (event.position - start).distance > _terminalLongPressSlop) {
+      // 드래그는 선택 또는 스크롤이다. 손을 떼도 메뉴를 열지 않는다.
+      _longPressMenuPending = false;
+      _terminalLongPressTimer?.cancel();
     }
     if (_activePointers.length == 2 && _pinchBaseDistance > 0) {
       final scale = _currentPointerDistance() / _pinchBaseDistance;
       ref
           .read(terminalZoomProvider.notifier)
-          .setFontSize(widget.session.id, _pinchBaseFontSize * scale);
+          .setFontSize(
+            widget.session.id,
+            _pinchBaseFontSize * scale,
+            persist: false,
+          );
     }
   }
 
   void _handlePointerUp(PointerEvent event) {
-    _pasteLongPressTimer?.cancel();
+    _terminalLongPressTimer?.cancel();
+    final wasPinching = _activePointers.length >= 2;
     _activePointers.remove(event.pointer);
     _syncPinchBase();
+    final menuPosition = _pointerDownGlobal;
+    final showMenu = _longPressMenuPending && event is PointerUpEvent;
+    _longPressMenuPending = false;
+    if (showMenu && _activePointers.isEmpty && menuPosition != null) {
+      // xterm의 선택 종료 처리가 끝난 뒤 복사/붙여넣기 메뉴를 표시한다.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_maybeShowTerminalContextMenu(menuPosition));
+      });
+      WidgetsBinding.instance.scheduleFrame();
+    }
+    if (wasPinching) {
+      unawaited(
+        ref
+            .read(sessionManagerProvider.notifier)
+            .persistOpenSessionsForRestore(),
+      );
+    }
   }
 
-  /// 빈 셀(공백) 롱프레스에서는 터미널 액션 메뉴를 띄운다.
-  /// 글자 셀의 롱프레스는 xterm 내부 단어 선택에 양보한다.
-  Future<void> _maybeShowPasteMenu(Offset globalPos) async {
+  /// 모바일 롱프레스에서는 위치와 무관하게 터미널 액션 메뉴를 띄운다.
+  /// 데스크톱에서는 빈 셀이나 선택 영역에서만 열어 xterm의 단어 선택을 유지한다.
+  Future<void> _maybeShowTerminalContextMenu(Offset globalPos) async {
     if (!mounted) return;
     final render = _terminalViewKey.currentState?.renderTerminal;
     if (render == null) return;
@@ -641,7 +821,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     final hasSelection = _terminalController.selection != null;
     final compact = context.isCompact;
     final isBlankCell = text.trim().isEmpty;
-    if (!hasSelection && !_selectionMode && !isBlankCell) {
+    if (!hasSelection && !_selectionMode && !isBlankCell && !compact) {
       return;
     }
 
@@ -706,7 +886,8 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     return (points[0] - points[1]).distance;
   }
 
-  void _requestFocus() {
+  void _requestFocus({bool explicitKeyboard = false}) {
+    if (!mounted || (context.isCompact && !explicitKeyboard)) return;
     final activeId = ref.read(activeSessionIdProvider);
     if ((widget.paneHeaderBuilder != null || activeId != null) &&
         activeId != widget.session.id) {
@@ -811,8 +992,8 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   /// 조합 중인 한글 꼬리를 로컬 표시 상태로 갱신한다. 빈 값은 null로 정규화.
   void _updateComposingText(String? text) {
     final normalized = (text == null || text.isEmpty) ? null : text;
-    if (_composingText == normalized) return;
-    setState(() => _composingText = normalized);
+    if (_composing.value == normalized) return;
+    _composing.value = normalized;
   }
 
   bool _shouldBufferImeText(TextEditingValue value) {
@@ -1089,6 +1270,11 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   void _scheduleHardwareTextInput(String text) {
     Timer(_hardwareTextFallbackDelay, () {
       if (!mounted || widget.session.status != SessionStatus.connected) return;
+      // 네이티브 IME 브리지가 조합 중이면 이 키는 IME가 소비한 것이다.
+      if (_nativeComposing.value != null) {
+        _traceInput('hardwareText skip "$text" native composing');
+        return;
+      }
       final value = _logicalInputValue();
       if (value.text.isNotEmpty || !value.composing.isCollapsed) {
         if (_flushPendingAsciiTextInput(value)) {
@@ -1353,7 +1539,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
       _traceInput('key defer to IME logical=${event.logicalKey.debugName}');
       return KeyEventResult.ignored;
     }
-    final settings = ref.read(appSettingsProvider);
+    final settings = widget.session.terminalPreferences.applyTo(
+      ref.read(appSettingsProvider),
+    );
     for (final action in widget.paneShortcuts.entries) {
       if (_matchesShortcut(
         action.key,
@@ -1535,7 +1723,22 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     _shiftModifierActive = keyboard.isShiftPressed;
   }
 
-  void _traceInput(String message) {
+  void _traceInput(String message) => _writeInputTrace(message);
+
+  static bool _textInputChannelTraceInstalled = false;
+
+  /// 입력 트레이스가 켜져 있으면 `flutter/textinput` 채널의 양방향 메시지를
+  /// 기록한다. 엔진이 보낸 원본 편집값과 프레임워크가 엔진으로 되돌려 보내는
+  /// setEditingState를 같은 타임라인에서 봐야 IME 경합을 진단할 수 있다.
+  static void _installTextInputChannelTrace() {
+    if (_inputTracePath.isEmpty || _textInputChannelTraceInstalled) return;
+    _textInputChannelTraceInstalled = true;
+    TerminalNativeIme.instance.traceSink = _writeInputTrace;
+    // ignore: invalid_use_of_visible_for_testing_member
+    TextInput.setChannel(_TracingTextInputChannel(_writeInputTrace));
+  }
+
+  static void _writeInputTrace(String message) {
     if (_inputTracePath.isEmpty) return;
     // `--dart-define=VIBE_TERMINAL_INPUT_TRACE=console`이면 콘솔로 출력해
     // 실기기에서 `flutter run` 로그만으로 IME/조합 흐름을 진단할 수 있다.
@@ -1591,7 +1794,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     return _matchesShortcut(
       'paste',
       key,
-      settings: ref.read(appSettingsProvider),
+      settings: widget.session.terminalPreferences.applyTo(
+        ref.read(appSettingsProvider),
+      ),
       ctrl: ctrl,
       alt: alt,
       meta: meta,
@@ -1988,7 +2193,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     // 터미널만 반응해 소프트키보드를 띄운다.
     ref.listen(keyboardFocusRequestProvider, (_, _) {
       if (widget.session.id == ref.read(activeSessionIdProvider)) {
-        _requestFocus();
+        _requestFocus(explicitKeyboard: true);
       }
     });
     ref.listen(activeSessionIdProvider, (previousId, activeId) {
@@ -2002,7 +2207,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
         _requestFocus();
       }
     });
-    final settings = ref.watch(appSettingsProvider);
+    final settings = widget.session.terminalPreferences.applyTo(
+      ref.watch(appSettingsProvider),
+    );
     // 줌은 세션별(터미널 칸별)이다. 설정의 글꼴 크기는 기본값일 뿐이다.
     final fontSize = watchTerminalFontSize(ref, widget.session.id);
     final zoom = ref.read(terminalZoomProvider.notifier);
@@ -2088,6 +2295,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
                     scrollController: _terminalScrollController,
                     readOnly: true,
                     hardwareKeyboardOnly: true,
+                    resizeDebounce: context.isCompact
+                        ? const Duration(milliseconds: 150)
+                        : Duration.zero,
                     theme: settings.resolvedTerminalTheme,
                     padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
                     alwaysShowCursor: false,
@@ -2153,6 +2363,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
                             scrollController: _terminalScrollController,
                             readOnly: true,
                             hardwareKeyboardOnly: true,
+                            resizeDebounce: context.isCompact
+                                ? const Duration(milliseconds: 150)
+                                : Duration.zero,
                             theme: settings.resolvedTerminalTheme,
                             padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
                             alwaysShowCursor: true,
@@ -2213,6 +2426,8 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
                               final geo = _selectionGeometry();
                               return TerminalSelectionOverlay(
                                 geometry: geo,
+                                onPointerSignal:
+                                    _forwardPointerSignalToTerminal,
                                 onHandleDragStart: _beginSelectionDrag,
                                 onHandleDragStop: _endSelectionDrag,
                                 onHandleDragBegin: (g) =>
@@ -2247,6 +2462,50 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
           ],
         );
     }
+  }
+}
+
+/// 진단 전용: `flutter/textinput` 채널 호출을 기록하고 그대로 전달한다.
+class _TracingTextInputChannel extends MethodChannel {
+  _TracingTextInputChannel(this._trace)
+    : super(SystemChannels.textInput.name, SystemChannels.textInput.codec);
+
+  final void Function(String message) _trace;
+
+  static const _tracedMethods = {
+    'TextInput.setEditingState',
+    'TextInput.setClient',
+    'TextInput.clearClient',
+    'TextInput.show',
+    'TextInput.hide',
+    'TextInput.finishAutofillContext',
+  };
+
+  @override
+  Future<T?> invokeMethod<T>(String method, [dynamic arguments]) {
+    if (_tracedMethods.contains(method)) {
+      final args = method == 'TextInput.setClient' ? '' : ' $arguments';
+      _trace('channel -> $method$args');
+    }
+    return super.invokeMethod<T>(method, arguments);
+  }
+
+  @override
+  void setMethodCallHandler(
+    Future<dynamic> Function(MethodCall call)? handler,
+  ) {
+    if (handler == null) {
+      super.setMethodCallHandler(null);
+      return;
+    }
+    super.setMethodCallHandler((call) {
+      if (call.method != 'TextInputClient.updateEditingStateWithDeltas') {
+        final args = call.arguments;
+        final state = args is List && args.length > 1 ? args[1] : args;
+        _trace('channel <- ${call.method} $state');
+      }
+      return handler(call);
+    });
   }
 }
 
@@ -2286,7 +2545,7 @@ class _TerminalImeInputLayer extends StatelessWidget {
             key: editableTextKey,
             controller: controller,
             focusNode: focusNode,
-            autofocus: true,
+            autofocus: !context.isCompact,
             style: TextStyle(
               color: const Color(0x01000000),
               fontSize: fontSize,
@@ -2659,7 +2918,10 @@ class _SessionStatusLineState extends State<_SessionStatusLine> {
     final shouldRun = widget.session.status == SessionStatus.connected;
     if (shouldRun && _ticker == null) {
       _ticker = Timer.periodic(const Duration(seconds: 10), (_) {
-        if (mounted) setState(() {});
+        // 분할 덱은 보이지 않는 세션을 Offstage+TickerMode(false)로 살려 둔다.
+        // 그 세션의 uptime까지 10초마다 다시 그리면 세션 수만큼 리빌드가 쌓인다.
+        // 다시 보일 때 어차피 헤더가 재빌드되므로 건너뛴다.
+        if (mounted && TickerMode.valuesOf(context).enabled) setState(() {});
       });
     } else if (!shouldRun && _ticker != null) {
       _ticker!.cancel();
@@ -2763,14 +3025,29 @@ class _SessionErrorView extends StatelessWidget {
     HostKeyMismatchFailure() =>
       '서버 신원이 저장된 호스트 키와 다릅니다. 서버 변경 여부를 확인한 뒤 다시 시도하세요.',
     NetworkFailure() => '주소, 포트, 네트워크 상태와 SSH 서버 실행 여부를 확인하세요.',
-    KubernetesFailure() =>
-      'kubectl 실행 위치(게이트웨이), context·namespace·Pod, Pod 안의 nc/socat/bash, '
-          '그리고 최종 SSH 주소·포트를 확인하세요.',
+    KubernetesFailure(:final message) => _kubernetesGuidance(message),
     RemoteSessionFailure() => '서버에 tmux를 설치하거나 호스트 설정에서 작업 이어가기를 꺼 주세요.',
     StorageFailure() => '저장된 자격증명을 읽을 수 없습니다. 비밀번호를 다시 저장하세요.',
     JumpChainFailure() => 'Jump 호스트 설정을 확인한 뒤 다시 연결하세요.',
     UnknownFailure() || null => '설정을 확인한 뒤 다시 연결하세요.',
   };
+
+  String _kubernetesGuidance(String message) {
+    if (message.contains('final SSH host or port is empty')) {
+      final defaultContainerNote = message.contains('Default container ')
+          ? ' 상세의 “Default container …” 문구는 kubectl이 Pod의 기본 컨테이너를 골랐다는 안내입니다.'
+          : '';
+      return 'Pod 안에서 릴레이가 실행됐지만 최종 SSH 주소 또는 포트가 전달되지 않아 '
+          'SSH 연결을 시작하지 못했습니다.$defaultContainerNote '
+          '호스트 설정의 “최종 SSH 대상” 주소와 포트를 저장한 뒤 다시 시도하세요. '
+          '값이 이미 맞다면 앱의 릴레이 명령 전달 오류일 수 있으니 최신 버전으로 업데이트하세요. '
+          '이 단계에서는 최종 SSH 사용자 인증이 아직 시작되지 않았습니다.';
+    }
+    return '선택한 게이트웨이의 kubectl과 kubeconfig로 Pod에 접근한 뒤, '
+        '이 호스트 프로필의 사용자명·인증 방식으로 최종 SSH에 접속합니다. '
+        'SSH 게이트웨이를 선택했다면 해당 SSH 프로필에도 먼저 인증해야 합니다. '
+        '상세 오류에서 실패한 단계를 확인하세요.';
+  }
 
   @override
   Widget build(BuildContext context) {

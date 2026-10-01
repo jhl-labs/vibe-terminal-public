@@ -66,6 +66,8 @@ class AgentSessionInspector {
     (RegExp(r'\bgithub\s+copilot\s+cli\b'), 'copilot'),
     (RegExp(r'\bkiro\s+cli\b'), 'kiro'),
     (RegExp(r'\bqodercli\b|\bqoder\s+cli\b'), 'qoder'),
+    (RegExp(r'vim\s+-\s+vi\s+improved|--\s*insert\s*--|--\s*visual\s*--'), 'vim'),
+    (RegExp(r'\bsepilot\s+cli\s+v|welcome\s+to\s+sepilot|\bsepilotd\b'), 'sepilot'),
   ];
 
   /// 대화가 길어져 시작 배너가 스크롤백 밖으로 밀려난 뒤에도 화면 하단에 계속
@@ -106,6 +108,8 @@ class AgentSessionInspector {
     (RegExp(r'\bcopilot\b'), 'copilot'),
     (RegExp(r'\bkiro\b'), 'kiro'),
     (RegExp(r'\bqoder\b'), 'qoder'),
+    (RegExp(r'\bvim\b'), 'vim'),
+    (RegExp(r'\bsepilot\b'), 'sepilot'),
   ];
 
   // 모델 라벨 감지: 특정 벤더에 종속되지 않은 일반 표기 규칙.

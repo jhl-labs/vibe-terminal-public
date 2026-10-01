@@ -18,6 +18,19 @@ class AppSettingsStore {
     return File('${dir.path}${Platform.pathSeparator}settings.json');
   }
 
+  /// 설정 파일이 있는지. [load] 는 파일이 없을 때와 손상됐을 때 모두 null 을
+  /// 돌려주므로, 손상된 파일을 기본값으로 덮어쓰지 않으려면 이 메서드로 파일
+  /// 존재 여부를 따로 본다. 확인 자체가 실패하면 false — 그러면 호출자가
+  /// 기본값 저장을 시도할 수 있는데, 그 저장도 같은 이유로 실패할 가능성이
+  /// 높아 손상된 파일을 덮어쓰는 일은 없다.
+  Future<bool> exists() async {
+    try {
+      return (await _settingsFile()).existsSync();
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<AppSettings?> load() async {
     try {
       final file = await _settingsFile();

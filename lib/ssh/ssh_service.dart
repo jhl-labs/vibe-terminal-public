@@ -11,6 +11,7 @@ import '../security/secure_store.dart';
 import '../terminal/terminal_session_handle.dart';
 import 'ssh_credentials.dart';
 import 'remote_terminal_launcher.dart';
+import 'ssh_session_lifecycle.dart';
 
 /// dartssh2가 onVerifyHostKey 콜백에서 제공하는 fingerprint 바이트를
 /// `SHA256:<base64-no-padding>` 형식 문자열로 변환한다.
@@ -98,12 +99,30 @@ class SshSessionHandle implements TerminalSessionHandle {
   /// 작업 이어가기를 요청했지만 tmux가 없어 일반 SSH 셸로 연결했는지 여부.
   final bool fellBackToDirectSsh;
 
-  bool _remoteProcessExited = false;
+  SshSessionEnd? _sessionEnd;
+  bool? _transportClosedAtEnd;
+  final List<int> _outputTail = [];
+  static const _maximumOutputTailBytes = 4096;
+
+  /// tmux attach redirects stderr to stdout. Keep only a bounded diagnostic tail.
+  String get attachmentErrorOutput => utf8
+      .decode(_outputTail, allowMalformed: true)
+      .replaceAll(RegExp(r'\x1b\[[0-?]*[ -/]*[@-~]'), '')
+      .replaceAll(RegExp(r'[\x00-\x08\x0b-\x1f\x7f]'), '')
+      .trim();
 
   bool get isPersistent => persistentSessionName != null;
 
   /// SSH 전송 단절이 아니라 원격 셸/tmux client가 종료 코드를 보고하고 끝났는지.
-  bool get remoteProcessExited => _remoteProcessExited;
+  bool get remoteProcessExited => _sessionEnd == SshSessionEnd.processExited;
+
+  bool get attachmentFailed => _sessionEnd == SshSessionEnd.attachmentFailed;
+
+  String get endDescription =>
+      '${isPersistent ? "tmux client" : "SSH shell"}: '
+      'exit=${_session.exitCode ?? "unknown"}, '
+      'signal=${_session.exitSignal?.signalName ?? "none"}, '
+      'transport=${(_transportClosedAtEnd ?? _client.isClosed) ? "closed" : "open"}';
 
   /// 이 세션이 jump 체인을 거쳐 열렸다면, 거쳐 온 중간 jump 클라이언트들
   /// (바깥쪽 먼저). 세션 종료 시 함께 닫아 리소스 누수를 막는다.
@@ -116,9 +135,29 @@ class SshSessionHandle implements TerminalSessionHandle {
   @override
   Stream<List<int>> get output => _output.transform(
     StreamTransformer.fromHandlers(
+      handleData: (data, sink) {
+        if (isPersistent) {
+          if (data.length >= _maximumOutputTailBytes) {
+            _outputTail
+              ..clear()
+              ..addAll(data.skip(data.length - _maximumOutputTailBytes));
+          } else {
+            final overflow =
+                _outputTail.length + data.length - _maximumOutputTailBytes;
+            if (overflow > 0) _outputTail.removeRange(0, overflow);
+            _outputTail.addAll(data);
+          }
+        }
+        sink.add(data);
+      },
       handleDone: (sink) {
-        _remoteProcessExited =
-            _session.exitCode != null || _session.exitSignal != null;
+        _transportClosedAtEnd = _client.isClosed;
+        _sessionEnd = classifySshSessionEnd(
+          exitCode: _session.exitCode,
+          hasExitSignal: _session.exitSignal != null,
+          transportClosed: _client.isClosed,
+          isPersistent: isPersistent,
+        );
         sink.close();
       },
     ),

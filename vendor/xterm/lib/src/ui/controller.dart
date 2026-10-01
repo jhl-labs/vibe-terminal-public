@@ -54,6 +54,7 @@ class TerminalController with ChangeNotifier {
   /// the ownership of [base] and [extent] and will dispose them when the
   /// selection is cleared or changed.
   void setSelection(CellAnchor base, CellAnchor extent, {SelectionMode? mode}) {
+    _selectionTextOverride = null;
     _selectionBase?.dispose();
     _selectionBase = base;
 
@@ -90,8 +91,21 @@ class TerminalController with ChangeNotifier {
     notifyListeners();
   }
 
+  /// Vibe Terminal patch: text of the current selection when it cannot be
+  /// read from the buffer, e.g. a drag selection that was stitched across
+  /// screens of a full-screen TUI. Cleared whenever the selection changes.
+  String? get selectionTextOverride => _selectionTextOverride;
+  String? _selectionTextOverride;
+
+  void setSelectionTextOverride(String? text) {
+    if (_selectionTextOverride == text) return;
+    _selectionTextOverride = text;
+    notifyListeners();
+  }
+
   /// Clears the current selection.
   void clearSelection() {
+    _selectionTextOverride = null;
     _selectionBase?.dispose();
     _selectionBase = null;
     _selectionExtent?.dispose();

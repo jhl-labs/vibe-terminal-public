@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../agent/agent_launcher.dart';
 import '../../app/theme.dart';
 import '../../settings/app_settings.dart';
+import '../../state/providers.dart';
+import '../../telemetry/telemetry.dart';
 
 typedef AgentLaunchProfileSaver = void Function(AgentLaunchProfile profile);
 typedef AgentLaunchProfileRemover = void Function(String id);
@@ -43,7 +46,7 @@ String? _validateModel(String? value) {
   return null;
 }
 
-class _AgentLaunchDialog extends StatefulWidget {
+class _AgentLaunchDialog extends ConsumerStatefulWidget {
   const _AgentLaunchDialog({
     required this.preferences,
     required this.initialCli,
@@ -65,10 +68,10 @@ class _AgentLaunchDialog extends StatefulWidget {
   final ValueChanged<String> onModelUsed;
 
   @override
-  State<_AgentLaunchDialog> createState() => _AgentLaunchDialogState();
+  ConsumerState<_AgentLaunchDialog> createState() => _AgentLaunchDialogState();
 }
 
-class _AgentLaunchDialogState extends State<_AgentLaunchDialog> {
+class _AgentLaunchDialogState extends ConsumerState<_AgentLaunchDialog> {
   final _formKey = GlobalKey<FormState>();
   final _executableController = TextEditingController();
   final _goalController = TextEditingController();
@@ -124,6 +127,9 @@ class _AgentLaunchDialogState extends State<_AgentLaunchDialog> {
     if (!_formKey.currentState!.validate()) return;
     final model = _modelController.text.trim();
     if (model.isNotEmpty) widget.onModelUsed(model);
+    ref
+        .read(telemetryProvider)
+        .logEvent(TelemetryEvent.agentRunStart(cli: _cli.name));
     Navigator.of(context).pop(
       AgentLaunchSpec(
         cli: _cli,

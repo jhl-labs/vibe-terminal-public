@@ -14,10 +14,14 @@ class TerminalScrollGestureHandler extends StatefulWidget {
     required this.getCellOffset,
     required this.getLineHeight,
     this.simulateScroll = true,
+    this.isSelecting,
     required this.child,
   });
 
   final Terminal terminal;
+
+  /// A held text selection owns touch movement until the pointer is released.
+  final bool Function()? isSelecting;
 
   /// Returns the cell offset for the pixel offset.
   final CellOffset Function(Offset) getCellOffset;
@@ -168,6 +172,9 @@ class _TerminalScrollGestureHandlerState
     final delta = event.position - tracker.lastPosition;
     tracker.lastPosition = event.position;
     lastPointerPosition = event.position;
+    if (widget.isSelecting?.call() ?? false) {
+      tracker.suppressed = true;
+    }
     if (tracker.suppressed || _touchScrolls.length != 1) return;
 
     if (!tracker.isVerticalScroll) {

@@ -18,6 +18,13 @@ abstract interface class LocalProcessSessionHandle
   int? get pid;
 }
 
+/// 앱과 별도 수명으로 실행되는 로컬 PTY에 붙은 핸들.
+/// 출력 스트림 종료가 프로세스 종료인지 전송 분리인지 구분한다.
+abstract interface class PersistentLocalProcessSessionHandle
+    implements LocalProcessSessionHandle {
+  bool get processExited;
+}
+
 /// PTY journal 재생 시 화면 크기와 입력 억제 경계를 보존한다.
 class TerminalReplayFrame {
   const TerminalReplayFrame(

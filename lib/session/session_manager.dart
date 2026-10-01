@@ -44,12 +44,14 @@ import '../ssh/remote_session_catalog.dart';
 import '../ssh/remote_working_directory.dart';
 import '../ssh/remote_terminal_launcher.dart';
 import '../state/providers.dart';
+import '../telemetry/telemetry.dart';
 import '../terminal/logging_terminal_session_handle.dart';
 import '../terminal/terminal_engine.dart';
 import '../terminal/terminal_session_handle.dart';
 import 'local_session_state_tracker.dart';
 import 'remote_session_cleanup_store.dart';
 import 'session.dart';
+import '../settings/terminal_preferences.dart';
 import 'session_activity.dart';
 import 'session_attention.dart';
 import 'session_diagnostics.dart';
@@ -146,6 +148,11 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   /// 세션별 SSH 핸들. SFTP 등 같은 연결 위의 추가 채널에 클라이언트를 제공한다.
   final Map<String, SshSessionHandle> _sshHandles = {};
 
+  /// 세션이 이번 연결에서 이미 실행 중이던 원격 작업(tmux)에 다시 붙었는지.
+  /// 커스텀 앱이 실행 명령을 중복 전송하지 않기 위해 본다.
+  bool sessionResumedRemoteWork(String id) =>
+      _sshHandles[id]?.resumedPersistentSession ?? false;
+
   /// 세션별 복원 메타데이터 추적기.
   final Map<String, LocalSessionStateTracker> _sessionStates = {};
 
@@ -169,12 +176,10 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     return '현재 앱 연결에서 수신한 이벤트가 없습니다. CLI를 다시 시작하고 /hooks 신뢰 또는 플러그인 로딩을 확인하세요.';
   }
 
-  TerminalEngine _newEngine(String id) {
+  TerminalEngine _newEngine(String id, int scrollbackLines) {
     // 스크롤백은 터미널 생성 시점에 정해진다. 설정을 바꾸면 이후에 여는
     // 세션부터 적용된다(설정 화면에 그렇게 안내한다).
-    final engine = TerminalEngine(
-      maxLines: ref.read(appSettingsProvider).terminalScrollbackLines,
-    );
+    final engine = TerminalEngine(maxLines: scrollbackLines);
     _engines[id] = engine;
     // 서버 출력 활동을 busy/idle 추적기로 전달한다.
     engine.onOutputActivity = () {
@@ -262,20 +267,33 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     String? localSessionId,
     AgentWorkspaceContext? agentWorkspace,
     String? appId,
-  }) => SessionInfo(
-    id: id,
-    host: host,
-    engine: _newEngine(id),
-    title: _cleanTitle(title),
-    restoredContext: restoredContext,
-    groupId: groupId,
-    remoteSessionId: host.keepsRemoteSession ? remoteSessionId : null,
-    localSessionId: localSessionId,
-    agentWorkspace: agentWorkspace,
-    appId: appId,
-  );
+    TerminalPreferences? terminalPreferences,
+    TerminalPreferences? terminalDefaults,
+  }) {
+    final defaults =
+        terminalDefaults ??
+        host.terminalPreferences.resolved(ref.read(appSettingsProvider));
+    final preferences = (terminalPreferences ?? defaults).resolved(
+      defaults.applyTo(ref.read(appSettingsProvider)),
+    );
+    return SessionInfo(
+      id: id,
+      host: host,
+      engine: _newEngine(id, preferences.scrollbackLines!),
+      terminalPreferences: preferences,
+      terminalDefaults: defaults,
+      title: _cleanTitle(title),
+      restoredContext: restoredContext,
+      groupId: groupId,
+      remoteSessionId: host.keepsRemoteSession ? remoteSessionId : null,
+      localSessionId: localSessionId,
+      agentWorkspace: agentWorkspace,
+      appId: appId,
+    );
+  }
 
   /// 새 세션을 열고 연결을 시도한다. 생성한 sessionId를 반환한다.
+  /// [insertionIndex]를 지정하면 연결 시작부터 해당 목록 위치에 표시한다.
   Future<String> openSession(
     Host host, {
     required Future<bool> Function(String, String, String, HostKeyVerdict)
@@ -289,7 +307,23 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     bool persistentLocal = true,
     AgentWorkspaceContext? agentWorkspace,
     String? appId,
+    int? insertionIndex,
   }) async {
+    // 세션 복제처럼 이전 Host 객체를 재사용해도 최신 호스트 기본값을 적용한다.
+    final storedHost = await ref.read(hostRepositoryProvider).getById(host.id);
+    if (storedHost != null) {
+      host = host.copyWith(terminalPreferences: storedHost.terminalPreferences);
+    }
+    // 사용자 정의 앱 세션은 앱이 수명을 관리한다. 호스트의 "tmux 이어가기"를
+    // 따르면 앱을 멈춰도 원격 명령(watch 등)이 tmux 안에 살아남고, 다시 시작할
+    // 때마다 새 tmux 세션이 쌓인다. 세션 정보에 이 호스트가 담기므로 재연결도
+    // tmux 없이 이뤄진다.
+    if (appId != null &&
+        host.remoteSessionPersistence != RemoteSessionPersistence.none) {
+      host = host.copyWith(
+        remoteSessionPersistence: RemoteSessionPersistence.none,
+      );
+    }
     var resolvedLocalId = localSessionId;
     if (host.isLocalShell &&
         persistentLocal &&
@@ -316,7 +350,12 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     );
     final engine = session.engine;
     _configureSessionTracking(id, host, engine);
-    state = [...state, session];
+    final next = [...state];
+    next.insert((insertionIndex ?? next.length).clamp(0, next.length), session);
+    state = next;
+    ref
+        .read(telemetryProvider)
+        .logEvent(TelemetryEvent.sessionOpen(host.connectionType));
     onCreated?.call(id);
     if (session.remoteSessionId != null) _persistOpenSessions();
 
@@ -589,7 +628,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     if (source == null) return id;
 
     final shell = _agentShellFlavor(source.host);
-    final command = const AgentLaunchCommandBuilder().build(spec, shell);
+    var command = const AgentLaunchCommandBuilder().build(spec, shell);
     AgentWorktreeRecord? worktree;
     var workspace = spec.toWorkspaceContext();
     if (spec.isolatedWorktree) {
@@ -602,6 +641,13 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         preferredSessionId: source.id,
         workingDirectory: workingDirectory,
         spec: spec,
+      );
+      // 새 세션은 원본 세션의 폴더에서 열리므로, 실행 대화상자에서 고른
+      // 저장소로 먼저 이동해야 기록한 worktree 위치와 실제 위치가 같아진다.
+      command = const AgentLaunchCommandBuilder().build(
+        spec,
+        shell,
+        repositoryRoot: location.repositoryRoot,
       );
       worktree = AgentWorktreeRecord(
         id: 'aw-${DateTime.now().microsecondsSinceEpoch}-${_randomHex(4)}',
@@ -2034,16 +2080,27 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     return host;
   }
 
+  /// Agent 세션 실행 직후 worktree가 실제로 만들어졌는지 확인해 기록을 갱신한다.
+  ///
+  /// worktree는 새 셸이 뜬 뒤 타이핑한 명령이 만들므로 셸 시작·`git worktree
+  /// add`·SSH 왕복만큼 늦게 생긴다. 그 전에 [inspectAgentWorktree]를 부르면
+  /// 기록이 missing으로 저장되면서 세션 연결(sessionId)까지 지워져, 실행 중인
+  /// Agent가 "중단됨"으로 보인다. 그래서 생길 때까지는 존재만 확인하고 기록을
+  /// 건드리지 않는다.
   Future<void> _inspectAgentWorktreeAfterLaunch(
     AgentWorktreeRecord entry,
   ) async {
-    for (var attempt = 0; attempt < 4; attempt++) {
-      await Future<void>.delayed(const Duration(milliseconds: 350));
+    const delays = [350, 700, 1000, 2000, 3000, 5000];
+    for (final delay in delays) {
+      await Future<void>.delayed(Duration(milliseconds: delay));
       try {
-        final inspected = await inspectAgentWorktree(entry.id);
-        if (inspected.lifecycle != AgentWorktreeLifecycle.missing) return;
+        final host = await _hostForWorktree(entry);
+        final probe = await _worktreeRuntime.inspect(entry: entry, host: host);
+        if (!probe.exists) continue;
+        await inspectAgentWorktree(entry.id);
+        return;
       } catch (_) {
-        // 생성 명령과 경합할 수 있으므로 짧게 재시도한다.
+        // 생성 명령과 경합할 수 있으므로 재시도한다.
       }
     }
   }
@@ -2221,6 +2278,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         id,
         sessionHost,
         title: entry.title,
+        terminalPreferences: entry.terminalPreferences,
+        terminalDefaults: entry.terminalDefaults,
         restoredContext: restoredContext,
         groupId: entry.groupId,
         localSessionId: entry.localSessionId,
@@ -2293,6 +2352,9 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     final title = session.title;
     final remoteSessionId = session.remoteSessionId;
 
+    // 호스트 조회 중 사용자가 정렬하거나 닫았을 수 있으므로 현재 위치를 쓴다.
+    final insertionIndex = state.indexWhere((s) => s.id == id);
+    if (insertionIndex < 0) return id;
     closeSession(id);
     final retriedId = await openSession(
       host,
@@ -2304,6 +2366,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       localSessionId: session.localSessionId,
       persistentLocal: session.localSessionId != null,
       agentWorkspace: session.agentWorkspace,
+      insertionIndex: insertionIndex,
     );
     final workspaceId = session.agentWorkspace?.workspaceId;
     if (workspaceId != null) {
@@ -2350,7 +2413,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     );
     _sessionStates[id] = tracker;
     engine.onInput = (data) {
-      if (data.contains('\r') || data.contains('\n')) {
+      final submitted = data.contains('\r') || data.contains('\n');
+      if (submitted) {
         ref.read(sessionActivityProvider.notifier).markTaskSubmitted(id);
       }
       final current = _sessionStates[id];
@@ -2402,12 +2466,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         final handle = await _withSessionLogging(id, host, value);
         engine.attach(
           handle,
-          onClosed: () {
-            // 종료된 pid는 다른 프로세스가 재사용할 수 있으므로 더는 묻지 않는다.
-            _localShellPids.remove(id);
-            _markStatus(id, SessionStatus.disconnected);
-            _persistOpenSessions();
-          },
+          onClosed: () => _handleLocalSessionClosed(id, localId, value),
         );
         if (value is DaemonTerminalHandle) {
           try {
@@ -2427,6 +2486,36 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         _markError(id, failure);
         _persistOpenSessions();
     }
+  }
+
+  void _handleLocalSessionClosed(
+    String id,
+    String? localId,
+    TerminalSessionHandle handle,
+  ) {
+    if (_userClosed.contains(id)) return;
+    // 종료된 pid는 다른 프로세스가 재사용할 수 있으므로 더는 묻지 않는다.
+    _localShellPids.remove(id);
+    if (handle is PersistentLocalProcessSessionHandle &&
+        !handle.processExited) {
+      // 데몬 연결만 끊겼으면 PTY는 살아 있으므로 재연결할 수 있게 보존한다.
+      _markStatus(id, SessionStatus.disconnected);
+      _persistOpenSessions();
+      return;
+    }
+    unawaited(_cleanupExitedLocalSession(id, localId));
+  }
+
+  Future<void> _cleanupExitedLocalSession(String id, String? localId) async {
+    if (localId != null) {
+      try {
+        await terminateLocalBackgroundSession(localId);
+        return;
+      } catch (_) {
+        // 데몬이 먼저 정리됐거나 앱 로컬 세션이면 탭 정리는 계속한다.
+      }
+    }
+    closeSession(id);
   }
 
   Future<TerminalSessionHandle> _withSessionLogging(
@@ -2481,7 +2570,31 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   }
 
   void _handleSshSessionClosed(String id, SshSessionHandle handle) {
-    if (_userClosed.contains(id)) return;
+    if (_userClosed.contains(id) || !identical(_sshHandles[id], handle)) return;
+    ref
+        .read(sessionDiagnosticsProvider.notifier)
+        .record(
+          id,
+          SessionEventType.remoteChannelClosed,
+          detail: handle.endDescription,
+        );
+    if (handle.attachmentFailed) {
+      _reconnectTimers.remove(id)?.cancel();
+      _sshHandles.remove(id);
+      unawaited(handle.close());
+      _markError(
+        id,
+        RemoteSessionFailure(
+          'tmux 접속 프로세스가 비정상 종료되었습니다. '
+          '원격 작업 종료 여부는 확인되지 않았습니다. '
+          '다시 연결로 같은 작업에 재접속할 수 있습니다. '
+          '(${handle.endDescription})'
+          '${handle.attachmentErrorOutput.isEmpty ? "" : "\n${handle.attachmentErrorOutput}"}',
+        ),
+      );
+      _persistOpenSessions();
+      return;
+    }
     if (handle.remoteProcessExited) {
       closeSession(id);
       return;
@@ -2723,6 +2836,29 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         else
           s,
     ];
+  }
+
+  void setTerminalPreferences(
+    String id,
+    TerminalPreferences preferences, {
+    bool persist = true,
+  }) {
+    state = [
+      for (final session in state)
+        if (session.id == id)
+          session.copyWith(
+            terminalPreferences: preferences
+                .resolved(
+                  session.terminalPreferences.applyTo(
+                    ref.read(appSettingsProvider),
+                  ),
+                )
+                .copyWith(scrollbackLines: session.engine.terminal.maxLines),
+          )
+        else
+          session,
+    ];
+    if (persist) _persistOpenSessions();
   }
 
   void renameSession(String id, String title) {
@@ -3131,6 +3267,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
               id: session.id,
               hostId: session.host.id,
               title: session.title,
+              terminalPreferences: session.terminalPreferences,
+              terminalDefaults: session.terminalDefaults,
               groupId: session.groupId,
               remoteSessionId: session.remoteSessionId,
               localSessionId: session.localSessionId,

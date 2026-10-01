@@ -138,6 +138,7 @@ class CloudSyncSnapshotService {
     'x11Forwarding': host.x11Forwarding,
     'identityId': host.identityId,
     'startupScript': host.startupScript,
+    'terminalPreferences': host.terminalPreferences.toJson(),
     'createdAt': host.createdAt.toUtc().toIso8601String(),
     'updatedAt': host.updatedAt.toUtc().toIso8601String(),
   };

@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../data/models/ssh_key.dart';
 import '../../security/ssh_key_generator.dart';
 import '../../state/providers.dart';
+import '../../security/secure_screen.dart';
 
 /// 이름·패스프레이즈를 받아 Ed25519 키를 만들고 바로 키체인에 저장한다.
 /// 저장된 키를 돌려주고, 취소하면 null.
@@ -86,14 +87,16 @@ class _CreateSheetState extends State<_CreateSheet> {
   @override
   Widget build(BuildContext context) {
     final created = _created;
-    return Padding(
-      padding: EdgeInsets.fromLTRB(
-        20,
-        20,
-        20,
-        20 + MediaQuery.viewInsetsOf(context).bottom,
+    return SecureScreenScope(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          20,
+          20,
+          20,
+          20 + MediaQuery.viewInsetsOf(context).bottom,
+        ),
+        child: created == null ? _form() : _result(created),
       ),
-      child: created == null ? _form() : _result(created),
     );
   }
 

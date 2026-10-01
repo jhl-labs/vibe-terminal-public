@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/theme.dart';
 import '../../data/models/host.dart';
+import '../../session/session_diagnostics.dart';
 import '../../session/session.dart';
 import '../../state/providers.dart';
 
@@ -76,7 +77,8 @@ class _SessionInfoPanelState extends ConsumerState<SessionInfoPanel> {
     return null;
   }
 
-  /// 최근 연결 이벤트를 최신순으로 최대 30건 표시한다.
+  /// 최근 연결 이벤트를 최신순으로 표시한다. 같은 이벤트가 연속되면 횟수로
+  /// 묶어 keepalive 기록이 목록을 채우지 않도록 한다.
   List<Widget> _eventRows(String sessionId) {
     final events = ref.watch(sessionDiagnosticsProvider)[sessionId] ?? const [];
     if (events.isEmpty) {
@@ -87,15 +89,23 @@ class _SessionInfoPanelState extends ConsumerState<SessionInfoPanel> {
         ),
       ];
     }
+    final groups = <_SessionEventGroup>[];
+    for (final event in events.reversed) {
+      if (groups.isNotEmpty && groups.last.matches(event)) {
+        groups.last.count++;
+      } else {
+        groups.add(_SessionEventGroup(event));
+      }
+    }
     return [
-      for (final e in events.reversed.take(30))
+      for (final group in groups.take(30))
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 2),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                _formatTime(e.at),
+                _formatTime(group.event.at),
                 style: const TextStyle(
                   color: VibeColors.onSurfaceDim,
                   fontFamily: kMonoFontFamily,
@@ -106,9 +116,9 @@ class _SessionInfoPanelState extends ConsumerState<SessionInfoPanel> {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  e.detail == null
-                      ? e.type.label
-                      : '${e.type.label} (${e.detail})',
+                  '${group.event.type.label}'
+                  '${group.count > 1 ? ' ×${group.count}' : ''}'
+                  '${group.event.detail == null ? '' : ' (${group.event.detail})'}',
                   style: const TextStyle(
                     color: VibeColors.onSurface,
                     fontSize: 12,
@@ -259,6 +269,17 @@ class _SessionInfoPanelState extends ConsumerState<SessionInfoPanel> {
       ],
     );
   }
+}
+
+class _SessionEventGroup {
+  _SessionEventGroup(this.event);
+
+  /// 이벤트는 최신순으로 탐색하므로 그룹의 시각은 가장 최근 이벤트 시각이다.
+  final SessionEvent event;
+  int count = 1;
+
+  bool matches(SessionEvent other) =>
+      event.type == other.type && event.detail == other.detail;
 }
 
 class _PanelHeader extends StatelessWidget {

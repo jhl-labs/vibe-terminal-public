@@ -359,6 +359,11 @@ class LocalTerminalSessionHandle implements LocalProcessSessionHandle {
 }
 
 class LocalLineSessionHandle implements TerminalSessionHandle {
+  static final _exitCommandPattern = RegExp(
+    r'^(?:exit|logout)(?:\s+[+-]?\d+)?$',
+    caseSensitive: false,
+  );
+
   LocalLineSessionHandle({
     required LocalShellType initialShell,
     required Map<LocalShellType, String> executables,
@@ -942,8 +947,7 @@ class LocalLineSessionHandle implements TerminalSessionHandle {
   }
 
   bool _isExitCommand(String command) {
-    final lower = command.trim().toLowerCase();
-    return lower == 'exit' || lower == 'logout';
+    return _exitCommandPattern.hasMatch(command.trim());
   }
 
   bool _isClearCommand(String command) {

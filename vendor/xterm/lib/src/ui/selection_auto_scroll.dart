@@ -55,16 +55,19 @@ class SelectionAutoScroller {
 
   /// Reports the pointer's vertical position in the viewport's local space.
   /// Positions outside `0..viewportHeight` start (or keep) auto-scrolling.
+  /// [edgeExtent] brings that boundary inside the viewport for touch handles.
   void update({
     required double localY,
     required double viewportHeight,
     required double lineHeight,
+    double edgeExtent = 0,
   }) {
     _lineHeight = lineHeight;
-    if (localY < 0) {
-      _overshoot = localY;
-    } else if (localY > viewportHeight) {
-      _overshoot = localY - viewportHeight;
+    final edge = edgeExtent.clamp(0.0, viewportHeight / 2);
+    if (localY < edge) {
+      _overshoot = localY - edge;
+    } else if (localY > viewportHeight - edge) {
+      _overshoot = localY - (viewportHeight - edge);
     } else {
       _overshoot = 0;
     }

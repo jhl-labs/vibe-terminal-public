@@ -144,7 +144,14 @@ class AgentWorkspaceContext {
 class AgentLaunchCommandBuilder {
   const AgentLaunchCommandBuilder();
 
-  String build(AgentLaunchSpec spec, AgentShellFlavor shell) {
+  /// [repositoryRoot]가 주어지면 격리 worktree 명령을 그 저장소에서 실행한다.
+  /// 실행 대화상자에서 세션의 현재 폴더와 다른 저장소를 고른 경우, 앱이
+  /// 기록한 worktree 위치와 실제로 만들어지는 위치를 일치시키기 위해 필요하다.
+  String build(
+    AgentLaunchSpec spec,
+    AgentShellFlavor shell, {
+    String? repositoryRoot,
+  }) {
     _validateArguments(spec.arguments, shell);
     if (!spec.isolatedWorktree) return _agentInvocation(spec, shell);
 
@@ -154,8 +161,12 @@ class AgentLaunchCommandBuilder {
       throw ArgumentError.value(branch, 'branchName', validationError);
     }
 
+    final root = repositoryRoot?.trim();
+    if (root != null && root.isNotEmpty) {
+      _validateArguments([root], shell);
+    }
     final directoryName = branch.replaceAll('/', '-');
-    return switch (shell) {
+    final command = switch (shell) {
       AgentShellFlavor.posix => _buildPosix(spec, branch, directoryName),
       AgentShellFlavor.powershell => _buildPowerShell(
         spec,
@@ -163,6 +174,14 @@ class AgentLaunchCommandBuilder {
         directoryName,
       ),
       AgentShellFlavor.cmd => _buildCmd(spec, branch, directoryName),
+    };
+    if (root == null || root.isEmpty) return command;
+    return switch (shell) {
+      AgentShellFlavor.posix => 'cd ${_quotePosix(root)} && $command',
+      AgentShellFlavor.powershell =>
+        'Set-Location -LiteralPath ${_quotePowerShell(root)} '
+            '-ErrorAction Stop; $command',
+      AgentShellFlavor.cmd => 'cd /d "$root" && $command',
     };
   }
 
@@ -241,9 +260,11 @@ class AgentLaunchCommandBuilder {
   }
 
   String _buildCmd(AgentLaunchSpec spec, String branch, String directoryName) {
+    // `if not exist X mkdir X && ...`로 쓰면 cmd가 `&&` 뒤 전체를 if 본문으로
+    // 묶어, .vibe-worktrees가 이미 있으면(두 번째 실행부터) worktree 생성과
+    // Agent 실행을 조용히 건너뛴다. mkdir 실패(이미 존재)는 `&`로 무시한다.
     return 'for /f "delims=" %R in (\'git rev-parse --show-toplevel\') do '
-        '(if not exist "%R\\..\\.vibe-worktrees" '
-        'mkdir "%R\\..\\.vibe-worktrees" && '
+        '(mkdir "%R\\..\\.vibe-worktrees" 2>nul & '
         'git -C "%R" worktree add -b "$branch" '
         '"%R\\..\\.vibe-worktrees\\$directoryName" HEAD && '
         'cd /d "%R\\..\\.vibe-worktrees\\$directoryName" && '

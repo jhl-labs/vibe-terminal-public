@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:freezed_annotation/freezed_annotation.dart';
 
+import '../../settings/terminal_preferences.dart';
+
 part 'host.freezed.dart';
 
 enum HostConnectionType { ssh, localShell, kubernetesSsh }
@@ -111,6 +113,7 @@ abstract class Host with _$Host {
     @Default(false) bool x11Forwarding,
     // 세션 연결 직후 자동으로 실행할 명령/스크립트(여러 줄 가능). 비우면 미실행.
     String? startupScript,
+    @Default(TerminalPreferences()) TerminalPreferences terminalPreferences,
     required DateTime createdAt,
     required DateTime updatedAt,
   }) = _Host;

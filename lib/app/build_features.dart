@@ -30,6 +30,7 @@ class BuildFeatures {
     bool? github,
     this.settingsAi = true,
     this.settingsAbout = true,
+    this.telemetry = false,
   }) : settingsGithub = settingsGithub ?? github ?? true;
 
   static const current = BuildFeatures(
@@ -42,6 +43,8 @@ class BuildFeatures {
     portForward: false,
     x11: false,
     settingsX11: false,
+    // 공개판(Core)은 원격 텔레메트리를 포함하지 않는다.
+    telemetry: false,
   );
 
   final bool snippets;
@@ -81,6 +84,10 @@ class BuildFeatures {
   final bool updateCheck;
   final bool settingsAi;
   final bool settingsAbout;
+
+  /// Crashlytics·Analytics·푸시 등 텔레메트리 기능 노출 여부. 공개판(Core)은
+  /// 항상 꺼져 있으며, 모바일 Pro 빌드만 `build-env`에서 명시적으로 켠다.
+  final bool telemetry;
 
   bool get github => settingsGithub;
 

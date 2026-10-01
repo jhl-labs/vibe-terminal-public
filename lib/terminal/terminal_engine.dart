@@ -6,6 +6,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:xterm/xterm.dart';
 
 import 'terminal_session_handle.dart';
+import 'terminal_output_scheduler.dart';
 import 'terminal_resize_dispatcher.dart';
 import 'terminal_sideband.dart';
 
@@ -69,6 +70,7 @@ class TerminalEngine {
   // 1500ms라 16ms 배칭은 영향이 없다.
   static const _outputCoalesceWindow = Duration(milliseconds: 16);
   final List<String> _pendingOutput = [];
+  int _pendingOutputCharacters = 0;
   Timer? _outputFlushTimer;
   final TerminalSidebandDecoder _sidebandDecoder = TerminalSidebandDecoder();
   final TerminalWorkingDirectoryDecoder _cwdDecoder =
@@ -85,6 +87,7 @@ class TerminalEngine {
     _outputFlushTimer?.cancel();
     _outputFlushTimer = null;
     _pendingOutput.clear();
+    _pendingOutputCharacters = 0;
     _sidebandDecoder.reset();
     _cwdDecoder.reset();
     _handle = handle;
@@ -113,10 +116,18 @@ class TerminalEngine {
         onWorkingDirectoryChange?.call(path);
       }
       _pendingOutput.add(data);
+      _pendingOutputCharacters += data.length;
+      if (_pendingOutputCharacters >= 32 * 1024) {
+        _flushPendingOutput();
+        return;
+      }
       _outputFlushTimer ??= Timer(_outputCoalesceWindow, _flushPendingOutput);
     }
 
+    var ended = false;
     void done() {
+      if (ended || !identical(_handle, handle)) return;
+      ended = true;
       resizer.dispose();
       _flushPendingOutput();
       onClosed?.call();
@@ -128,7 +139,7 @@ class TerminalEngine {
           .startChunkedConversion(
             StringConversionSink.from(_TerminalTextSink(consume)),
           );
-      _outputSub = handle.frames.listen(
+      _outputSub = paceTerminalFrames(handle.frames).listen(
         (frame) {
           switch (frame.type) {
             case 'replayStart':
@@ -174,9 +185,23 @@ class TerminalEngine {
       );
     } else {
       _replaying = false;
-      _outputSub = handle.output
-          .transform(const Utf8Decoder(allowMalformed: true))
-          .listen(consume, onDone: done);
+      _outputSub =
+          paceTerminalFrames(
+                handle.output.map(
+                  (data) => TerminalReplayFrame('output', data: data),
+                ),
+              )
+              .map((frame) => frame.data)
+              .transform(const Utf8Decoder(allowMalformed: true))
+              .listen(
+                consume,
+                onDone: done,
+                onError: (Object error) {
+                  consume('\r\n[터미널 연결 오류: $error]\r\n');
+                  done();
+                },
+                cancelOnError: true,
+              );
     }
 
     // 터미널 입력 → 서버 (UTF-8 인코드). 단, xterm 4.0.0의 커서 위치 보고(CPR)
@@ -219,6 +244,7 @@ class TerminalEngine {
     if (_pendingOutput.isEmpty) return;
     final data = _pendingOutput.join();
     _pendingOutput.clear();
+    _pendingOutputCharacters = 0;
     _applyingOutput = true;
     try {
       terminal.write(data);

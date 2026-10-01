@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../session/session.dart';
 import '../terminal/action_bar_catalog.dart';
+import '../adaptive/breakpoints.dart';
 import '../../session/session_pane_layout.dart';
 import 'panes/pane_activity_frame.dart';
 import 'panes/pane_geometry.dart';
@@ -182,6 +183,12 @@ class SessionPaneDeckState extends State<SessionPaneDeck> {
 
   void removeFocused() =>
       _commit(widget.layout.remove(widget.layout.focused.id));
+
+  void swapFocusedWith(String otherPaneId) {
+    if (widget.layout.pane(otherPaneId) == null) return;
+    _commit(widget.layout.swap(widget.layout.focused.id, otherPaneId));
+  }
+
   void undo() {
     setState(() {
       _preview = null;
@@ -428,6 +435,7 @@ class SessionPaneDeckState extends State<SessionPaneDeck> {
     SessionInfo? session,
     Map<String, VoidCallback> actions,
   ) {
+    if (context.isCompact) return const SizedBox.shrink();
     final active = pane.id == widget.layout.focused.id;
     final number = widget.layout.panes.indexWhere((p) => p.id == pane.id) + 1;
     final status = switch (session?.status) {

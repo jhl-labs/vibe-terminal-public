@@ -7,6 +7,7 @@ import '../../data/repositories/ssh_key_repository.dart';
 import '../../data/models/ssh_key.dart';
 import '../../security/ssh_key_scanner.dart';
 import '../../state/providers.dart';
+import '../../security/secure_screen.dart';
 
 /// 파일 또는 `~/.ssh` 스캔으로 개인키를 가져온다. 가져온 개수를 돌려준다.
 Future<int> showSshKeyImportSheet(
@@ -154,61 +155,63 @@ class _ImportSheetState extends State<_ImportSheet> {
   @override
   Widget build(BuildContext context) {
     final candidates = _candidates;
-    return Padding(
-      padding: EdgeInsets.fromLTRB(
-        20,
-        20,
-        20,
-        20 + MediaQuery.viewInsetsOf(context).bottom,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Text(
-            'SSH 키 가져오기',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
-          ),
-          const SizedBox(height: 12),
-          OutlinedButton.icon(
-            onPressed: _busy ? null : _fromFile,
-            icon: const Icon(Icons.file_open),
-            label: const Text('파일 선택'),
-          ),
-          if (_isDesktop) ...[
-            const SizedBox(height: 8),
-            OutlinedButton.icon(
-              onPressed: _busy ? null : _scan,
-              icon: const Icon(Icons.folder_open),
-              label: const Text('~/.ssh 스캔'),
+    return SecureScreenScope(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          20,
+          20,
+          20,
+          20 + MediaQuery.viewInsetsOf(context).bottom,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              'SSH 키 가져오기',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
             ),
-          ],
-          if (candidates != null) ...[
             const SizedBox(height: 12),
-            if (candidates.isEmpty)
-              const Text('~/.ssh 에서 개인키를 찾지 못했습니다')
-            else ...[
-              for (final c in candidates)
-                CheckboxListTile(
-                  dense: true,
-                  value: _selected.contains(c.path),
-                  title: Text(c.fileName),
-                  subtitle: c.encrypted
-                      ? const Text('암호화됨 — 패스프레이즈를 묻습니다')
-                      : null,
-                  onChanged: (v) => setState(
-                    () => v == true
-                        ? _selected.add(c.path)
-                        : _selected.remove(c.path),
-                  ),
-                ),
-              FilledButton(
-                onPressed: _busy || _selected.isEmpty ? null : _fromScan,
-                child: Text('${_selected.length}개 가져오기'),
+            OutlinedButton.icon(
+              onPressed: _busy ? null : _fromFile,
+              icon: const Icon(Icons.file_open),
+              label: const Text('파일 선택'),
+            ),
+            if (_isDesktop) ...[
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _busy ? null : _scan,
+                icon: const Icon(Icons.folder_open),
+                label: const Text('~/.ssh 스캔'),
               ),
             ],
+            if (candidates != null) ...[
+              const SizedBox(height: 12),
+              if (candidates.isEmpty)
+                const Text('~/.ssh 에서 개인키를 찾지 못했습니다')
+              else ...[
+                for (final c in candidates)
+                  CheckboxListTile(
+                    dense: true,
+                    value: _selected.contains(c.path),
+                    title: Text(c.fileName),
+                    subtitle: c.encrypted
+                        ? const Text('암호화됨 — 패스프레이즈를 묻습니다')
+                        : null,
+                    onChanged: (v) => setState(
+                      () => v == true
+                          ? _selected.add(c.path)
+                          : _selected.remove(c.path),
+                    ),
+                  ),
+                FilledButton(
+                  onPressed: _busy || _selected.isEmpty ? null : _fromScan,
+                  child: Text('${_selected.length}개 가져오기'),
+                ),
+              ],
+            ],
           ],
-        ],
+        ),
       ),
     );
   }

@@ -190,7 +190,7 @@ class Buffer {
   /// cursor.
   void eraseLineToCursor() {
     currentLine.isWrapped = false;
-    currentLine.eraseRange(0, _cursorX, terminal.cursor);
+    currentLine.eraseRange(0, min(_cursorX + 1, viewWidth), terminal.cursor);
   }
 
   /// Erases the line at the current cursor position.
@@ -439,7 +439,7 @@ class Buffer {
 
     for (var i = 0; i < linesToMove; i++) {
       final index = absoluteCursorY + i;
-      lines[index] = lines[index + count];
+      lines.moveItem(index + count, index);
     }
 
     for (var i = 0; i < count; i++) {

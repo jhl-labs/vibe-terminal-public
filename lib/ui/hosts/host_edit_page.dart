@@ -13,6 +13,9 @@ import '../../state/providers.dart';
 import '../keychain/identity_edit_sheet.dart';
 import '../keychain/ssh_key_create_sheet.dart';
 import '../keychain/ssh_key_import_sheet.dart';
+import '../../security/secure_screen.dart';
+import '../../settings/terminal_preferences.dart';
+import '../settings/terminal_preferences_editor.dart';
 
 /// 호스트 편집 결과. 공개키를 새로 붙였으면 목록 페이지가 서버 등록을 제안한다.
 class HostEditResult {
@@ -36,6 +39,7 @@ class HostEditPage extends ConsumerStatefulWidget {
 
 class _HostEditPageState extends ConsumerState<HostEditPage> {
   final _formKey = GlobalKey<FormState>();
+  TerminalPreferences _terminalPreferences = const TerminalPreferences();
   final _alias = TextEditingController();
   final _hostname = TextEditingController();
   final _port = TextEditingController(text: '22');
@@ -104,6 +108,7 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
     super.initState();
     final existing = widget.existing;
     if (existing == null) return;
+    _terminalPreferences = existing.terminalPreferences;
     _alias.text = existing.alias;
     _hostname.text = existing.hostname;
     _port.text = existing.port.toString();
@@ -318,6 +323,7 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
               localShellType: _localShellType,
               workingDirectory: workingDirectory,
               startupScript: startupScript,
+              terminalPreferences: _terminalPreferences,
               credentialRef: credRef,
               jumpHostId: _isDirectSsh ? _jumpHostId : null,
               kubernetesGateway: _isKubernetesSsh
@@ -757,6 +763,13 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
             'Pod에 sshd는 필요 없고 nc, socat 또는 bash 중 하나만 있으면 됩니다.',
             style: TextStyle(color: VibeColors.onSurfaceDim, fontSize: 12),
           ),
+          const SizedBox(height: 6),
+          const Text(
+            '인증은 경로별로 분리됩니다. Kubernetes 인증은 게이트웨이의 kubeconfig를 사용하고, '
+            '최종 SSH는 이 프로필의 사용자명·인증 방식을 사용합니다. '
+            'SSH 게이트웨이를 고르면 해당 SSH 호스트 프로필 인증이 먼저 필요합니다.',
+            style: TextStyle(color: VibeColors.onSurfaceDim, fontSize: 12),
+          ),
           const SizedBox(height: 16),
           _RouteStep(
             index: 1,
@@ -854,305 +867,336 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
     final bottomInset = MediaQuery.viewPaddingOf(context).bottom;
     final supportsX11Forwarding =
         ref.watch(buildFeaturesProvider).x11 && _platformSupportsX11Forwarding;
-    return Scaffold(
-      appBar: AppBar(title: Text(_editing ? '호스트 수정' : '호스트 추가')),
-      body: ColoredBox(
-        color: VibeColors.bg,
-        child: Form(
-          key: _formKey,
-          autovalidateMode: AutovalidateMode.onUserInteraction,
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 720),
-              // 폼 필드는 스크롤로 사라지면 안 된다(입력/포커스/검증 상태 유지).
-              // ListView는 화면 밖 필드를 지연 해제하므로 SingleChildScrollView로
-              // 모든 필드를 항상 빌드한 채 둔다.
-              child: SingleChildScrollView(
-                padding: EdgeInsets.fromLTRB(18, 18, 18, 18 + bottomInset),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    const Text(
-                      'Connection profile',
-                      style: TextStyle(
-                        color: VibeColors.onSurface,
-                        fontWeight: FontWeight.w800,
-                        fontSize: 16,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      _connectionProfileSubtitle,
-                      style: const TextStyle(
-                        color: VibeColors.onSurfaceDim,
-                        fontSize: 12,
-                      ),
-                    ),
-                    const SizedBox(height: 18),
-                    SegmentedButton<HostConnectionType>(
-                      segments: [
-                        const ButtonSegment(
-                          value: HostConnectionType.ssh,
-                          icon: Icon(Icons.dns_outlined),
-                          label: Text('SSH'),
+    return SecureScreenScope(
+      child: Scaffold(
+        appBar: AppBar(title: Text(_editing ? '호스트 수정' : '호스트 추가')),
+        body: ColoredBox(
+          color: VibeColors.bg,
+          child: Form(
+            key: _formKey,
+            autovalidateMode: AutovalidateMode.onUserInteraction,
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 720),
+                // 폼 필드는 스크롤로 사라지면 안 된다(입력/포커스/검증 상태 유지).
+                // ListView는 화면 밖 필드를 지연 해제하므로 SingleChildScrollView로
+                // 모든 필드를 항상 빌드한 채 둔다.
+                child: SingleChildScrollView(
+                  padding: EdgeInsets.fromLTRB(18, 18, 18, 18 + bottomInset),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Text(
+                        'Connection profile',
+                        style: TextStyle(
+                          color: VibeColors.onSurface,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 16,
                         ),
-                        const ButtonSegment(
-                          value: HostConnectionType.kubernetesSsh,
-                          icon: Icon(Icons.hub_outlined),
-                          label: Text('Kubernetes'),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        _connectionProfileSubtitle,
+                        style: const TextStyle(
+                          color: VibeColors.onSurfaceDim,
+                          fontSize: 12,
                         ),
-                        if (_supportsLocalShell)
+                      ),
+                      const SizedBox(height: 18),
+                      SegmentedButton<HostConnectionType>(
+                        segments: [
                           const ButtonSegment(
-                            value: HostConnectionType.localShell,
-                            icon: Icon(Icons.terminal),
-                            label: Text('로컬 셸'),
+                            value: HostConnectionType.ssh,
+                            icon: Icon(Icons.dns_outlined),
+                            label: Text('SSH'),
                           ),
-                      ],
-                      selected: {_connectionType},
-                      onSelectionChanged: _saving
-                          ? null
-                          : (values) {
-                              setState(() {
-                                _connectionType = values.single;
-                                if (_connectionType ==
-                                    HostConnectionType.localShell) {
-                                  _fillDefaultWorkingDirectory();
-                                }
-                              });
-                            },
-                    ),
-                    const SizedBox(height: 16),
-                    TextFormField(
-                      controller: _alias,
-                      decoration: const InputDecoration(
-                        labelText: '별칭',
-                        prefixIcon: Icon(Icons.label_outline),
-                      ),
-                      textInputAction: TextInputAction.next,
-                    ),
-                    if (_isSsh) ...[
-                      const SizedBox(height: 12),
-                      if (_isDirectSsh) ...[
-                        ..._buildTargetFields(),
-                        const SizedBox(height: 12),
-                        _buildJumpHostDropdown(),
-                      ] else
-                        _buildKubernetesRouteFields(),
-                      const SizedBox(height: 12),
-                      _buildSessionContinuityTile(),
-                      if (supportsX11Forwarding) ...[
-                        const SizedBox(height: 12),
-                        Material(
-                          color: Colors.transparent,
-                          child: SwitchListTile(
-                            value: _x11Forwarding,
-                            onChanged: _saving || _keepRemoteSession
-                                ? null
-                                : (value) =>
-                                      setState(() => _x11Forwarding = value),
-                            title: const Text('X11 forwarding'),
-                            subtitle: Text(
-                              _keepRemoteSession
-                                  ? '작업 이어가기와 동시에 사용할 수 없습니다'
-                                  : Platform.isLinux
-                                  ? '원격 GUI 앱을 로컬 X11/XWayland 화면으로 전달합니다'
-                                  : '외부 X server(XQuartz, VcXsrv 등)가 필요합니다',
+                          const ButtonSegment(
+                            value: HostConnectionType.kubernetesSsh,
+                            icon: Icon(Icons.hub_outlined),
+                            label: Text('Kubernetes'),
+                          ),
+                          if (_supportsLocalShell)
+                            const ButtonSegment(
+                              value: HostConnectionType.localShell,
+                              icon: Icon(Icons.terminal),
+                              label: Text('로컬 셸'),
                             ),
-                            secondary: const Icon(Icons.open_in_new),
-                            contentPadding: EdgeInsets.zero,
-                          ),
-                        ),
-                      ],
-                      const SizedBox(height: 12),
-                      SegmentedButton<bool>(
-                        segments: const [
-                          ButtonSegment(value: false, label: Text('이 호스트 전용')),
-                          ButtonSegment(
-                            value: true,
-                            label: Text('저장된 Identity'),
-                          ),
                         ],
-                        selected: {_useSharedIdentity},
+                        selected: {_connectionType},
                         onSelectionChanged: _saving
                             ? null
-                            : (v) =>
-                                  setState(() => _useSharedIdentity = v.single),
+                            : (values) {
+                                setState(() {
+                                  _connectionType = values.single;
+                                  if (_connectionType ==
+                                      HostConnectionType.localShell) {
+                                    _fillDefaultWorkingDirectory();
+                                  }
+                                });
+                              },
                       ),
-                      const SizedBox(height: 12),
-                      if (_useSharedIdentity)
-                        _buildIdentityDropdown()
-                      else ...[
-                        TextFormField(
-                          controller: _username,
-                          decoration: const InputDecoration(
-                            labelText: '사용자명',
-                            prefixIcon: Icon(Icons.person_outline),
-                          ),
-                          textInputAction: TextInputAction.next,
-                          validator: (value) => _required(value, '사용자명을 입력하세요'),
+                      const SizedBox(height: 16),
+                      TextFormField(
+                        controller: _alias,
+                        decoration: const InputDecoration(
+                          labelText: '별칭',
+                          prefixIcon: Icon(Icons.label_outline),
                         ),
+                        textInputAction: TextInputAction.next,
+                      ),
+                      if (_isSsh) ...[
                         const SizedBox(height: 12),
-                        DropdownButtonFormField<HostAuthType>(
-                          key: const ValueKey('host-auth-type'),
-                          initialValue: _authType,
-                          decoration: const InputDecoration(
-                            labelText: '인증 방식',
-                            prefixIcon: Icon(Icons.key_outlined),
+                        if (_isDirectSsh) ...[
+                          ..._buildTargetFields(),
+                          const SizedBox(height: 12),
+                          _buildJumpHostDropdown(),
+                        ] else
+                          _buildKubernetesRouteFields(),
+                        const SizedBox(height: 12),
+                        _buildSessionContinuityTile(),
+                        if (supportsX11Forwarding) ...[
+                          const SizedBox(height: 12),
+                          Material(
+                            color: Colors.transparent,
+                            child: SwitchListTile(
+                              value: _x11Forwarding,
+                              onChanged: _saving || _keepRemoteSession
+                                  ? null
+                                  : (value) =>
+                                        setState(() => _x11Forwarding = value),
+                              title: const Text('X11 forwarding'),
+                              subtitle: Text(
+                                _keepRemoteSession
+                                    ? '작업 이어가기와 동시에 사용할 수 없습니다'
+                                    : Platform.isLinux
+                                    ? '원격 GUI 앱을 로컬 X11/XWayland 화면으로 전달합니다'
+                                    : '외부 X server(XQuartz, VcXsrv 등)가 필요합니다',
+                              ),
+                              secondary: const Icon(Icons.open_in_new),
+                              contentPadding: EdgeInsets.zero,
+                            ),
                           ),
-                          items: const [
-                            DropdownMenuItem(
-                              value: HostAuthType.password,
-                              child: Text('비밀번호'),
+                        ],
+                        const SizedBox(height: 12),
+                        SegmentedButton<bool>(
+                          segments: const [
+                            ButtonSegment(
+                              value: false,
+                              label: Text('이 호스트 전용'),
                             ),
-                            DropdownMenuItem(
-                              value: HostAuthType.publicKey,
-                              child: Text('공개키'),
-                            ),
-                            DropdownMenuItem(
-                              value: HostAuthType.keyboardInteractive,
-                              child: Text('키보드 인터랙티브 / 2FA'),
+                            ButtonSegment(
+                              value: true,
+                              label: Text('저장된 Identity'),
                             ),
                           ],
-                          onChanged: _saving
+                          selected: {_useSharedIdentity},
+                          onSelectionChanged: _saving
                               ? null
-                              : (value) {
-                                  if (value == null) return;
-                                  setState(() {
-                                    _authType = value;
-                                    if (value != HostAuthType.publicKey) {
-                                      _agentForwarding = false;
-                                    }
-                                  });
-                                },
+                              : (v) => setState(
+                                  () => _useSharedIdentity = v.single,
+                                ),
                         ),
-                        if (_authType == HostAuthType.password)
+                        const SizedBox(height: 12),
+                        if (_useSharedIdentity)
+                          _buildIdentityDropdown()
+                        else ...[
                           TextFormField(
-                            controller: _password,
-                            decoration: InputDecoration(
-                              labelText: '비밀번호',
-                              prefixIcon: const Icon(Icons.lock_outline),
-                              helperText: _canKeepCredential
-                                  ? '비워두면 기존 비밀번호를 유지합니다'
-                                  : null,
+                            controller: _username,
+                            decoration: const InputDecoration(
+                              labelText: '사용자명',
+                              prefixIcon: Icon(Icons.person_outline),
                             ),
-                            obscureText: true,
-                            textInputAction: TextInputAction.done,
-                            validator: _validatePassword,
-                            onFieldSubmitted: (_) => _saving ? null : _save(),
-                          )
-                        else if (_authType == HostAuthType.publicKey)
-                          _buildKeyPicker()
-                        else
-                          const _KeyboardInteractiveHint(),
-                      ],
-                      if (_effectiveAuthType() == HostAuthType.publicKey) ...[
-                        const SizedBox(height: 8),
-                        Material(
-                          color: Colors.transparent,
-                          child: SwitchListTile(
-                            key: const ValueKey('ssh-agent-forwarding'),
-                            value: _agentForwarding,
+                            textInputAction: TextInputAction.next,
+                            validator: (value) =>
+                                _required(value, '사용자명을 입력하세요'),
+                          ),
+                          const SizedBox(height: 12),
+                          DropdownButtonFormField<HostAuthType>(
+                            key: const ValueKey('host-auth-type'),
+                            initialValue: _authType,
+                            decoration: const InputDecoration(
+                              labelText: '인증 방식',
+                              prefixIcon: Icon(Icons.key_outlined),
+                            ),
+                            items: const [
+                              DropdownMenuItem(
+                                value: HostAuthType.password,
+                                child: Text('비밀번호'),
+                              ),
+                              DropdownMenuItem(
+                                value: HostAuthType.publicKey,
+                                child: Text('공개키'),
+                              ),
+                              DropdownMenuItem(
+                                value: HostAuthType.keyboardInteractive,
+                                child: Text('키보드 인터랙티브 / 2FA'),
+                              ),
+                            ],
                             onChanged: _saving
                                 ? null
-                                : (value) =>
-                                      setState(() => _agentForwarding = value),
-                            title: const Text('SSH agent forwarding'),
-                            subtitle: const Text(
-                              '원격 프로세스가 이 개인키로 서명을 요청할 수 있습니다. 신뢰하는 서버에서만 켜세요.',
-                            ),
-                            secondary: const Icon(Icons.key_rounded),
-                            contentPadding: EdgeInsets.zero,
+                                : (value) {
+                                    if (value == null) return;
+                                    setState(() {
+                                      _authType = value;
+                                      if (value != HostAuthType.publicKey) {
+                                        _agentForwarding = false;
+                                      }
+                                    });
+                                  },
                           ),
-                        ),
-                      ],
-                    ] else ...[
-                      if (_showShellPicker) ...[
+                          if (_authType == HostAuthType.password)
+                            TextFormField(
+                              controller: _password,
+                              decoration: InputDecoration(
+                                labelText: '비밀번호',
+                                prefixIcon: const Icon(Icons.lock_outline),
+                                helperText: _canKeepCredential
+                                    ? '비워두면 기존 비밀번호를 유지합니다'
+                                    : null,
+                              ),
+                              obscureText: true,
+                              textInputAction: TextInputAction.done,
+                              validator: _validatePassword,
+                              onFieldSubmitted: (_) => _saving ? null : _save(),
+                            )
+                          else if (_authType == HostAuthType.publicKey)
+                            _buildKeyPicker()
+                          else
+                            const _KeyboardInteractiveHint(),
+                        ],
+                        if (_effectiveAuthType() == HostAuthType.publicKey) ...[
+                          const SizedBox(height: 8),
+                          Material(
+                            color: Colors.transparent,
+                            child: SwitchListTile(
+                              key: const ValueKey('ssh-agent-forwarding'),
+                              value: _agentForwarding,
+                              onChanged: _saving
+                                  ? null
+                                  : (value) => setState(
+                                      () => _agentForwarding = value,
+                                    ),
+                              title: const Text('SSH agent forwarding'),
+                              subtitle: const Text(
+                                '원격 프로세스가 이 개인키로 서명을 요청할 수 있습니다. 신뢰하는 서버에서만 켜세요.',
+                              ),
+                              secondary: const Icon(Icons.key_rounded),
+                              contentPadding: EdgeInsets.zero,
+                            ),
+                          ),
+                        ],
+                      ] else ...[
+                        if (_showShellPicker) ...[
+                          const SizedBox(height: 12),
+                          DropdownButtonFormField<LocalShellType>(
+                            initialValue: _localShellType,
+                            decoration: const InputDecoration(
+                              labelText: '셸',
+                              prefixIcon: Icon(Icons.terminal),
+                            ),
+                            items: const [
+                              DropdownMenuItem(
+                                value: LocalShellType.powershell,
+                                child: Text('PowerShell'),
+                              ),
+                              DropdownMenuItem(
+                                value: LocalShellType.cmd,
+                                child: Text('Command Prompt'),
+                              ),
+                              DropdownMenuItem(
+                                value: LocalShellType.wsl,
+                                child: Text('WSL'),
+                              ),
+                            ],
+                            onChanged: _saving
+                                ? null
+                                : (value) {
+                                    if (value == null) return;
+                                    setState(() {
+                                      final previousDefault =
+                                          _defaultWorkingDirectory(
+                                            _localShellType,
+                                          );
+                                      final shouldOverwrite =
+                                          _workingDirectory.text
+                                              .trim()
+                                              .isEmpty ||
+                                          _workingDirectory.text.trim() ==
+                                              previousDefault;
+                                      _localShellType = value;
+                                      _fillDefaultWorkingDirectory(
+                                        overwrite: shouldOverwrite,
+                                      );
+                                    });
+                                  },
+                          ),
+                        ],
                         const SizedBox(height: 12),
-                        DropdownButtonFormField<LocalShellType>(
-                          initialValue: _localShellType,
+                        TextFormField(
+                          controller: _workingDirectory,
                           decoration: const InputDecoration(
-                            labelText: '셸',
-                            prefixIcon: Icon(Icons.terminal),
+                            labelText: '시작 디렉터리',
+                            prefixIcon: Icon(Icons.folder_outlined),
+                            helperText: '비워두면 기본 홈/현재 셸 기본 경로에서 시작합니다',
                           ),
-                          items: const [
-                            DropdownMenuItem(
-                              value: LocalShellType.powershell,
-                              child: Text('PowerShell'),
-                            ),
-                            DropdownMenuItem(
-                              value: LocalShellType.cmd,
-                              child: Text('Command Prompt'),
-                            ),
-                            DropdownMenuItem(
-                              value: LocalShellType.wsl,
-                              child: Text('WSL'),
-                            ),
-                          ],
-                          onChanged: _saving
-                              ? null
-                              : (value) {
-                                  if (value == null) return;
-                                  setState(() {
-                                    final previousDefault =
-                                        _defaultWorkingDirectory(
-                                          _localShellType,
-                                        );
-                                    final shouldOverwrite =
-                                        _workingDirectory.text.trim().isEmpty ||
-                                        _workingDirectory.text.trim() ==
-                                            previousDefault;
-                                    _localShellType = value;
-                                    _fillDefaultWorkingDirectory(
-                                      overwrite: shouldOverwrite,
-                                    );
-                                  });
-                                },
+                          textInputAction: TextInputAction.done,
+                          onFieldSubmitted: (_) => _saving ? null : _save(),
                         ),
+                        const SizedBox(height: 12),
+                        const _LocalShellHint(),
                       ],
                       const SizedBox(height: 12),
                       TextFormField(
-                        controller: _workingDirectory,
+                        controller: _startupScript,
                         decoration: const InputDecoration(
-                          labelText: '시작 디렉터리',
-                          prefixIcon: Icon(Icons.folder_outlined),
-                          helperText: '비워두면 기본 홈/현재 셸 기본 경로에서 시작합니다',
+                          labelText: '시작 스크립트 (선택)',
+                          prefixIcon: Icon(Icons.play_circle_outline),
+                          helperText: '연결 직후 자동 실행할 명령. 여러 줄은 순차 실행됩니다',
+                          alignLabelWithHint: true,
                         ),
-                        textInputAction: TextInputAction.done,
-                        onFieldSubmitted: (_) => _saving ? null : _save(),
+                        minLines: 1,
+                        maxLines: 5,
+                        keyboardType: TextInputType.multiline,
                       ),
-                      const SizedBox(height: 12),
-                      const _LocalShellHint(),
+                      const SizedBox(height: 16),
+                      OutlinedButton.icon(
+                        icon: const Icon(Icons.palette_outlined),
+                        label: const Text('호스트 기본 터미널 설정'),
+                        onPressed: _saving
+                            ? null
+                            : () async {
+                                final value = await showTerminalPreferencesDialog(
+                                  context,
+                                  title: '호스트 기본 터미널 설정',
+                                  description:
+                                      '이 호스트에서 새로 여는 세션에 적용됩니다. 지정하지 않은 항목은 전역 기본값을 따릅니다. 호스트 저장 시 함께 저장됩니다.',
+                                  initialValue: _terminalPreferences,
+                                  defaults: ref.read(appSettingsProvider),
+                                  hostDefaults: true,
+                                );
+                                if (value != null && mounted) {
+                                  setState(() => _terminalPreferences = value);
+                                }
+                              },
+                      ),
+                      const SizedBox(height: 16),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: _saving ? null : _save,
+                          icon: _saving
+                              ? const SizedBox.square(
+                                  dimension: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.save_outlined, size: 18),
+                          label: const Text('저장'),
+                        ),
+                      ),
                     ],
-                    const SizedBox(height: 12),
-                    TextFormField(
-                      controller: _startupScript,
-                      decoration: const InputDecoration(
-                        labelText: '시작 스크립트 (선택)',
-                        prefixIcon: Icon(Icons.play_circle_outline),
-                        helperText: '연결 직후 자동 실행할 명령. 여러 줄은 순차 실행됩니다',
-                        alignLabelWithHint: true,
-                      ),
-                      minLines: 1,
-                      maxLines: 5,
-                      keyboardType: TextInputType.multiline,
-                    ),
-                    const SizedBox(height: 16),
-                    SizedBox(
-                      width: double.infinity,
-                      child: FilledButton.icon(
-                        onPressed: _saving ? null : _save,
-                        icon: _saving
-                            ? const SizedBox.square(
-                                dimension: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Icon(Icons.save_outlined, size: 18),
-                        label: const Text('저장'),
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
               ),
             ),

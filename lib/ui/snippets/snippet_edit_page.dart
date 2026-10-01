@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../app/theme.dart';
 import '../../data/models/snippet.dart';
 import '../../state/providers.dart';
 
@@ -87,51 +88,108 @@ class _SnippetEditPageState extends ConsumerState<SnippetEditPage> {
       appBar: AppBar(
         title: Text(widget.existing == null ? '스니펫 추가' : '스니펫 편집'),
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: ListView(
-          children: [
-            TextField(
-              controller: _name,
-              decoration: const InputDecoration(labelText: '이름'),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _body,
-              decoration: const InputDecoration(labelText: '본문 ({{변수}} 사용 가능)'),
-              maxLines: 6,
-            ),
-            const SizedBox(height: 16),
-            SegmentedButton<SnippetScope>(
-              segments: [
-                const ButtonSegment(
-                  value: SnippetScope.global,
-                  label: Text('글로벌'),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextField(
+                controller: _name,
+                decoration: const InputDecoration(
+                  labelText: '이름',
+                  prefixIcon: Icon(Icons.label_outline),
                 ),
-                ButtonSegment(
-                  value: SnippetScope.host,
-                  label: const Text('이 호스트'),
-                  enabled: hostScopeEnabled,
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 20,
+                runSpacing: 10,
+                children: [
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('저장 범위'),
+                      const SizedBox(height: 4),
+                      SegmentedButton<SnippetScope>(
+                        segments: [
+                          const ButtonSegment(
+                            value: SnippetScope.global,
+                            label: Text('글로벌'),
+                          ),
+                          ButtonSegment(
+                            value: SnippetScope.host,
+                            label: const Text('이 호스트'),
+                            enabled: hostScopeEnabled,
+                          ),
+                        ],
+                        selected: {_scope},
+                        onSelectionChanged: (s) =>
+                            setState(() => _scope = s.first),
+                      ),
+                    ],
+                  ),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('기본 동작'),
+                      const SizedBox(height: 4),
+                      SegmentedButton<SnippetRunMode>(
+                        segments: const [
+                          ButtonSegment(
+                            value: SnippetRunMode.paste,
+                            label: Text('붙여넣기'),
+                          ),
+                          ButtonSegment(
+                            value: SnippetRunMode.run,
+                            label: Text('실행'),
+                          ),
+                        ],
+                        selected: {_mode},
+                        onSelectionChanged: (s) =>
+                            setState(() => _mode = s.first),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Expanded(
+                child: TextField(
+                  controller: _body,
+                  expands: true,
+                  minLines: null,
+                  maxLines: null,
+                  keyboardType: TextInputType.multiline,
+                  textInputAction: TextInputAction.newline,
+                  textAlignVertical: TextAlignVertical.top,
+                  style: const TextStyle(
+                    fontFamily: kMonoFontFamily,
+                    fontFamilyFallback: kMonoFontFallback,
+                    fontSize: 13,
+                    height: 1.4,
+                  ),
+                  decoration: const InputDecoration(
+                    labelText: '본문 ({{변수}} 사용 가능)',
+                    hintText: '여러 줄 스크립트를 입력하세요',
+                    alignLabelWithHint: true,
+                    border: OutlineInputBorder(),
+                  ),
                 ),
-              ],
-              selected: {_scope},
-              onSelectionChanged: (s) => setState(() => _scope = s.first),
-            ),
-            const SizedBox(height: 16),
-            SegmentedButton<SnippetRunMode>(
-              segments: const [
-                ButtonSegment(value: SnippetRunMode.paste, label: Text('붙여넣기')),
-                ButtonSegment(value: SnippetRunMode.run, label: Text('실행')),
-              ],
-              selected: {_mode},
-              onSelectionChanged: (s) => setState(() => _mode = s.first),
-            ),
-            const SizedBox(height: 24),
-            FilledButton(
-              onPressed: _saving ? null : _save,
-              child: const Text('저장'),
-            ),
-          ],
+              ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: _saving ? null : _save,
+                icon: _saving
+                    ? const SizedBox.square(
+                        dimension: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.save_outlined),
+                label: Text(_saving ? '저장 중…' : '저장'),
+              ),
+            ],
+          ),
         ),
       ),
     );

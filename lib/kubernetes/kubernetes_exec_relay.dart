@@ -219,9 +219,16 @@ class ProcessKubernetesRelayService implements KubernetesRelayService {
   ) async {
     final validation = spec.validate();
     if (validation != null) return Err(KubernetesFailure(validation));
+    final contextLabel = spec.context?.trim().isNotEmpty ?? false
+        ? spec.context!.trim()
+        : '현재 kubeconfig';
+    final containerLabel = spec.container?.trim().isNotEmpty ?? false
+        ? spec.container!.trim()
+        : 'Pod 기본 컨테이너';
     final where =
         '${gateway.label}에서 ${spec.podLabel} 경유 '
-        '${spec.targetHost}:${spec.targetPort}';
+        '${spec.targetHost}:${spec.targetPort} '
+        '(context: $contextLabel, container: $containerLabel)';
 
     final _RelayEndpoint endpoint;
     try {

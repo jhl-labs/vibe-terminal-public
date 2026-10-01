@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show Locale, PlatformDispatcher;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -9,6 +10,7 @@ import '../app/build_features.dart';
 import '../app/error_reporter.dart';
 import '../app/keepalive_pulse.dart';
 import '../app/update_checker.dart';
+import '../app/telemetry_notice.dart';
 import '../app/update_preferences.dart';
 import '../community/github_community_service.dart';
 import '../data/db/app_database.dart';
@@ -46,6 +48,8 @@ import '../ssh/ssh_service.dart';
 import '../ssh/remote_session_catalog.dart';
 import '../sync/cloud_sync_snapshot.dart';
 import '../sync/github_sync_service.dart';
+import '../telemetry/telemetry.dart';
+import '../telemetry/telemetry_factory.dart';
 
 final appDatabaseProvider = Provider<AppDatabase>((ref) {
   final db = AppDatabase();
@@ -141,6 +145,10 @@ final buildFeaturesProvider = Provider<BuildFeatures>(
   (ref) => BuildFeatures.current,
 );
 
+final telemetryProvider = Provider<Telemetry>(
+  (ref) => createTelemetry(ref.read(buildFeaturesProvider)),
+);
+
 final gitHubSyncServiceProvider = Provider<GitHubSyncService>(
   (ref) => GitHubSyncService(),
 );
@@ -191,7 +199,11 @@ final hostListProvider = FutureProvider<List<Host>>(
 );
 
 final backgroundKeepAliveProvider = Provider<BackgroundKeepAlive>(
-  (ref) => PlatformBackgroundKeepAlive(),
+  (ref) => PlatformBackgroundKeepAlive(
+    // 포그라운드 서비스 상태를 오류 보고의 커스텀 키로 남긴다.
+    onStateChanged: (active) =>
+        ref.read(telemetryProvider).setKey('platform_keepalive', active),
+  ),
 );
 
 /// keepalive 박자 공급원(플랫폼별). 테스트에서 Fake로 치환한다.
@@ -213,6 +225,11 @@ final defaultLocalHostSeederProvider = Provider<DefaultLocalHostSeeder>(
     ref.watch(hostRepositoryProvider),
     candidates: defaultLocalHostCandidatesForThisDevice(),
   ),
+);
+
+/// 텔레메트리 첫 실행 안내를 이미 보여 줬는지 기억한다.
+final telemetryNoticeFlagProvider = Provider<TelemetryNoticeFlag>(
+  (ref) => TelemetryNoticeFlag(),
 );
 
 /// 건너뛴 버전과 마지막 조회 시각을 기억한다.
@@ -263,6 +280,54 @@ class SessionGroupController extends Notifier<SessionGroupState> {
     );
     _persist();
     return id;
+  }
+
+  /// [groupId] 그룹의 이름을 바꾼다. 고정 그룹(default/apps)과 없는 그룹은
+  /// 무시한다. 빈 이름은 기존 이름을 유지한다.
+  void renameGroup(String groupId, String name) {
+    final index = state.groups.indexWhere((g) => g.id == groupId);
+    if (index < 0) return;
+    final group = state.groups[index];
+    if (group.isFixed) return;
+    final renamed = SessionGroup(
+      id: group.id,
+      name: SessionGroup.cleanName(name, group.name),
+    );
+    if (renamed == group) return;
+    state = state.copyWith(groups: [...state.groups]..[index] = renamed);
+    _persist();
+  }
+
+  /// [groupId] 그룹을 삭제한다. 고정 그룹(default/apps)은 삭제하지 않는다.
+  /// 소속 세션은 모두 기본 그룹으로 옮긴 뒤 그룹 목록에서 제거한다.
+  void deleteGroup(String groupId) {
+    SessionGroup? group;
+    for (final g in state.groups) {
+      if (g.id == groupId) {
+        group = g;
+        break;
+      }
+    }
+    if (group == null || group.isFixed) return;
+
+    final sessions = ref.read(sessionManagerProvider);
+    final sessionManager = ref.read(sessionManagerProvider.notifier);
+    for (final session in sessions) {
+      if (session.groupId == groupId) {
+        sessionManager.moveSessionToGroup(session.id, defaultSessionGroupId);
+      }
+    }
+
+    state = state.copyWith(
+      groups: [
+        for (final g in state.groups)
+          if (g.id != groupId) g,
+      ],
+      activeGroupId: state.activeGroupId == groupId
+          ? defaultSessionGroupId
+          : state.activeGroupId,
+    );
+    _persist();
   }
 
   void setActive(String groupId) {
@@ -455,6 +520,15 @@ final appSettingsStoreProvider = Provider<AppSettingsStore>(
   (ref) => AppSettingsStore(),
 );
 
+/// 결정되지 않은 텔레메트리 설정을 [locale] 기준 기본값으로 채우고 configured 로
+/// 표시한다. 이미 결정된 설정은 그대로 돌려준다.
+AppSettings applyTelemetryDefaults(AppSettings settings, Locale? locale) {
+  if (settings.telemetry.configured) return settings;
+  return settings.copyWith(
+    telemetry: TelemetrySettings.defaultsFor(locale).copyWith(configured: true),
+  );
+}
+
 class AppSettingsController extends Notifier<AppSettings> {
   bool _loadStarted = false;
 
@@ -468,8 +542,15 @@ class AppSettingsController extends Notifier<AppSettings> {
   }
 
   Future<void> _load() async {
-    var loaded = await ref.read(appSettingsStoreProvider).load();
+    // 비동기 대기 사이에 컨테이너가 dispose될 수 있다(앱 종료, 테스트 정리).
+    // 그 뒤 ref를 만지면 riverpod이 예외를 던지므로 각 대기 후 확인한다.
+    final settingsStore = ref.read(appSettingsStoreProvider);
     final store = ref.read(secureStoreProvider);
+    var loaded = await settingsStore.load();
+    if (!ref.mounted) return;
+    // 손상돼 읽지 못한 파일은 기본값으로 덮어쓰지 않는다(진단 증거 보존).
+    final canPersistDefaults = loaded != null || !await settingsStore.exists();
+    if (!ref.mounted) return;
     // 비밀값은 키마다 따로 읽는다. 한 키의 읽기 실패가 나머지(예: GitHub
     // 로그인 token)까지 버리게 하면 "매번 다시 로그인" 증상이 되고, 원인도
     // 남지 않는다.
@@ -511,6 +592,15 @@ class AppSettingsController extends Notifier<AppSettings> {
         ),
       );
     }
+    if (!ref.mounted) return;
+    // 텔레메트리 설정이 아직 결정되지 않았으면(첫 실행, 또는 이 키가 없던
+    // 버전에서 올라온 설치) 기기 로케일 기준 기본값(EEA 는 사용 통계 끔)을
+    // 한 번 정해 저장한다. 다음 실행부터 main.dart 의 부트스트랩이 같은 값을 읽는다.
+    final base = loaded ?? state;
+    if (!base.telemetry.configured) {
+      loaded = applyTelemetryDefaults(base, PlatformDispatcher.instance.locale);
+      if (canPersistDefaults) unawaited(settingsStore.save(loaded));
+    }
     if (loaded != null) state = loaded;
   }
 
@@ -537,6 +627,7 @@ class AppSettingsController extends Notifier<AppSettings> {
     final previousGithubToken = state.cloudSync.github.token;
     final previousGithubRefreshToken = state.cloudSync.github.refreshToken;
     final previousSyncEncryptionKey = state.cloudSync.encryptionKey;
+    final previousTelemetry = state.telemetry;
     state = settings;
     unawaited(ref.read(appSettingsStoreProvider).save(settings));
     if (settings.ai.apiToken != previousToken) {
@@ -575,6 +666,9 @@ class AppSettingsController extends Notifier<AppSettings> {
           settings.cloudSync.encryptionKey,
         ),
       );
+    }
+    if (settings.telemetry != previousTelemetry) {
+      unawaited(ref.read(telemetryProvider).applySettings(settings.telemetry));
     }
   }
 

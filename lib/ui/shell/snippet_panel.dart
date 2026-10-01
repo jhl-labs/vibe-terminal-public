@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/theme.dart';
@@ -8,8 +9,10 @@ import '../../data/models/snippet.dart';
 import '../../session/session.dart';
 import '../../snippets/placeholder_parser.dart';
 import '../../state/providers.dart';
+import '../../telemetry/telemetry.dart';
 import '../snippets/placeholder_form.dart';
 import '../snippets/snippet_edit_page.dart';
+import '../snippets/snippet_view_dialog.dart';
 
 /// 우측 패널. 스니펫 목록/검색/실행/편집/정렬을 보여준다.
 class SnippetPanel extends ConsumerStatefulWidget {
@@ -33,6 +36,7 @@ class _SnippetPanelState extends ConsumerState<SnippetPanel> {
   }
 
   Future<void> _run(Snippet s, SnippetRunMode mode) async {
+    ref.read(telemetryProvider).logEvent(TelemetryEvent.snippetRun());
     final active = _activeSession();
     if (active == null || active.status != SessionStatus.connected) {
       ScaffoldMessenger.of(
@@ -62,6 +66,107 @@ class _SnippetPanelState extends ConsumerState<SnippetPanel> {
       ),
     );
     ref.invalidate(snippetListProvider);
+  }
+
+  Future<void> _view(Snippet snippet) => showDialog<void>(
+    context: context,
+    builder: (_) => SnippetViewDialog(
+      snippet: snippet,
+      onCopy: () => unawaited(_copy(snippet)),
+      onEdit: () => unawaited(_edit(snippet)),
+    ),
+  );
+
+  Future<void> _copy(Snippet snippet) async {
+    try {
+      await Clipboard.setData(ClipboardData(text: snippet.body));
+    } catch (e) {
+      _showError('복사 실패', e);
+      return;
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(const SnackBar(content: Text('스니펫을 복사했습니다')));
+  }
+
+  Future<void> _performAction(
+    _SnippetAction action,
+    Snippet snippet, {
+    Snippet? above,
+    Snippet? below,
+  }) async {
+    switch (action) {
+      case _SnippetAction.view:
+        await _view(snippet);
+      case _SnippetAction.copy:
+        await _copy(snippet);
+      case _SnippetAction.edit:
+        await _edit(snippet);
+      case _SnippetAction.run:
+        await _run(snippet, SnippetRunMode.run);
+      case _SnippetAction.paste:
+        await _run(snippet, SnippetRunMode.paste);
+      case _SnippetAction.moveUp:
+        if (above != null) await _swapWith(snippet, above);
+      case _SnippetAction.moveDown:
+        if (below != null) await _swapWith(snippet, below);
+      case _SnippetAction.delete:
+        await _delete(snippet);
+    }
+  }
+
+  List<PopupMenuEntry<_SnippetAction>> _menuItems({
+    Snippet? above,
+    Snippet? below,
+  }) => [
+    _menuItem(_SnippetAction.view, Icons.open_in_full, '크게 보기'),
+    _menuItem(_SnippetAction.edit, Icons.edit_outlined, '편집'),
+    _menuItem(_SnippetAction.copy, Icons.content_copy, '코드 복사'),
+    _menuItem(_SnippetAction.run, Icons.play_arrow, '실행'),
+    _menuItem(_SnippetAction.paste, Icons.content_paste, '붙여넣기'),
+    if (above != null)
+      _menuItem(_SnippetAction.moveUp, Icons.arrow_upward, '위로 이동'),
+    if (below != null)
+      _menuItem(_SnippetAction.moveDown, Icons.arrow_downward, '아래로 이동'),
+    _menuItem(_SnippetAction.delete, Icons.delete_outline, '삭제'),
+  ];
+
+  PopupMenuItem<_SnippetAction> _menuItem(
+    _SnippetAction action,
+    IconData icon,
+    String label,
+  ) => PopupMenuItem(
+    value: action,
+    child: Row(
+      children: [Icon(icon, size: 18), const SizedBox(width: 10), Text(label)],
+    ),
+  );
+
+  void _showContextMenu(
+    Snippet snippet,
+    TapDownDetails details, {
+    Snippet? above,
+    Snippet? below,
+  }) {
+    final overlay =
+        Overlay.of(context).context.findRenderObject()! as RenderBox;
+    final localPosition = overlay.globalToLocal(details.globalPosition);
+    final position = RelativeRect.fromRect(
+      Rect.fromLTWH(localPosition.dx, localPosition.dy, 0, 0),
+      Offset.zero & overlay.size,
+    );
+    unawaited(
+      showMenu<_SnippetAction>(
+        context: context,
+        position: position,
+        items: _menuItems(above: above, below: below),
+      ).then((action) {
+        if (action != null) {
+          return _performAction(action, snippet, above: above, below: below);
+        }
+      }),
+    );
   }
 
   void _showError(String prefix, Object error) {
@@ -284,6 +389,30 @@ class _SnippetPanelState extends ConsumerState<SnippetPanel> {
                   return _SnippetTile(
                     snippet: s,
                     onTap: () => _run(s, s.defaultRunMode),
+                    menuItems: _menuItems(
+                      above: index > 0 ? visible[index - 1] : null,
+                      below: index < visible.length - 1
+                          ? visible[index + 1]
+                          : null,
+                    ),
+                    onAction: (action) => unawaited(
+                      _performAction(
+                        action,
+                        s,
+                        above: index > 0 ? visible[index - 1] : null,
+                        below: index < visible.length - 1
+                            ? visible[index + 1]
+                            : null,
+                      ),
+                    ),
+                    onSecondaryTapDown: (details) => _showContextMenu(
+                      s,
+                      details,
+                      above: index > 0 ? visible[index - 1] : null,
+                      below: index < visible.length - 1
+                          ? visible[index + 1]
+                          : null,
+                    ),
                     onLongPress: () => _showActions(
                       s,
                       above: index > 0 ? visible[index - 1] : null,
@@ -320,61 +449,79 @@ class _SnippetPanelState extends ConsumerState<SnippetPanel> {
     showModalBottomSheet<void>(
       context: context,
       builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 8),
-            ListTile(
-              leading: const Icon(Icons.play_arrow),
-              title: const Text('실행'),
-              onTap: () {
-                Navigator.pop(ctx);
-                _run(s, SnippetRunMode.run);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.content_paste),
-              title: const Text('붙여넣기'),
-              onTap: () {
-                Navigator.pop(ctx);
-                _run(s, SnippetRunMode.paste);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.edit),
-              title: const Text('편집'),
-              onTap: () {
-                Navigator.pop(ctx);
-                _edit(s);
-              },
-            ),
-            if (above != null)
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 8),
               ListTile(
-                leading: const Icon(Icons.arrow_upward),
-                title: const Text('위로 이동'),
+                leading: const Icon(Icons.open_in_full),
+                title: const Text('크게 보기'),
                 onTap: () {
                   Navigator.pop(ctx);
-                  _swapWith(s, above);
+                  _performAction(_SnippetAction.view, s);
                 },
               ),
-            if (below != null)
               ListTile(
-                leading: const Icon(Icons.arrow_downward),
-                title: const Text('아래로 이동'),
+                leading: const Icon(Icons.content_copy),
+                title: const Text('코드 복사'),
                 onTap: () {
                   Navigator.pop(ctx);
-                  _swapWith(s, below);
+                  _performAction(_SnippetAction.copy, s);
                 },
               ),
-            ListTile(
-              leading: const Icon(Icons.delete),
-              title: const Text('삭제'),
-              onTap: () {
-                Navigator.pop(ctx);
-                _delete(s);
-              },
-            ),
-          ],
+              ListTile(
+                leading: const Icon(Icons.play_arrow),
+                title: const Text('실행'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _run(s, SnippetRunMode.run);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.content_paste),
+                title: const Text('붙여넣기'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _run(s, SnippetRunMode.paste);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.edit),
+                title: const Text('편집'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _edit(s);
+                },
+              ),
+              if (above != null)
+                ListTile(
+                  leading: const Icon(Icons.arrow_upward),
+                  title: const Text('위로 이동'),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _swapWith(s, above);
+                  },
+                ),
+              if (below != null)
+                ListTile(
+                  leading: const Icon(Icons.arrow_downward),
+                  title: const Text('아래로 이동'),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _swapWith(s, below);
+                  },
+                ),
+              ListTile(
+                leading: const Icon(Icons.delete),
+                title: const Text('삭제'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _delete(s);
+                },
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -539,74 +686,98 @@ class _SnippetTile extends StatelessWidget {
     required this.snippet,
     required this.onTap,
     required this.onLongPress,
+    required this.menuItems,
+    required this.onAction,
+    required this.onSecondaryTapDown,
   });
 
   final Snippet snippet;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
+  final List<PopupMenuEntry<_SnippetAction>> menuItems;
+  final ValueChanged<_SnippetAction> onAction;
+  final ValueChanged<TapDownDetails> onSecondaryTapDown;
 
   @override
   Widget build(BuildContext context) {
     final hostScoped = snippet.scope == SnippetScope.host;
-    return Material(
-      color: VibeColors.surfaceHigh,
-      borderRadius: BorderRadius.circular(8),
-      child: InkWell(
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onSecondaryTapDown: onSecondaryTapDown,
+      child: Material(
+        color: VibeColors.surfaceHigh,
         borderRadius: BorderRadius.circular(8),
-        onTap: onTap,
-        onLongPress: onLongPress,
         child: Container(
-          padding: const EdgeInsets.all(10),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(8),
             border: Border.all(color: VibeColors.borderSoft),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          child: Row(
             children: [
-              Row(
-                children: [
-                  Icon(
-                    hostScoped ? Icons.dns : Icons.public,
-                    size: 16,
-                    color: hostScoped
-                        ? VibeColors.secondary
-                        : VibeColors.onSurfaceDim,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      snippet.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: VibeColors.onSurface,
-                        fontWeight: FontWeight.w700,
-                      ),
+              Expanded(
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: onTap,
+                  onLongPress: onLongPress,
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(
+                              hostScoped ? Icons.dns : Icons.public,
+                              size: 16,
+                              color: hostScoped
+                                  ? VibeColors.secondary
+                                  : VibeColors.onSurfaceDim,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                snippet.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: VibeColors.onSurface,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            const Icon(
+                              Icons.play_arrow,
+                              size: 17,
+                              color: VibeColors.accent,
+                            ),
+                          ],
+                        ),
+                        if (snippet.body != snippet.name) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            snippet.body,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: VibeColors.onSurfaceDim,
+                              fontFamily: kMonoFontFamily,
+                              fontFamilyFallback: kMonoFontFallback,
+                              fontSize: 11,
+                              height: 1.25,
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                   ),
-                  const Icon(
-                    Icons.play_arrow,
-                    size: 17,
-                    color: VibeColors.accent,
-                  ),
-                ],
-              ),
-              if (snippet.body != snippet.name) ...[
-                const SizedBox(height: 8),
-                Text(
-                  snippet.body,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: VibeColors.onSurfaceDim,
-                    fontFamily: kMonoFontFamily,
-                    fontFamilyFallback: kMonoFontFallback,
-                    fontSize: 11,
-                    height: 1.25,
-                  ),
                 ),
-              ],
+              ),
+              PopupMenuButton<_SnippetAction>(
+                tooltip: '스니펫 작업',
+                icon: const Icon(Icons.more_vert, size: 18),
+                itemBuilder: (_) => menuItems,
+                onSelected: onAction,
+              ),
             ],
           ),
         ),
@@ -614,3 +785,5 @@ class _SnippetTile extends StatelessWidget {
     );
   }
 }
+
+enum _SnippetAction { view, edit, copy, run, paste, moveUp, moveDown, delete }

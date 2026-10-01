@@ -1,4 +1,5 @@
 import 'session_close_dialog.dart';
+import '../settings/terminal_preferences_editor.dart';
 import '../../session/session_pane_layout.dart';
 import 'panes/pane_preset_icon.dart';
 import 'dart:async';
@@ -18,9 +19,11 @@ import '../../session/session_activity.dart';
 import '../../session/session_attention.dart';
 import '../../session/session_group.dart';
 import '../../state/providers.dart';
+import 'agent_brand.dart';
 import 'agent_launch_dialog.dart';
 import 'release_notes_dialog.dart';
 import 'remote_session_manager_dialog.dart';
+import 'session_group_manager.dart';
 
 /// 좌측 세로탭 세션 패널. 데스크톱 레일/모바일 drawer 양쪽에서 재사용.
 class SessionRail extends ConsumerWidget {
@@ -126,6 +129,16 @@ class SessionRail extends ConsumerWidget {
             label: '그룹 이동',
           ),
         _SessionMenuItem(
+          value: _SessionAction.terminalSettings,
+          icon: Icons.palette_outlined,
+          label: '세션 폰트·테마 설정',
+        ),
+        _SessionMenuItem(
+          value: _SessionAction.hostTerminalDefaults,
+          icon: Icons.dns_outlined,
+          label: '호스트 기본 터미널 설정',
+        ),
+        _SessionMenuItem(
           value: _SessionAction.rename,
           icon: Icons.edit_outlined,
           label: '이름 변경',
@@ -175,6 +188,10 @@ class SessionRail extends ConsumerWidget {
         await onDuplicateSession(session);
       case _SessionAction.moveGroup:
         await _moveSessionToGroup(context, ref, session);
+      case _SessionAction.terminalSettings:
+        await _configureTerminal(context, ref, session, forHost: false);
+      case _SessionAction.hostTerminalDefaults:
+        await _configureTerminal(context, ref, session, forHost: true);
       case _SessionAction.rename:
         await _renameSession(context, ref, session);
       case _SessionAction.remoteSessions:
@@ -228,37 +245,16 @@ class SessionRail extends ConsumerWidget {
     onSessionSelected?.call();
   }
 
-  Future<void> _createGroup(BuildContext context, WidgetRef ref) async {
-    var draftName = '';
-    final name = await showDialog<String>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('세션 그룹 추가'),
-        content: TextField(
-          autofocus: true,
-          textInputAction: TextInputAction.done,
-          decoration: const InputDecoration(
-            labelText: '그룹 이름',
-            hintText: '예: 고객사 A, 빌드 작업',
-          ),
-          onChanged: (value) => draftName = value,
-          onSubmitted: (value) => Navigator.of(dialogContext).pop(value),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('취소'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(draftName),
-            child: const Text('추가'),
-          ),
-        ],
-      ),
+  Future<void> _openGroupManager(
+    BuildContext context,
+    WidgetRef ref,
+    Set<String> hiddenGroupIds,
+  ) {
+    return showSessionGroupManager(
+      context,
+      hiddenGroupIds: hiddenGroupIds,
+      onGroupCreated: (id) => _activateGroup(ref, id),
     );
-    if (name == null || !context.mounted) return;
-    final id = ref.read(sessionGroupProvider.notifier).createGroup(name);
-    _activateGroup(ref, id);
   }
 
   Future<void> _moveSessionToGroup(
@@ -309,45 +305,91 @@ class SessionRail extends ConsumerWidget {
         .moveSessionToGroup(session.id, targetGroupId);
   }
 
+  Future<void> _configureTerminal(
+    BuildContext context,
+    WidgetRef ref,
+    SessionInfo session, {
+    required bool forHost,
+  }) async {
+    try {
+      final repository = ref.read(hostRepositoryProvider);
+      final host = await repository.getById(session.host.id);
+      if (!context.mounted) return;
+      if (forHost && host == null) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('먼저 호스트를 저장해 주세요.')));
+        return;
+      }
+      final current = ref
+          .read(sessionManagerProvider)
+          .where((s) => s.id == session.id)
+          .firstOrNull;
+      if (!forHost && current == null) return;
+      final global = ref.read(appSettingsProvider);
+      final hostPreferences = (host ?? session.host).terminalPreferences;
+      final result = await showTerminalPreferencesDialog(
+        context,
+        title: forHost
+            ? '${session.host.alias} · 호스트 기본값'
+            : '${current!.displayName} · 세션 설정',
+        description: forHost
+            ? '이 호스트에서 앞으로 여는 세션에 적용됩니다. 이미 열린 세션은 유지됩니다.'
+            : '이 세션의 폰트·테마와 입력 동작만 변경합니다. 기본값에는 영향을 주지 않습니다.',
+        initialValue: forHost ? hostPreferences : current!.terminalPreferences,
+        defaults: forHost ? global : hostPreferences.applyTo(global),
+        hostDefaults: forHost,
+      );
+      if (result == null || !context.mounted) return;
+      if (forHost) {
+        final saved = await repository.setTerminalPreferences(
+          session.host.id,
+          result,
+        );
+        if (!context.mounted) return;
+        ref.invalidate(hostListProvider);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              saved
+                  ? '호스트 기본값을 저장했습니다. 새 세션부터 적용됩니다.'
+                  : '호스트가 삭제되어 저장하지 못했습니다.',
+            ),
+          ),
+        );
+      } else {
+        ref
+            .read(sessionManagerProvider.notifier)
+            .setTerminalPreferences(session.id, result);
+      }
+    } catch (error) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('터미널 설정을 처리하지 못했습니다: $error')));
+      }
+    }
+  }
+
   Future<void> _renameSession(
     BuildContext context,
     WidgetRef ref,
     SessionInfo session,
   ) async {
-    var draftTitle = session.displayName;
     final title = await showDialog<String>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('세션 이름 변경'),
-        content: TextFormField(
-          initialValue: session.displayName,
-          autofocus: true,
-          textInputAction: TextInputAction.done,
-          decoration: InputDecoration(
-            labelText: '세션 이름',
-            hintText: session.host.alias,
-          ),
-          onChanged: (value) => draftTitle = value,
-          onFieldSubmitted: (value) => Navigator.of(dialogContext).pop(value),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('취소'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(draftTitle),
-            child: const Text('저장'),
-          ),
-        ],
+      builder: (_) => _SessionRenameDialog(
+        initialTitle: session.displayName,
+        hintText: session.host.alias,
       ),
     );
-    if (title == null) return;
+    if (title == null || !context.mounted) return;
     ref.read(sessionManagerProvider.notifier).renameSession(session.id, title);
   }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final railContext = context;
     final allSessions = ref.watch(sessionManagerProvider);
     final groupState = ref.watch(sessionGroupProvider);
     final activeGroupId = groupState.activeGroupId;
@@ -389,7 +431,9 @@ class SessionRail extends ConsumerWidget {
               activeGroupId: displayGroupId,
               sessionCounts: sessionCounts,
               onChanged: (groupId) => _activateGroup(ref, groupId),
-              onAddGroup: () => _createGroup(context, ref),
+              onManageGroups: () => _openGroupManager(context, ref, {
+                if (hideAppsGroup) appsSessionGroupId,
+              }),
             ),
             _RailToolbar(
               onNewSession: onNewSession,
@@ -447,8 +491,9 @@ class SessionRail extends ConsumerWidget {
                         oldIndex,
                         slot > oldIndex ? slot - 1 : slot,
                       ),
-                      tileBuilder: (context, s) => Consumer(
+                      tileBuilder: (context, s, tileKey) => Consumer(
                         builder: (context, tileRef, child) => _SessionTile(
+                          key: tileKey,
                           session: s,
                           paneNumber: tileRef.watch(
                             sessionPaneLayoutsProvider.select(
@@ -479,9 +524,10 @@ class SessionRail extends ConsumerWidget {
                             onSessionSelected?.call();
                           },
                           onShowMenu: (position) =>
-                              _showSessionMenu(context, ref, s, position),
-                          onClose: () =>
-                              unawaited(requestCloseSession(context, ref, s)),
+                              _showSessionMenu(railContext, ref, s, position),
+                          onClose: () => unawaited(
+                            requestCloseSession(railContext, ref, s),
+                          ),
                         ),
                       ),
                     ),
@@ -493,7 +539,70 @@ class SessionRail extends ConsumerWidget {
   }
 }
 
+class _SessionRenameDialog extends StatefulWidget {
+  const _SessionRenameDialog({
+    required this.initialTitle,
+    required this.hintText,
+  });
+
+  final String initialTitle;
+  final String hintText;
+
+  @override
+  State<_SessionRenameDialog> createState() => _SessionRenameDialogState();
+}
+
+class _SessionRenameDialogState extends State<_SessionRenameDialog> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController.fromValue(
+      TextEditingValue(
+        text: widget.initialTitle,
+        selection: TextSelection(
+          baseOffset: 0,
+          extentOffset: widget.initialTitle.length,
+        ),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _save() => Navigator.of(context).pop(_controller.text);
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('세션 이름 변경'),
+    content: TextField(
+      controller: _controller,
+      autofocus: true,
+      textInputAction: TextInputAction.done,
+      decoration: InputDecoration(
+        labelText: '세션 이름',
+        hintText: widget.hintText,
+      ),
+      onSubmitted: (_) => _save(),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.of(context).pop(),
+        child: const Text('취소'),
+      ),
+      FilledButton(onPressed: _save, child: const Text('저장')),
+    ],
+  );
+}
+
 enum _SessionAction {
+  terminalSettings,
+  hostTerminalDefaults,
   launchAgent,
   reviewAgentChanges,
   duplicate,
@@ -546,7 +655,7 @@ class _GroupSelector extends StatelessWidget {
     required this.activeGroupId,
     required this.sessionCounts,
     required this.onChanged,
-    required this.onAddGroup,
+    required this.onManageGroups,
   });
 
   /// 드롭다운에 보일 그룹 목록. 빌드에 따라 숨긴 그룹은 빠져 있다.
@@ -554,7 +663,9 @@ class _GroupSelector extends StatelessWidget {
   final String activeGroupId;
   final Map<String, int> sessionCounts;
   final ValueChanged<String> onChanged;
-  final VoidCallback onAddGroup;
+
+  /// 그룹 추가·이름 변경·삭제를 한곳에서 하는 관리 창을 연다.
+  final VoidCallback onManageGroups;
 
   @override
   Widget build(BuildContext context) {
@@ -607,12 +718,13 @@ class _GroupSelector extends StatelessWidget {
             ),
           ),
           Tooltip(
-            message: '세션 그룹 추가',
+            message: '그룹 관리',
             child: SizedBox.square(
               dimension: 38,
               child: IconButton(
-                onPressed: onAddGroup,
-                icon: const Icon(Icons.create_new_folder_outlined, size: 19),
+                key: const ValueKey('rail-group-manage'),
+                onPressed: onManageGroups,
+                icon: const Icon(Icons.folder_open_outlined, size: 19),
               ),
             ),
           ),
@@ -1058,6 +1170,7 @@ class _AttentionCount extends StatelessWidget {
 
 class _SessionTile extends StatefulWidget {
   const _SessionTile({
+    super.key,
     required this.session,
     this.paneNumber = 0,
     required this.selected,
@@ -1090,6 +1203,7 @@ class _SessionTile extends StatefulWidget {
 
 class _SessionTileState extends State<_SessionTile> {
   bool _expanded = false;
+  bool _hovering = false;
 
   void showMenuAtCenter() {
     final box = context.findRenderObject();
@@ -1109,176 +1223,222 @@ class _SessionTileState extends State<_SessionTile> {
   /// 드래그하면 레일 안에서 순서 변경, 터미널 칸에서 분할 배치를 한다([_SessionList]).
   Widget _buildCompact() {
     final host = widget.session.host;
-    return Material(
-      color: widget.selected
-          ? VibeColors.surfacePressed
-          : VibeColors.surfaceHigh,
-      borderRadius: BorderRadius.circular(8),
-      child: InkWell(
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovering = true),
+      onExit: (_) => setState(() => _hovering = false),
+      child: Material(
+        color: widget.selected
+            ? VibeColors.surfacePressed
+            : VibeColors.surfaceHigh,
         borderRadius: BorderRadius.circular(8),
-        onTap: widget.onTap,
-        onSecondaryTapDown: (details) =>
-            unawaited(widget.onShowMenu(details.globalPosition)),
-        child: Container(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: widget.selected
-                  ? VibeColors.accent
-                  : VibeColors.borderSoft,
-            ),
-          ),
-          padding: const EdgeInsets.fromLTRB(10, 4, 4, 4),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: widget.statusColor,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  if (widget.session.appId != null) ...[
-                    const SizedBox(width: 6),
-                    Tooltip(
-                      message: '앱 세션',
-                      child: Icon(
-                        Icons.apps_outlined,
-                        key: Key('session-app-badge-${widget.session.id}'),
-                        size: 16,
-                        color: VibeColors.onSurfaceDim,
-                      ),
-                    ),
-                  ],
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      '${widget.paneNumber > 0 ? '[${widget.paneNumber}] ' : ''}${widget.session.displayName}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: VibeColors.onSurface,
-                        fontWeight: FontWeight.w700,
-                        fontSize: 13,
-                      ),
-                    ),
-                  ),
-                  if (widget.attention case final attention?)
-                    _AgentAttentionIndicator(attention: attention)
-                  else if (widget.busy)
-                    const _BusyIndicator(),
-                  _MiniTileButton(
-                    icon: _expanded ? Icons.expand_less : Icons.expand_more,
-                    tooltip: '세션 정보',
-                    onTap: () => setState(() => _expanded = !_expanded),
-                  ),
-                  _MiniTileButton(
-                    icon: Icons.close,
-                    tooltip: '세션 닫기',
-                    onTap: widget.onClose,
-                  ),
-                ],
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: widget.onTap,
+          onSecondaryTapDown: (details) =>
+              unawaited(widget.onShowMenu(details.globalPosition)),
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                color: widget.selected
+                    ? VibeColors.accent
+                    : VibeColors.borderSoft,
               ),
-              if (_expanded)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(18, 2, 4, 4),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        host.endpointLabel,
+            ),
+            padding: const EdgeInsets.fromLTRB(10, 4, 4, 4),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                        color: widget.statusColor,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    if (AgentBrand.forHint(widget.attention?.agentHint)
+                        case final brand?) ...[
+                      const SizedBox(width: 6),
+                      AgentBrandBadge(brand: brand),
+                    ],
+                    if (widget.session.appId != null) ...[
+                      const SizedBox(width: 6),
+                      Tooltip(
+                        message: '앱 세션',
+                        child: Icon(
+                          Icons.apps_outlined,
+                          key: Key('session-app-badge-${widget.session.id}'),
+                          size: 16,
+                          color: VibeColors.onSurfaceDim,
+                        ),
+                      ),
+                    ],
+                    if (widget.paneNumber > 0 && _hovering) ...[
+                      Tooltip(
+                        message: '분할 창 ${widget.paneNumber}번에 열려 있음',
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 4,
+                            vertical: 1,
+                          ),
+                          decoration: BoxDecoration(
+                            color: VibeColors.statusConnected.withValues(
+                              alpha: 0.15,
+                            ),
+                            borderRadius: BorderRadius.circular(3),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.view_column_outlined,
+                                size: 11,
+                                color: VibeColors.statusConnected,
+                              ),
+                              const SizedBox(width: 2),
+                              Text(
+                                '${widget.paneNumber}',
+                                style: const TextStyle(
+                                  color: VibeColors.statusConnected,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                    ],
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        widget.session.displayName,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                          color: VibeColors.onSurfaceDim,
-                          fontFamily: kMonoFontFamily,
-                          fontFamilyFallback: kMonoFontFallback,
-                          fontSize: 11,
+                          color: VibeColors.onSurface,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 13,
                         ),
                       ),
-                      if (host.keepsRemoteSession) ...[
-                        const SizedBox(height: 3),
-                        const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.link_rounded,
-                              size: 12,
-                              color: VibeColors.accent,
-                            ),
-                            SizedBox(width: 4),
-                            Text(
-                              '작업 이어가기',
-                              style: TextStyle(
-                                color: VibeColors.accent,
-                                fontSize: 10,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ],
+                    ),
+                    if (widget.attention case final attention?)
+                      _AgentAttentionIndicator(attention: attention)
+                    else if (widget.busy)
+                      const _BusyIndicator(),
+                    _MiniTileButton(
+                      icon: _expanded ? Icons.expand_less : Icons.expand_more,
+                      tooltip: '세션 정보',
+                      onTap: () => setState(() => _expanded = !_expanded),
+                    ),
+                    _MiniTileButton(
+                      icon: Icons.close,
+                      tooltip: '세션 닫기',
+                      onTap: widget.onClose,
+                    ),
+                  ],
+                ),
+                if (_expanded)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(18, 2, 4, 4),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          host.endpointLabel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: VibeColors.onSurfaceDim,
+                            fontFamily: kMonoFontFamily,
+                            fontFamilyFallback: kMonoFontFallback,
+                            fontSize: 11,
+                          ),
                         ),
-                      ],
-                      if (widget.session.agentWorkspace
-                          case final workspace?) ...[
-                        const SizedBox(height: 4),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(
-                              Icons.account_tree_outlined,
-                              size: 12,
-                              color: VibeColors.onSurfaceDim,
-                            ),
-                            const SizedBox(width: 4),
-                            Flexible(
-                              child: Text(
-                                workspace.isolatedWorktree
-                                    ? '${workspace.cli.label} · ${workspace.branchName}'
-                                    : '${workspace.cli.label} · 공유 작업 폴더',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: VibeColors.onSurfaceDim,
+                        if (host.keepsRemoteSession) ...[
+                          const SizedBox(height: 3),
+                          const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.link_rounded,
+                                size: 12,
+                                color: VibeColors.accent,
+                              ),
+                              SizedBox(width: 4),
+                              Text(
+                                '작업 이어가기',
+                                style: TextStyle(
+                                  color: VibeColors.accent,
                                   fontSize: 10,
                                   fontWeight: FontWeight.w700,
                                 ),
                               ),
+                            ],
+                          ),
+                        ],
+                        if (widget.session.agentWorkspace
+                            case final workspace?) ...[
+                          const SizedBox(height: 4),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.account_tree_outlined,
+                                size: 12,
+                                color: VibeColors.onSurfaceDim,
+                              ),
+                              const SizedBox(width: 4),
+                              Flexible(
+                                child: Text(
+                                  workspace.isolatedWorktree
+                                      ? '${workspace.cli.label} · ${workspace.branchName}'
+                                      : '${workspace.cli.label} · 공유 작업 폴더',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: VibeColors.onSurfaceDim,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                        if (widget.attention case final attention?) ...[
+                          const SizedBox(height: 5),
+                          Text(
+                            '${attention.agentHint?.toUpperCase() ?? 'SESSION'} · '
+                            '${attention.state.label} · ${attention.source.label}',
+                            style: TextStyle(
+                              color: attention.state.color,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w800,
                             ),
-                          ],
-                        ),
-                      ],
-                      if (widget.attention case final attention?) ...[
-                        const SizedBox(height: 5),
-                        Text(
-                          '${attention.agentHint.toUpperCase()} · '
-                          '${attention.state.label} · ${attention.source.label}',
-                          style: TextStyle(
-                            color: attention.state.color,
-                            fontSize: 10,
-                            fontWeight: FontWeight.w800,
                           ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          attention.message,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: VibeColors.onSurfaceDim,
-                            fontSize: 10,
-                            height: 1.25,
+                          const SizedBox(height: 2),
+                          Text(
+                            attention.message,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: VibeColors.onSurfaceDim,
+                              fontSize: 10,
+                              height: 1.25,
+                            ),
                           ),
-                        ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
-                ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -1353,7 +1513,8 @@ class _AgentAttentionIndicator extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Tooltip(
-        message: '${attention.agentHint} · ${attention.state.label}',
+        message:
+            '${attention.agentHint ?? 'SESSION'} · ${attention.state.label}',
         child: Icon(
           attention.state.icon,
           size: 15,
@@ -1406,7 +1567,12 @@ class _SessionList extends StatefulWidget {
   final String groupId;
   final List<SessionInfo> sessions;
 
-  final Widget Function(BuildContext context, SessionInfo session) tileBuilder;
+  final Widget Function(
+    BuildContext context,
+    SessionInfo session,
+    GlobalKey<_SessionTileState> tileKey,
+  )
+  tileBuilder;
 
   /// [oldIndex]의 세션을 원래 목록 기준 삽입 위치 [slot](0..length) 앞으로 옮긴다.
   final void Function(int oldIndex, int slot) onReorder;
@@ -1422,6 +1588,7 @@ class _SessionListState extends State<_SessionList>
   static const _autoScrollStep = 6.0;
 
   final _scroll = ScrollController();
+  final _tileKeys = <String, GlobalKey<_SessionTileState>>{};
   late final Ticker _ticker;
 
   /// 드롭 시 삽입될 위치(0..length). null이면 레일 위에 드래그 중이 아님.
@@ -1435,6 +1602,13 @@ class _SessionListState extends State<_SessionList>
   void initState() {
     super.initState();
     _ticker = createTicker(_onTick);
+  }
+
+  @override
+  void didUpdateWidget(covariant _SessionList oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final sessionIds = widget.sessions.map((session) => session.id).toSet();
+    _tileKeys.removeWhere((id, _) => !sessionIds.contains(id));
   }
 
   @override
@@ -1492,6 +1666,18 @@ class _SessionListState extends State<_SessionList>
     if (_ticker.isActive) _ticker.stop();
   }
 
+  /// 드래그가 끝났을 때 공통 정리. Draggable은 드래그 도중 행 위젯이
+  /// 폐기되면(스크롤로 화면 밖에 나가 재활용되거나 목록이 다시 그려지면)
+  /// onDragEnd를 부르지 않는다. 그러면 가장자리 자동 스크롤이 멈추지 않아
+  /// 사용자가 스크롤해도 목록이 계속 한쪽으로 끌려간다. onDragCompleted/
+  /// onDraggableCanceled는 행이 폐기돼도 호출되므로 거기서도 이 정리를 한다.
+  void _finishDrag() {
+    if (!mounted) return;
+    _draggedIndex = null;
+    _stopAutoScroll();
+    _setSlot(null);
+  }
+
   void _onTick(Duration _) {
     if (!_scroll.hasClients || _autoScrollDirection == 0) return;
     final position = _scroll.position;
@@ -1543,11 +1729,9 @@ class _SessionListState extends State<_SessionList>
         childWhenDragging: whenDragging,
         onDragStarted: () => _draggedIndex = _indexOf(session.id),
         onDragUpdate: (details) => _updateAutoScroll(details.globalPosition),
-        onDragEnd: (_) {
-          _draggedIndex = null;
-          _stopAutoScroll();
-          _setSlot(null);
-        },
+        onDragEnd: (_) => _finishDrag(),
+        onDragCompleted: _finishDrag,
+        onDraggableCanceled: (_, _) => _finishDrag(),
         child: tile,
       );
     }
@@ -1566,10 +1750,10 @@ class _SessionListState extends State<_SessionList>
         dragStart ??= details.globalPosition;
         _updateAutoScroll(details.globalPosition);
       },
+      onDragCompleted: _finishDrag,
+      onDraggableCanceled: (_, _) => _finishDrag(),
       onDragEnd: (details) {
-        _draggedIndex = null;
-        _stopAutoScroll();
-        _setSlot(null);
+        _finishDrag();
         // 길게 누른 뒤 거의 움직이지 않고 떼면 메뉴로 취급한다.
         // 제자리 드롭은 자기 행이 받아 no-op이므로 wasAccepted는 보지 않는다.
         final start = dragStart;
@@ -1586,7 +1770,11 @@ class _SessionListState extends State<_SessionList>
   Widget _row(BuildContext _, int index) {
     final session = widget.sessions[index];
     final last = index == widget.sessions.length - 1;
-    final tileKey = GlobalKey<_SessionTileState>();
+    // 목록 갱신 중에도 세션 행의 상태와 context를 유지한다.
+    final tileKey = _tileKeys.putIfAbsent(
+      session.id,
+      () => GlobalKey<_SessionTileState>(),
+    );
     // Builder의 context로 이 행(RenderBox)의 위치를 얻는다. ListView builder의
     // context는 sliver 자체라 행 좌표로 쓸 수 없다.
     return Builder(
@@ -1607,10 +1795,7 @@ class _SessionListState extends State<_SessionList>
           final showTop = slot == index && !_isOwnSlot(index);
           final showBottom =
               last && slot == index + 1 && !_isOwnSlot(index + 1);
-          final tile = KeyedSubtree(
-            key: tileKey,
-            child: widget.tileBuilder(context, session),
-          );
+          final tile = widget.tileBuilder(context, session, tileKey);
           return Padding(
             padding: EdgeInsets.only(bottom: last ? 0 : _gap),
             child: Stack(
