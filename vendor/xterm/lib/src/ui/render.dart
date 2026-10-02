@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' show max;
 import 'dart:ui';
 
@@ -26,6 +27,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     required ViewportOffset offset,
     required EdgeInsets padding,
     required bool autoResize,
+    Duration resizeDebounce = Duration.zero,
     required TerminalStyle textStyle,
     required TextScaler textScaler,
     required TerminalTheme theme,
@@ -40,6 +42,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
         _offset = offset,
         _padding = padding,
         _autoResize = autoResize,
+        _resizeDebounce = resizeDebounce,
         _focusNode = focusNode,
         _cursorType = cursorType,
         _alwaysShowCursor = alwaysShowCursor,
@@ -57,6 +60,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     if (_terminal == terminal) return;
     if (attached) _terminal.removeListener(_onTerminalChange);
     _terminal = terminal;
+    _hasAppliedViewportSize = false;
     if (attached) _terminal.addListener(_onTerminalChange);
     _resizeTerminalIfNeeded();
     markNeedsLayout();
@@ -91,6 +95,20 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   set autoResize(bool value) {
     if (value == _autoResize) return;
     _autoResize = value;
+    _resizeTimer?.cancel();
+    _viewportSize = null;
+    markNeedsLayout();
+  }
+
+  Duration _resizeDebounce;
+  Timer? _resizeTimer;
+  bool _hasAppliedViewportSize = false;
+
+  set resizeDebounce(Duration value) {
+    if (_resizeDebounce == value) return;
+    _resizeDebounce = value;
+    _resizeTimer?.cancel();
+    _viewportSize = null;
     markNeedsLayout();
   }
 
@@ -194,15 +212,25 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     _terminal.addListener(_onTerminalChange);
     _controller.addListener(_onControllerUpdate);
     _focusNode.addListener(_onFocusChange);
+    markNeedsLayout();
   }
 
   @override
   void detach() {
+    _resizeTimer?.cancel();
+    _viewportSize = null;
+    _hasAppliedViewportSize = false;
     super.detach();
     _offset.removeListener(_onScroll);
     _terminal.removeListener(_onTerminalChange);
     _controller.removeListener(_onControllerUpdate);
     _focusNode.removeListener(_onFocusChange);
+  }
+
+  @override
+  void dispose() {
+    _resizeTimer?.cancel();
+    super.dispose();
   }
 
   @override
@@ -376,14 +404,36 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
 
   /// Notify the underlying terminal that the viewport size has changed.
   void _resizeTerminalIfNeeded() {
-    if (_autoResize && _viewportSize != null) {
-      _terminal.resize(
-        _viewportSize!.width,
-        _viewportSize!.height,
-        _painter.cellSize.width.round(),
-        _painter.cellSize.height.round(),
-      );
+    _resizeTimer?.cancel();
+    if (!_autoResize || _viewportSize == null) return;
+    if (!_hasAppliedViewportSize || _resizeDebounce <= Duration.zero) {
+      _applyViewportSize();
+      return;
     }
+    // Debounce at the buffer boundary, not just the PTY notification: otherwise
+    // output for the previous remote size is parsed into intermediate buffers.
+    _resizeTimer = Timer(_resizeDebounce, () {
+      _resizeTimer = null;
+      if (!attached || !_autoResize) return;
+      _applyViewportSize();
+      markNeedsLayout();
+    });
+  }
+
+  void _applyViewportSize() {
+    final viewport = _viewportSize;
+    if (viewport == null) return;
+    _hasAppliedViewportSize = true;
+    if (_terminal.viewWidth == viewport.width &&
+        _terminal.viewHeight == viewport.height) {
+      return;
+    }
+    _terminal.resize(
+      viewport.width,
+      viewport.height,
+      _painter.cellSize.width.round(),
+      _painter.cellSize.height.round(),
+    );
   }
 
   /// Update the scroll offset based on the current terminal state. This should

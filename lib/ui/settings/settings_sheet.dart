@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
@@ -10,10 +11,13 @@ import '../../app/theme.dart';
 import '../../settings/app_settings.dart';
 import '../../settings/shortcut_bindings.dart';
 import '../../state/providers.dart';
+import '../../telemetry/telemetry.dart' show TelemetrySettings;
 import '../../sync/github_sync_service.dart';
 import '../adaptive/breakpoints.dart';
 import '../shell/right_panel_tools.dart';
 import 'action_bar_editor_page.dart';
+import 'diagnostics_log_page.dart';
+import 'terminal_preferences_editor.dart';
 
 Future<void> showVibeTerminalSettings(BuildContext context) {
   if (context.isCompact) {
@@ -169,9 +173,13 @@ class _TerminalSettingsTab extends ConsumerWidget {
       children: [
         _SettingsSection(
           title: '터미널 화면',
-          description: '접속 세션에서 바로 반영되는 테마와 글꼴 설정입니다.',
+          description:
+              '새 세션의 전역 기본값입니다. 호스트별 기본값이 우선하며, 열린 세션은 세션 메뉴에서 개별 조정합니다.',
           children: [
+            TerminalPreferencesPreview(settings: settings),
+            const SizedBox(height: 16),
             DropdownButtonFormField<TerminalThemePreset>(
+              key: ValueKey(settings.terminalTheme),
               initialValue: settings.terminalTheme,
               isExpanded: true,
               decoration: const InputDecoration(labelText: '터미널 테마'),
@@ -195,6 +203,7 @@ class _TerminalSettingsTab extends ConsumerWidget {
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
+              key: ValueKey(settings.terminalFontFamily),
               initialValue: settings.terminalFontFamily,
               isExpanded: true,
               decoration: const InputDecoration(labelText: '폰트'),
@@ -246,7 +255,7 @@ class _TerminalSettingsTab extends ConsumerWidget {
             const SizedBox(height: 8),
             const Text(
               '변경한 값은 이후에 새로 여는 세션부터 적용됩니다. '
-              '이미 열려 있는 세션은 다시 연결해야 반영됩니다.',
+              '이미 열려 있는 세션에는 영향을 주지 않습니다.',
               style: TextStyle(color: VibeColors.onSurfaceDim, fontSize: 12),
             ),
           ],
@@ -405,7 +414,7 @@ class _InteractionSettingsTab extends ConsumerWidget {
       children: [
         _SettingsSection(
           title: '클립보드',
-          description: '일반 데스크톱 터미널의 복사/붙여넣기 흐름을 조정합니다.',
+          description: '새 세션에 적용할 복사·붙여넣기 기본값입니다. 열린 세션은 세션 메뉴에서 조정합니다.',
           children: [
             _SwitchSetting(
               title: '선택 즉시 복사',
@@ -470,7 +479,9 @@ class _ShortcutSettingsTab extends ConsumerWidget {
             DropdownButtonFormField<CtrlCBehavior>(
               initialValue: settings.ctrlCBehavior,
               isExpanded: true,
-              decoration: const InputDecoration(labelText: 'Ctrl+C 동작'),
+              decoration: const InputDecoration(
+                labelText: 'Ctrl+C 기본 동작 (새 세션)',
+              ),
               selectedItemBuilder: (context) => [
                 for (final behavior in CtrlCBehavior.values)
                   Text(behavior.label, overflow: TextOverflow.ellipsis),
@@ -1826,11 +1837,57 @@ class _AboutSettingsTabState extends ConsumerState<_AboutSettingsTab> {
     }
   }
 
+  void _updateTelemetry(TelemetrySettings next) {
+    final settings = ref.read(appSettingsProvider);
+    ref
+        .read(appSettingsProvider.notifier)
+        .update(settings.copyWith(telemetry: next));
+  }
+
   @override
   Widget build(BuildContext context) {
     final features = ref.watch(buildFeaturesProvider);
+    final settings = ref.watch(appSettingsProvider);
     return _SettingsTabScroll(
       children: [
+        // 텔레메트리 빌드에서만 노출한다. 데스크톱(no-op)에서는 숨긴다.
+        if (features.telemetry)
+          _SettingsSection(
+            title: '진단·알림',
+            description: '터미널 내용·호스트 정보는 보내지 않습니다. 언제든 끌 수 있습니다.',
+            children: [
+              SwitchListTile(
+                key: const ValueKey('telemetry-crash'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('오류 보고 보내기'),
+                subtitle: const Text('앱이 비정상 종료되면 기기 모델·OS·앱 버전과 오류 내용을 보냅니다.'),
+                value: settings.telemetry.crashReports,
+                onChanged: (v) => _updateTelemetry(
+                  settings.telemetry.copyWith(crashReports: v),
+                ),
+              ),
+              SwitchListTile(
+                key: const ValueKey('telemetry-usage'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('사용 통계 보내기'),
+                subtitle: const Text('어떤 기능이 쓰이는지 집계합니다. 개인을 식별하지 않습니다.'),
+                value: settings.telemetry.usageStats,
+                onChanged: (v) => _updateTelemetry(
+                  settings.telemetry.copyWith(usageStats: v),
+                ),
+              ),
+              SwitchListTile(
+                key: const ValueKey('telemetry-announcements'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('공지 알림 받기'),
+                subtitle: const Text('새 버전과 중요한 공지를 푸시로 받습니다.'),
+                value: settings.telemetry.announcements,
+                onChanged: (v) => _updateTelemetry(
+                  settings.telemetry.copyWith(announcements: v),
+                ),
+              ),
+            ],
+          ),
         _SettingsSection(
           title: '앱 정보',
           description: '출시 빌드와 법적 고지입니다.',
@@ -1875,6 +1932,32 @@ class _AboutSettingsTabState extends ConsumerState<_AboutSettingsTab> {
               trailing: const Icon(Icons.chevron_right),
               onTap: () => _openLicenses(context),
             ),
+            ListTile(
+              key: const ValueKey('settings-diagnostics-log'),
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(
+                Icons.bug_report_outlined,
+                color: VibeColors.accent,
+              ),
+              title: const Text('진단 로그'),
+              subtitle: const Text('오류·비정상 종료 기록을 보고 복사합니다'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const DiagnosticsLogPage(),
+                ),
+              ),
+            ),
+            if (kDebugMode && features.telemetry)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(
+                  Icons.warning_amber,
+                  color: VibeColors.statusError,
+                ),
+                title: const Text('테스트 크래시 (디버그)'),
+                onTap: () => throw StateError('telemetry smoke test'),
+              ),
           ],
         ),
       ],

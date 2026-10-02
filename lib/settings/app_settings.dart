@@ -3,6 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:xterm/xterm.dart';
 
 import '../app/theme.dart';
+import '../telemetry/telemetry.dart' show TelemetrySettings;
+
+export 'ai_provider_type.dart';
+
+import 'ai_provider_type.dart';
 
 enum TerminalThemePreset {
   vibeDark,
@@ -117,43 +122,6 @@ enum CtrlCBehavior {
     CtrlCBehavior.interruptOnly => 'Ctrl+C는 항상 원격 프로세스에 보냅니다.',
     CtrlCBehavior.copySelection => '선택 영역이 있으면 복사하고, 없으면 인터럽트로 보냅니다.',
   };
-}
-
-enum AiProviderType {
-  openai,
-  gemini,
-  claude,
-  openAiCompatible;
-
-  String get label => switch (this) {
-    AiProviderType.openai => 'OpenAI',
-    AiProviderType.gemini => 'Gemini',
-    AiProviderType.claude => 'Claude',
-    AiProviderType.openAiCompatible => 'OpenAI compatible',
-  };
-
-  String get description => switch (this) {
-    AiProviderType.openai => 'OpenAI Chat Completions API',
-    AiProviderType.gemini => 'Google Gemini generateContent API',
-    AiProviderType.claude => 'Anthropic Messages API',
-    AiProviderType.openAiCompatible => '로컬 LLM, 사내 게이트웨이, 호환 프록시',
-  };
-
-  String get defaultModel => switch (this) {
-    AiProviderType.openai => 'gpt-4.1-mini',
-    AiProviderType.gemini => 'gemini-2.5-flash',
-    AiProviderType.claude => 'claude-sonnet-4-5',
-    AiProviderType.openAiCompatible => 'gpt-4.1-mini',
-  };
-
-  String get defaultBaseUrl => switch (this) {
-    AiProviderType.openAiCompatible => 'https://api.openai.com/v1',
-    _ => '',
-  };
-
-  bool get needsBaseUrl => this == AiProviderType.openAiCompatible;
-
-  bool get requiresApiToken => this != AiProviderType.openAiCompatible;
 }
 
 class AiSettings {
@@ -630,8 +598,14 @@ const List<String> _legacyTerminalHeaderItemsWithoutRepaint = [
 const Map<String, List<String>> kDefaultShortcutBindings = {
   'copy': ['Ctrl+Shift+C', 'Cmd+C'],
   'paste': ['Ctrl+V', 'Ctrl+Shift+V', 'Shift+Insert', 'Cmd+V'],
-  'zoomIn': ['Ctrl+='],
-  'zoomOut': ['Ctrl+-'],
+  'zoomIn': [
+    'Ctrl+=',
+    'Ctrl+Shift+=',
+    'Ctrl+Plus',
+    'Ctrl+Shift+Plus',
+    'Ctrl+NumpadAdd',
+  ],
+  'zoomOut': ['Ctrl+-', 'Ctrl+NumpadSubtract'],
   'zoomReset': ['Ctrl+0'],
   'sessionPrevious': ['Ctrl+Tab'],
   'commandPalette': ['Ctrl+K', 'Cmd+K'],
@@ -1036,6 +1010,7 @@ class AppSettings {
     required this.rightPanelToolOrder,
     required this.pinnedCustomAppIds,
     required this.customAppInputAcknowledgedIds,
+    this.telemetry = const TelemetrySettings(),
   });
 
   final TerminalThemePreset terminalTheme;
@@ -1098,6 +1073,9 @@ class AppSettings {
 
   /// `input` 권한 앱을 처음 시작할 때의 확인을 사용자가 이미 허용한 앱 id 목록.
   final List<String> customAppInputAcknowledgedIds;
+
+  /// Crashlytics·Analytics·공지 등 텔레메트리 동의 상태.
+  final TelemetrySettings telemetry;
 
   static const defaultSettings = AppSettings(
     terminalTheme: TerminalThemePreset.vibeDark,
@@ -1186,6 +1164,7 @@ class AppSettings {
     List<String>? rightPanelToolOrder,
     List<String>? pinnedCustomAppIds,
     List<String>? customAppInputAcknowledgedIds,
+    TelemetrySettings? telemetry,
   }) => AppSettings(
     terminalTheme: terminalTheme ?? this.terminalTheme,
     terminalFontFamily: terminalFontFamily ?? this.terminalFontFamily,
@@ -1228,6 +1207,7 @@ class AppSettings {
     pinnedCustomAppIds: pinnedCustomAppIds ?? this.pinnedCustomAppIds,
     customAppInputAcknowledgedIds:
         customAppInputAcknowledgedIds ?? this.customAppInputAcknowledgedIds,
+    telemetry: telemetry ?? this.telemetry,
   );
 
   Map<String, Object?> toJson() => {
@@ -1255,6 +1235,7 @@ class AppSettings {
     'rightPanelToolOrder': rightPanelToolOrder,
     'pinnedCustomAppIds': pinnedCustomAppIds,
     'customAppInputAcknowledgedIds': customAppInputAcknowledgedIds,
+    'telemetry': telemetry.toJson(),
   };
 
   factory AppSettings.fromJson(Map<String, Object?> json) {
@@ -1283,7 +1264,13 @@ class AppSettings {
         if (key is! String) continue;
         final bindings = stringList(entry.value);
         if (bindings == null) continue;
-        parsed[key] = bindings;
+        // 이전 기본 줌 단축키를 사용하던 설정에 +/숫자패드 별칭을 추가한다.
+        if ((key == 'zoomIn' && listEquals(bindings, const ['Ctrl+='])) ||
+            (key == 'zoomOut' && listEquals(bindings, const ['Ctrl+-']))) {
+          parsed[key] = kDefaultShortcutBindings[key]!;
+        } else {
+          parsed[key] = bindings;
+        }
       }
       return parsed.isEmpty ? null : parsed;
     }
@@ -1354,6 +1341,11 @@ class AppSettings {
       customAppInputAcknowledgedIds: stringList(
         json['customAppInputAcknowledgedIds'],
       ),
+      telemetry: json['telemetry'] is Map
+          ? TelemetrySettings.fromJson(
+              (json['telemetry'] as Map).cast<String, dynamic>(),
+            )
+          : const TelemetrySettings(),
     );
   }
 }

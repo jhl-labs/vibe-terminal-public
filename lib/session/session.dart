@@ -3,6 +3,8 @@ import '../core/result.dart';
 import '../data/models/host.dart';
 import '../terminal/terminal_engine.dart';
 import 'session_group.dart';
+import '../settings/app_settings.dart';
+import '../settings/terminal_preferences.dart';
 
 enum SessionStatus { connecting, connected, disconnected, error }
 
@@ -87,7 +89,20 @@ class SessionInfo {
     this.fellBackToDirectSsh = false,
     this.agentWorkspace,
     this.appId,
-  });
+    TerminalPreferences? terminalPreferences,
+    TerminalPreferences? terminalDefaults,
+  }) : terminalPreferences =
+           (terminalPreferences ?? const TerminalPreferences()).resolved(
+             AppSettings.defaultSettings,
+           ),
+       terminalDefaults =
+           (terminalDefaults ??
+                   terminalPreferences ??
+                   const TerminalPreferences())
+               .resolved(AppSettings.defaultSettings);
+
+  final TerminalPreferences terminalPreferences;
+  final TerminalPreferences terminalDefaults;
 
   final String id;
   final Host host;
@@ -138,10 +153,13 @@ class SessionInfo {
     bool? fellBackToDirectSsh,
     Object? agentWorkspace = _unchanged,
     Object? appId = _unchanged,
+    TerminalPreferences? terminalPreferences,
   }) => SessionInfo(
     id: id,
     host: host,
     engine: engine,
+    terminalPreferences: terminalPreferences ?? this.terminalPreferences,
+    terminalDefaults: terminalDefaults,
     status: status ?? this.status,
     error: identical(error, _unchanged) ? this.error : error as String?,
     failure: failure ?? this.failure,

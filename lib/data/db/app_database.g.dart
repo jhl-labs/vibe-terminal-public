@@ -248,6 +248,17 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _terminalPreferencesMeta =
+      const VerificationMeta('terminalPreferences');
+  @override
+  late final GeneratedColumn<String> terminalPreferences =
+      GeneratedColumn<String>(
+        'terminal_preferences',
+        aliasedName,
+        true,
+        type: DriftSqlType.string,
+        requiredDuringInsert: false,
+      );
   static const VerificationMeta _identityIdMeta = const VerificationMeta(
     'identityId',
   );
@@ -304,6 +315,7 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
     agentForwarding,
     x11Forwarding,
     startupScript,
+    terminalPreferences,
     identityId,
     createdAt,
     updatedAt,
@@ -496,6 +508,15 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
         ),
       );
     }
+    if (data.containsKey('terminal_preferences')) {
+      context.handle(
+        _terminalPreferencesMeta,
+        terminalPreferences.isAcceptableOrUnknown(
+          data['terminal_preferences']!,
+          _terminalPreferencesMeta,
+        ),
+      );
+    }
     if (data.containsKey('identity_id')) {
       context.handle(
         _identityIdMeta,
@@ -611,6 +632,10 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
         DriftSqlType.string,
         data['${effectivePrefix}startup_script'],
       ),
+      terminalPreferences: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}terminal_preferences'],
+      ),
       identityId: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}identity_id'],
@@ -654,6 +679,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
   final bool agentForwarding;
   final bool x11Forwarding;
   final String? startupScript;
+  final String? terminalPreferences;
   final String? identityId;
   final DateTime createdAt;
   final DateTime updatedAt;
@@ -679,6 +705,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     required this.agentForwarding,
     required this.x11Forwarding,
     this.startupScript,
+    this.terminalPreferences,
     this.identityId,
     required this.createdAt,
     required this.updatedAt,
@@ -726,6 +753,9 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     map['x11_forwarding'] = Variable<bool>(x11Forwarding);
     if (!nullToAbsent || startupScript != null) {
       map['startup_script'] = Variable<String>(startupScript);
+    }
+    if (!nullToAbsent || terminalPreferences != null) {
+      map['terminal_preferences'] = Variable<String>(terminalPreferences);
     }
     if (!nullToAbsent || identityId != null) {
       map['identity_id'] = Variable<String>(identityId);
@@ -776,6 +806,9 @@ class HostRow extends DataClass implements Insertable<HostRow> {
       startupScript: startupScript == null && nullToAbsent
           ? const Value.absent()
           : Value(startupScript),
+      terminalPreferences: terminalPreferences == null && nullToAbsent
+          ? const Value.absent()
+          : Value(terminalPreferences),
       identityId: identityId == null && nullToAbsent
           ? const Value.absent()
           : Value(identityId),
@@ -823,6 +856,9 @@ class HostRow extends DataClass implements Insertable<HostRow> {
       agentForwarding: serializer.fromJson<bool>(json['agentForwarding']),
       x11Forwarding: serializer.fromJson<bool>(json['x11Forwarding']),
       startupScript: serializer.fromJson<String?>(json['startupScript']),
+      terminalPreferences: serializer.fromJson<String?>(
+        json['terminalPreferences'],
+      ),
       identityId: serializer.fromJson<String?>(json['identityId']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
       updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
@@ -857,6 +893,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
       'agentForwarding': serializer.toJson<bool>(agentForwarding),
       'x11Forwarding': serializer.toJson<bool>(x11Forwarding),
       'startupScript': serializer.toJson<String?>(startupScript),
+      'terminalPreferences': serializer.toJson<String?>(terminalPreferences),
       'identityId': serializer.toJson<String?>(identityId),
       'createdAt': serializer.toJson<DateTime>(createdAt),
       'updatedAt': serializer.toJson<DateTime>(updatedAt),
@@ -885,6 +922,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     bool? agentForwarding,
     bool? x11Forwarding,
     Value<String?> startupScript = const Value.absent(),
+    Value<String?> terminalPreferences = const Value.absent(),
     Value<String?> identityId = const Value.absent(),
     DateTime? createdAt,
     DateTime? updatedAt,
@@ -927,6 +965,9 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     startupScript: startupScript.present
         ? startupScript.value
         : this.startupScript,
+    terminalPreferences: terminalPreferences.present
+        ? terminalPreferences.value
+        : this.terminalPreferences,
     identityId: identityId.present ? identityId.value : this.identityId,
     createdAt: createdAt ?? this.createdAt,
     updatedAt: updatedAt ?? this.updatedAt,
@@ -984,6 +1025,9 @@ class HostRow extends DataClass implements Insertable<HostRow> {
       startupScript: data.startupScript.present
           ? data.startupScript.value
           : this.startupScript,
+      terminalPreferences: data.terminalPreferences.present
+          ? data.terminalPreferences.value
+          : this.terminalPreferences,
       identityId: data.identityId.present
           ? data.identityId.value
           : this.identityId,
@@ -1016,6 +1060,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
           ..write('agentForwarding: $agentForwarding, ')
           ..write('x11Forwarding: $x11Forwarding, ')
           ..write('startupScript: $startupScript, ')
+          ..write('terminalPreferences: $terminalPreferences, ')
           ..write('identityId: $identityId, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt')
@@ -1046,6 +1091,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     agentForwarding,
     x11Forwarding,
     startupScript,
+    terminalPreferences,
     identityId,
     createdAt,
     updatedAt,
@@ -1075,6 +1121,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
           other.agentForwarding == this.agentForwarding &&
           other.x11Forwarding == this.x11Forwarding &&
           other.startupScript == this.startupScript &&
+          other.terminalPreferences == this.terminalPreferences &&
           other.identityId == this.identityId &&
           other.createdAt == this.createdAt &&
           other.updatedAt == this.updatedAt);
@@ -1102,6 +1149,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
   final Value<bool> agentForwarding;
   final Value<bool> x11Forwarding;
   final Value<String?> startupScript;
+  final Value<String?> terminalPreferences;
   final Value<String?> identityId;
   final Value<DateTime> createdAt;
   final Value<DateTime> updatedAt;
@@ -1128,6 +1176,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     this.agentForwarding = const Value.absent(),
     this.x11Forwarding = const Value.absent(),
     this.startupScript = const Value.absent(),
+    this.terminalPreferences = const Value.absent(),
     this.identityId = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
@@ -1155,6 +1204,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     this.agentForwarding = const Value.absent(),
     this.x11Forwarding = const Value.absent(),
     this.startupScript = const Value.absent(),
+    this.terminalPreferences = const Value.absent(),
     this.identityId = const Value.absent(),
     required DateTime createdAt,
     required DateTime updatedAt,
@@ -1187,6 +1237,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     Expression<bool>? agentForwarding,
     Expression<bool>? x11Forwarding,
     Expression<String>? startupScript,
+    Expression<String>? terminalPreferences,
     Expression<String>? identityId,
     Expression<DateTime>? createdAt,
     Expression<DateTime>? updatedAt,
@@ -1218,6 +1269,8 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
       if (agentForwarding != null) 'agent_forwarding': agentForwarding,
       if (x11Forwarding != null) 'x11_forwarding': x11Forwarding,
       if (startupScript != null) 'startup_script': startupScript,
+      if (terminalPreferences != null)
+        'terminal_preferences': terminalPreferences,
       if (identityId != null) 'identity_id': identityId,
       if (createdAt != null) 'created_at': createdAt,
       if (updatedAt != null) 'updated_at': updatedAt,
@@ -1247,6 +1300,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     Value<bool>? agentForwarding,
     Value<bool>? x11Forwarding,
     Value<String?>? startupScript,
+    Value<String?>? terminalPreferences,
     Value<String?>? identityId,
     Value<DateTime>? createdAt,
     Value<DateTime>? updatedAt,
@@ -1276,6 +1330,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
       agentForwarding: agentForwarding ?? this.agentForwarding,
       x11Forwarding: x11Forwarding ?? this.x11Forwarding,
       startupScript: startupScript ?? this.startupScript,
+      terminalPreferences: terminalPreferences ?? this.terminalPreferences,
       identityId: identityId ?? this.identityId,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
@@ -1353,6 +1408,9 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     if (startupScript.present) {
       map['startup_script'] = Variable<String>(startupScript.value);
     }
+    if (terminalPreferences.present) {
+      map['terminal_preferences'] = Variable<String>(terminalPreferences.value);
+    }
     if (identityId.present) {
       map['identity_id'] = Variable<String>(identityId.value);
     }
@@ -1392,6 +1450,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
           ..write('agentForwarding: $agentForwarding, ')
           ..write('x11Forwarding: $x11Forwarding, ')
           ..write('startupScript: $startupScript, ')
+          ..write('terminalPreferences: $terminalPreferences, ')
           ..write('identityId: $identityId, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
@@ -4900,6 +4959,7 @@ typedef $$HostsTableCreateCompanionBuilder =
       Value<bool> agentForwarding,
       Value<bool> x11Forwarding,
       Value<String?> startupScript,
+      Value<String?> terminalPreferences,
       Value<String?> identityId,
       required DateTime createdAt,
       required DateTime updatedAt,
@@ -4928,6 +4988,7 @@ typedef $$HostsTableUpdateCompanionBuilder =
       Value<bool> agentForwarding,
       Value<bool> x11Forwarding,
       Value<String?> startupScript,
+      Value<String?> terminalPreferences,
       Value<String?> identityId,
       Value<DateTime> createdAt,
       Value<DateTime> updatedAt,
@@ -5044,6 +5105,11 @@ class $$HostsTableFilterComposer extends Composer<_$AppDatabase, $HostsTable> {
 
   ColumnFilters<String> get startupScript => $composableBuilder(
     column: $table.startupScript,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get terminalPreferences => $composableBuilder(
+    column: $table.terminalPreferences,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -5177,6 +5243,11 @@ class $$HostsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get terminalPreferences => $composableBuilder(
+    column: $table.terminalPreferences,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<String> get identityId => $composableBuilder(
     column: $table.identityId,
     builder: (column) => ColumnOrderings(column),
@@ -5295,6 +5366,11 @@ class $$HostsTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<String> get terminalPreferences => $composableBuilder(
+    column: $table.terminalPreferences,
+    builder: (column) => column,
+  );
+
   GeneratedColumn<String> get identityId => $composableBuilder(
     column: $table.identityId,
     builder: (column) => column,
@@ -5356,6 +5432,7 @@ class $$HostsTableTableManager
                 Value<bool> agentForwarding = const Value.absent(),
                 Value<bool> x11Forwarding = const Value.absent(),
                 Value<String?> startupScript = const Value.absent(),
+                Value<String?> terminalPreferences = const Value.absent(),
                 Value<String?> identityId = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
                 Value<DateTime> updatedAt = const Value.absent(),
@@ -5382,6 +5459,7 @@ class $$HostsTableTableManager
                 agentForwarding: agentForwarding,
                 x11Forwarding: x11Forwarding,
                 startupScript: startupScript,
+                terminalPreferences: terminalPreferences,
                 identityId: identityId,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
@@ -5410,6 +5488,7 @@ class $$HostsTableTableManager
                 Value<bool> agentForwarding = const Value.absent(),
                 Value<bool> x11Forwarding = const Value.absent(),
                 Value<String?> startupScript = const Value.absent(),
+                Value<String?> terminalPreferences = const Value.absent(),
                 Value<String?> identityId = const Value.absent(),
                 required DateTime createdAt,
                 required DateTime updatedAt,
@@ -5436,6 +5515,7 @@ class $$HostsTableTableManager
                 agentForwarding: agentForwarding,
                 x11Forwarding: x11Forwarding,
                 startupScript: startupScript,
+                terminalPreferences: terminalPreferences,
                 identityId: identityId,
                 createdAt: createdAt,
                 updatedAt: updatedAt,

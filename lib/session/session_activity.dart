@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../state/providers.dart';
 import 'session_attention.dart';
+import 'session_notification_mute.dart';
 
 /// 세션별 busy/idle 상태를 터미널 출력 활동으로 추적한다.
 ///
@@ -125,6 +126,7 @@ class SessionActivityTracker extends Notifier<Map<String, bool>> {
       return;
     }
     if (_userIsWatching(id)) return;
+    if (ref.read(sessionNotificationMuteProvider).contains(id)) return;
 
     // 비동기 알림 표시가 끝나기 전에 같은 idle 판정이 다시 들어와도 한 번만
     // 전송되도록 호출 전에 latch를 닫는다.

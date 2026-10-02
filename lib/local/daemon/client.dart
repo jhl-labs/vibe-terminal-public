@@ -128,7 +128,9 @@ class LocalDaemonClient {
 }
 
 class DaemonTerminalHandle
-    implements TerminalReplaySessionHandle, LocalProcessSessionHandle {
+    implements
+        TerminalReplaySessionHandle,
+        PersistentLocalProcessSessionHandle {
   DaemonTerminalHandle(
     this.socket,
     this.generation, {
@@ -144,6 +146,9 @@ class DaemonTerminalHandle
   Future<void> get ready => _ready.future;
   bool _attached = false;
   bool _closed = false;
+  bool _processExited = false;
+  @override
+  bool get processExited => _processExited;
   @override
   bool get handlesTerminalQueries => true;
   @override
@@ -188,6 +193,7 @@ class DaemonTerminalHandle
             );
           case 'exit':
             exited = true;
+            _processExited = true;
             if (_attached) return;
           case 'ready':
             _attached = true;
@@ -203,6 +209,7 @@ class DaemonTerminalHandle
       if (!_ready.isCompleted) {
         _ready.completeError(StateError('Daemon attachment closed'));
       }
+      _closed = true;
       socket.destroy();
     }
   }
@@ -223,9 +230,15 @@ class DaemonTerminalHandle
       _send({'method': 'resize', 'cols': cols, 'rows': rows});
   @override
   Future<void> close() async {
-    _send({'method': 'detach'});
+    if (_closed) return;
     _closed = true;
-    await socket.flush();
-    socket.destroy();
+    try {
+      socket.write(daemonFrame({'method': 'detach', 'generation': generation}));
+      await socket.flush();
+    } catch (_) {
+      // 프로세스 종료나 전송 단절 뒤에는 detach 요청을 보낼 수 없다.
+    } finally {
+      socket.destroy();
+    }
   }
 }

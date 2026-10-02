@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 const _kDefaultFontSize = 13.0;
@@ -70,6 +71,21 @@ class TerminalStyle {
       decoration: underline ? TextDecoration.underline : TextDecoration.none,
     );
   }
+
+  // 값 동등성. 호출자가 build마다 새 TerminalStyle을 만들어 넘겨도 같은 값이면
+  // RenderTerminal/TerminalPainter가 셀 재측정과 문단 캐시 폐기를 건너뛴다.
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TerminalStyle &&
+          other.fontSize == fontSize &&
+          other.height == height &&
+          other.fontFamily == fontFamily &&
+          listEquals(other.fontFamilyFallback, fontFamilyFallback);
+
+  @override
+  int get hashCode => Object.hash(
+      fontSize, height, fontFamily, Object.hashAll(fontFamilyFallback));
 
   TerminalStyle copyWith({
     double? fontSize,

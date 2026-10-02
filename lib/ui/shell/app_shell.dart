@@ -10,7 +10,7 @@ import 'local_background_sessions_dialog.dart';
 import 'background_schedule_dialog.dart';
 import '../../session/session_pane_layout.dart';
 import 'dart:async';
-import 'dart:io' show File;
+import 'dart:io' show File, Platform;
 import 'package:path_provider/path_provider.dart';
 import '../../agent/local_agent_control_server.dart';
 import '../../agent/session_manager_port.dart';
@@ -21,25 +21,31 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/services.dart';
 
 import '../../agent/agent_launcher.dart';
 import '../../agent/agent_worktree.dart';
 import '../../agent/agent_workspace_run_probe.dart';
 import '../../app/build_features.dart';
+import '../../app/background_keep_alive.dart';
+import '../../app/keepalive_pulse.dart';
 import '../../app/theme.dart';
 import '../../data/models/host.dart';
 import '../../security/host_key_store.dart';
 import '../../session/session.dart';
+import '../../session/session_notification_mute.dart';
 import '../../settings/app_settings.dart';
 import '../../settings/shortcut_bindings.dart';
 import '../../ssh/ssh_service.dart';
 import '../../state/providers.dart';
+import '../../telemetry/telemetry.dart' show TelemetryEvent, TelemetryMessage;
 import '../adaptive/breakpoints.dart';
 import '../hosts/host_edit_page.dart';
 import '../hosts/host_picker.dart';
 import '../security/host_key_prompt.dart';
 import '../security/keyboard_interactive_prompt.dart';
 import '../settings/settings_sheet.dart';
+import '../terminal/action_bar_catalog.dart';
 import '../terminal/extra_keys_bar.dart';
 import '../terminal/session_terminal_view.dart';
 import 'agent_launch_dialog.dart';
@@ -78,6 +84,13 @@ IconData _rightPanelToolIcon(RightPanelTool tool) => rightPanelToolIcon(tool);
 
 String _rightPanelToolLabel(RightPanelTool tool) => rightPanelToolLabel(tool);
 
+/// 오류 보고의 `active_panel` 커스텀 키 값. 열린 도구의 enum 이름이거나 'none'.
+/// 사용자 정의 앱 이름 같은 사용자 입력 라벨은 절대 쓰지 않는다.
+String activePanelTelemetryKey(RightPanelState panel) =>
+    panel.open ? panel.tool.name : 'none';
+
+const _appChannel = MethodChannel('vibe_terminal/app');
+
 Map<ShortcutActivator, VoidCallback> _appShortcutCallbacks(
   AppSettings settings,
   WidgetRef ref,
@@ -101,6 +114,56 @@ class AppShell extends ConsumerStatefulWidget {
 
 class _AppShellState extends ConsumerState<AppShell> {
   final _paneDeckKey = GlobalKey<SessionPaneDeckState>();
+
+  /// 포그라운드 공지 푸시 구독. 텔레메트리가 없는 빌드에서는 빈 스트림이다.
+  StreamSubscription<TelemetryMessage>? _messageSub;
+
+  @override
+  void initState() {
+    super.initState();
+    // 복원된 세션 집합을 첫 변화 전에 기록해 둔다.
+    ref
+        .read(telemetryProvider)
+        .setKey('session_count', ref.read(sessionManagerProvider).length);
+    ref
+        .read(telemetryProvider)
+        .setKey(
+          'active_panel',
+          activePanelTelemetryKey(ref.read(rightPanelProvider)),
+        );
+    // iOS 에서 알림 권한이 거부되면 공지 토글을 꺼서 설정과 실제 상태를 맞춘다.
+    // (announcements=false 로 applySettings 가 다시 돌지만 구독을 시도하지
+    // 않으므로 콜백이 다시 오지 않는다.)
+    ref.read(telemetryProvider).onAnnouncementsDenied = () {
+      if (!mounted) return;
+      final current = ref.read(appSettingsProvider);
+      if (!current.telemetry.announcements) return;
+      ref
+          .read(appSettingsProvider.notifier)
+          .update(
+            current.copyWith(
+              telemetry: current.telemetry.copyWith(announcements: false),
+            ),
+          );
+    };
+    _messageSub = ref.read(telemetryProvider).messages.listen((message) {
+      final title = message.title ?? 'Vibe Terminal';
+      final body = message.body ?? '';
+      unawaited(
+        ref
+            .read(notificationServiceProvider)
+            .showAnnouncement(title: title, body: body, url: message.url),
+      );
+    });
+    // 공지 알림을 탭하면 payload 의 URL 을 연다. http/https 만 허용한다.
+    ref.read(notificationServiceProvider).onPayloadTapped = (payload) {
+      final uri = Uri.tryParse(payload);
+      if (uri != null && (uri.scheme == 'https' || uri.scheme == 'http')) {
+        unawaited(ref.read(externalUrlLauncherProvider)(uri));
+      }
+    };
+    unawaited(_maybeShowTelemetryNotice());
+  }
 
   /// 좌측 레일의 "여러 세션 조작" 버튼.
   void _showSessionBulk(BuildContext context) => showSessionBulkDialog(
@@ -273,8 +336,48 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   @override
   void dispose() {
+    unawaited(_messageSub?.cancel());
     unawaited(_controlServer?.stop());
     super.dispose();
+  }
+
+  /// 텔레메트리 빌드의 첫 실행에서 한 번만 안내 배너를 띄운다. 플래그 파일이
+  /// 이미 있으면 건너뛴다.
+  Future<void> _maybeShowTelemetryNotice() async {
+    if (!ref.read(buildFeaturesProvider).telemetry) return;
+    final flag = ref.read(telemetryNoticeFlagProvider);
+    if (await flag.isShown()) return;
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    // 같은 배너가 큐에 쌓이지 않게 한다.
+    messenger.clearMaterialBanners();
+    messenger.showMaterialBanner(
+      MaterialBanner(
+        key: const ValueKey('telemetry-notice'),
+        content: const Text(
+          '오류 보고와 사용 통계를 보내 앱을 개선합니다. 터미널 내용은 포함되지 않으며 설정에서 끌 수 있습니다.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => _dismissTelemetryNotice(messenger),
+            child: const Text('확인'),
+          ),
+          TextButton(
+            onPressed: () {
+              _dismissTelemetryNotice(messenger);
+              if (mounted) showVibeTerminalSettings(context);
+            },
+            child: const Text('설정 열기'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _dismissTelemetryNotice(ScaffoldMessengerState messenger) {
+    messenger.clearMaterialBanners();
+    unawaited(ref.read(telemetryNoticeFlagProvider).markShown());
   }
 
   Future<bool> _approveExternal(
@@ -407,6 +510,8 @@ class _AppShellState extends ConsumerState<AppShell> {
   final _mobileSessionSwipeGuard = _MobileSessionSwipeGuard();
   bool _mobileDrawerOpen = false;
   bool _mobileEndDrawerOpen = false;
+  String? _mobileTerminalActionsSessionId;
+  Map<String, VoidCallback> _mobileTerminalActions = const {};
 
   void _setMobileDrawerOpen(bool open) {
     if (_mobileDrawerOpen == open) return;
@@ -429,6 +534,42 @@ class _AppShellState extends ConsumerState<AppShell> {
     if (_mobileDrawerOpen) {
       _closeMobileDrawer();
     }
+  }
+
+  void _handleSystemBack() {
+    final scaffold = _mobileScaffoldKey.currentState;
+    if (_mobileEndDrawerOpen ||
+        scaffold?.isEndDrawerOpen == true ||
+        ref.read(rightPanelProvider).open) {
+      _closeMobileEndDrawer();
+      ref.read(rightPanelProvider.notifier).close();
+      return;
+    }
+    if (_mobileDrawerOpen || scaffold?.isDrawerOpen == true) {
+      _closeMobileDrawer();
+      return;
+    }
+    unawaited(_appChannel.invokeMethod<void>('moveToBackground'));
+  }
+
+  Widget _withBackNavigation(Widget child) {
+    if (Platform.isAndroid) {
+      return PopScope<void>(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) _handleSystemBack();
+        },
+        child: child,
+      );
+    }
+    if (!_mobileDrawerOpen && !_mobileEndDrawerOpen) return child;
+    return PopScope<void>(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _handleMobileBack();
+      },
+      child: child,
+    );
   }
 
   void _closeMobileDrawer() {
@@ -1171,6 +1312,7 @@ class _AppShellState extends ConsumerState<AppShell> {
   }
 
   Widget _centerTerminal(BuildContext context, WidgetRef ref) {
+    final compact = context.isCompact;
     final sessions = ref.watch(sessionManagerProvider);
     final activeGroupId = ref.watch(sessionGroupProvider).activeGroupId;
     final visibleSessions = [
@@ -1178,6 +1320,10 @@ class _AppShellState extends ConsumerState<AppShell> {
         if (session.groupId == activeGroupId) session,
     ];
     final activeId = ref.watch(activeSessionIdProvider);
+    if (compact) {
+      _mobileTerminalActionsSessionId = null;
+      _mobileTerminalActions = const {};
+    }
     if (sessions.isEmpty &&
         !ref.watch(sessionPaneLayoutsProvider).containsKey(activeGroupId)) {
       return _EmptyConsole(onNewSession: () => _newSession(context, ref));
@@ -1187,7 +1333,14 @@ class _AppShellState extends ConsumerState<AppShell> {
       Widget Function(Map<String, VoidCallback>) header,
     ) => SessionTerminalView(
       session: s,
-      paneHeaderBuilder: header,
+      paneHeaderBuilder: (actions) {
+        if (!compact) return header(actions);
+        if (s.id == activeId) {
+          _mobileTerminalActionsSessionId = s.id;
+          _mobileTerminalActions = actions;
+        }
+        return const SizedBox.shrink();
+      },
       paneShortcuts: _paneShortcuts,
       onRetry: () => _retrySession(context, ref, s),
       onEditHost: () => _editHost(context, ref, s.host),
@@ -1202,7 +1355,14 @@ class _AppShellState extends ConsumerState<AppShell> {
     if (activeId != null && visibleSessions.any((s) => s.id == activeId)) {
       layout = layout.selectSession(activeId);
     }
-    final settings = ref.watch(appSettingsProvider);
+    final globalSettings = ref.watch(appSettingsProvider);
+    final settings =
+        visibleSessions
+            .where((s) => s.id == activeId)
+            .firstOrNull
+            ?.terminalPreferences
+            .applyTo(globalSettings) ??
+        globalSettings;
     // Measure the configured font, then reserve 40 columns and 10 rows plus chrome.
     final cell = TextPainter(
       text: TextSpan(
@@ -1224,7 +1384,18 @@ class _AppShellState extends ConsumerState<AppShell> {
     // attention 은 출력 중 메시지(화면 미리보기)가 자주 바뀐다. 칸 테두리는
     // 상태만 쓰므로 상태 맵만 골라 구독해, 메시지 갱신마다 모든 터미널 칸이
     // 다시 빌드되는 것을 막는다.
-    final busy = ref.watch(sessionActivityProvider);
+    // busy 맵도 같은 이유로 값 기준으로 구독한다. notifier가 매번 새 Map을
+    // 만들어도 내용이 같으면 중앙(세션 칸 전부)을 다시 빌드하지 않는다.
+    final busy = ref
+        .watch(
+          sessionActivityProvider.select(
+            (map) => _BusyStates({
+              for (final entry in map.entries)
+                if (entry.value) entry.key: true,
+            }),
+          ),
+        )
+        .states;
     final attentionStates = ref.watch(
       sessionAttentionProvider.select(
         (map) => _AttentionStates({
@@ -1278,6 +1449,11 @@ class _AppShellState extends ConsumerState<AppShell> {
         }
         final previous =
             ref.read(sessionPaneLayoutsProvider)[activeGroupId] ?? layout;
+        if (next.panes.length > previous.panes.length) {
+          ref
+              .read(telemetryProvider)
+              .logEvent(TelemetryEvent.paneSplit(paneCount: next.panes.length));
+        }
         ref
             .read(sessionPaneLayoutsProvider.notifier)
             .setLayout(
@@ -1379,6 +1555,9 @@ class _AppShellState extends ConsumerState<AppShell> {
     final sessions = ref.watch(sessionManagerProvider);
     final activeId = ref.watch(activeSessionIdProvider);
     final activeGroupId = ref.watch(sessionGroupProvider).activeGroupId;
+    final activePaneLayout =
+        ref.watch(sessionPaneLayoutsProvider)[activeGroupId] ??
+        const SessionPaneLayout();
     final visibleSessions = [
       for (final session in sessions)
         if (session.groupId == activeGroupId) session,
@@ -1394,6 +1573,8 @@ class _AppShellState extends ConsumerState<AppShell> {
         break;
       }
     }
+    final activeTerminalSettings =
+        active?.terminalPreferences.applyTo(settings) ?? settings;
 
     Widget withAppShortcuts(Widget child) {
       final bindings = _appShortcutCallbacks(
@@ -1422,9 +1603,23 @@ class _AppShellState extends ConsumerState<AppShell> {
 
     // 열린 세션 수가 바뀔 때마다 백그라운드 keep-alive(포그라운드 서비스)와
     // keepalive 박자를 갱신한다. 세션이 있으면 켜고, 모두 닫히면 끈다.
+    ref.listen<String>(
+      rightPanelProvider.select(activePanelTelemetryKey),
+      (_, key) => ref.read(telemetryProvider).setKey('active_panel', key),
+    );
     ref.listen<List<SessionInfo>>(sessionManagerProvider, (prev, next) {
-      ref.read(backgroundKeepAliveProvider).update(next.length);
+      ref
+          .read(sessionNotificationMuteProvider.notifier)
+          .retainOnly(next.map((session) => session.id));
+      ref.read(telemetryProvider).setKey('session_count', next.length);
+      final keepAlive = ref.read(backgroundKeepAliveProvider);
+      keepAlive.update(next.length);
       final pulse = ref.read(keepalivePulseProvider);
+      if (pulse is ChannelKeepalivePulse &&
+          keepAlive is PlatformBackgroundKeepAlive) {
+        // 서비스가 스스로 내려가면 다음 세션 수 변화 때 다시 켜도록 한다.
+        pulse.onServiceStopped = keepAlive.markServiceStopped;
+      }
       if (next.isEmpty) {
         pulse.stop();
       } else {
@@ -1479,65 +1674,209 @@ class _AppShellState extends ConsumerState<AppShell> {
     );
 
     if (compact) {
-      final mobilePanelOpen = _mobileDrawerOpen || _mobileEndDrawerOpen;
-      final compactToolActions = <Widget>[];
-      if (features.snippets) {
-        compactToolActions.add(
-          Builder(
-            builder: (ctx) => IconButton(
-              tooltip: '스니펫',
-              icon: const Icon(Icons.code),
-              onPressed: () {
-                ref
-                    .read(rightPanelProvider.notifier)
-                    .open(RightPanelTool.snippets);
-                Scaffold.of(ctx).openEndDrawer();
-              },
-            ),
-          ),
-        );
+      final terminalMenuTokens = active == null
+          ? const <String>[]
+          : activeTerminalSettings.terminalHeaderItems
+                .where((token) => resolveHeaderToken(token) != null)
+                .toList();
+      final mobileMenuTools = [
+        if (features.snippets) RightPanelTool.snippets,
+        if (features.aiChat) RightPanelTool.aiChat,
+        ...availableTools.where(
+          (tool) =>
+              tool != RightPanelTool.snippets && tool != RightPanelTool.aiChat,
+        ),
+      ];
+      final canUndoPaneLayout = ref
+          .read(sessionPaneLayoutsProvider.notifier)
+          .canUndo(activeGroupId);
+      final activeMuted =
+          active != null &&
+          ref.watch(sessionNotificationMuteProvider).contains(active.id);
+      // 세 메뉴가 공유하는 동작 처리. 값 접두사로 어느 메뉴에서 왔는지 구분한다.
+      void handleCompactMenu(String value, BuildContext scaffoldContext) {
+        if (value.startsWith('terminal:')) {
+          final token = value.substring('terminal:'.length);
+          if (token == 'sessionPrev') {
+            _cycleSessionHandler(-1)?.call();
+          } else if (token == 'sessionNext') {
+            _cycleSessionHandler(1)?.call();
+          } else if (_mobileTerminalActionsSessionId == active?.id) {
+            _mobileTerminalActions[token]?.call();
+          }
+          return;
+        }
+        if (value.startsWith('tool:')) {
+          final toolName = value.substring('tool:'.length);
+          final tool = mobileMenuTools
+              .where((candidate) => candidate.name == toolName)
+              .firstOrNull;
+          if (tool != null) {
+            ref.read(rightPanelProvider.notifier).open(tool);
+            Scaffold.of(scaffoldContext).openEndDrawer();
+          }
+          return;
+        }
+        switch (value) {
+          case 'session:mute':
+            if (active != null) {
+              ref
+                  .read(sessionNotificationMuteProvider.notifier)
+                  .toggle(active.id);
+            }
+            return;
+          case 'session:close':
+            if (active != null) {
+              unawaited(requestCloseSession(context, ref, active));
+            }
+            return;
+        }
+        final deck = _paneDeckKey.currentState;
+        if (deck == null) return;
+        switch (value) {
+          case 'pane:splitRight':
+            unawaited(deck.splitFocused(PaneAxis.leftRight));
+            break;
+          case 'pane:splitDown':
+            unawaited(deck.splitFocused(PaneAxis.topBottom));
+            break;
+          case 'pane:toggleZoom':
+            deck.toggleZoom();
+            break;
+          case 'pane:remove':
+            deck.removeFocused();
+            break;
+          case 'pane:undo':
+            deck.undo();
+            break;
+          default:
+            if (value.startsWith('pane:swap:')) {
+              deck.swapFocusedWith(value.substring('pane:swap:'.length));
+            }
+            break;
+        }
       }
-      if (features.aiChat) {
-        compactToolActions.add(
-          Builder(
-            builder: (ctx) => IconButton(
-              tooltip: 'AI Chat',
-              icon: const Icon(Icons.auto_awesome),
-              onPressed: () {
-                ref
-                    .read(rightPanelProvider.notifier)
-                    .open(RightPanelTool.aiChat);
-                Scaffold.of(ctx).openEndDrawer();
-              },
-            ),
-          ),
-        );
-      }
-      final popupTools = availableTools
-          .where(
-            (tool) =>
-                tool != RightPanelTool.snippets &&
-                tool != RightPanelTool.aiChat,
-          )
-          .toList();
-      if (popupTools.isNotEmpty) {
-        compactToolActions.add(
-          Builder(
-            builder: (ctx) => PopupMenuButton<RightPanelTool>(
-              tooltip: '도구',
-              icon: const Icon(Icons.more_vert),
-              onSelected: (tool) {
-                ref.read(rightPanelProvider.notifier).open(tool);
-                Scaffold.of(ctx).openEndDrawer();
-              },
-              itemBuilder: (context) => [
-                for (final tool in popupTools)
-                  PopupMenuItem(
-                    value: tool,
+
+      final compactToolActions = <Widget>[
+        // 세션 동작: 헤더 동작 토큰 + 알림 음소거 + 세션 닫기.
+        Builder(
+          builder: (scaffoldContext) => PopupMenuButton<String>(
+            key: const ValueKey('mobile-menu-session'),
+            tooltip: '세션 동작',
+            icon: const Icon(Icons.terminal),
+            enabled: active != null,
+            onSelected: (value) => handleCompactMenu(value, scaffoldContext),
+            itemBuilder: (_) => [
+              for (final token in terminalMenuTokens)
+                if (resolveHeaderToken(token) case final definition?)
+                  PopupMenuItem<String>(
+                    value: 'terminal:$token',
+                    enabled: switch (token) {
+                      'sessionPrev' => _cycleSessionHandler(-1) != null,
+                      'sessionNext' => _cycleSessionHandler(1) != null,
+                      _ => true,
+                    },
                     child: Row(
                       children: [
-                        Icon(_rightPanelToolIcon(tool), size: 18),
-                        const SizedBox(width: 9),
+                        Icon(definition.icon ?? Icons.circle_outlined),
+                        const SizedBox(width: 12),
+                        Text(definition.label),
+                      ],
+                    ),
+                  ),
+              if (terminalMenuTokens.isNotEmpty) const PopupMenuDivider(),
+              PopupMenuItem<String>(
+                key: const ValueKey('mobile-menu-session-mute'),
+                value: 'session:mute',
+                child: Row(
+                  children: [
+                    Icon(
+                      activeMuted
+                          ? Icons.notifications_active_outlined
+                          : Icons.notifications_off_outlined,
+                    ),
+                    const SizedBox(width: 12),
+                    Text(activeMuted ? '알림 음소거 해제' : '알림 음소거'),
+                  ],
+                ),
+              ),
+              const PopupMenuItem<String>(
+                value: 'session:close',
+                child: Row(
+                  children: [
+                    Icon(Icons.close),
+                    SizedBox(width: 12),
+                    Text('세션 닫기'),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        // 분할 화면.
+        Builder(
+          builder: (scaffoldContext) => PopupMenuButton<String>(
+            key: const ValueKey('mobile-menu-pane'),
+            tooltip: '분할 화면',
+            icon: const Icon(Icons.vertical_split),
+            onSelected: (value) => handleCompactMenu(value, scaffoldContext),
+            itemBuilder: (_) => [
+              PopupMenuItem<String>(
+                value: 'pane:splitRight',
+                enabled: activePaneLayout.count < 4,
+                child: const Text('오른쪽에 나누기'),
+              ),
+              PopupMenuItem<String>(
+                value: 'pane:splitDown',
+                enabled: activePaneLayout.count < 4,
+                child: const Text('아래에 나누기'),
+              ),
+              for (final pane in activePaneLayout.panes.where(
+                (pane) => pane.id != activePaneLayout.focused.id,
+              ))
+                PopupMenuItem<String>(
+                  value: 'pane:swap:${pane.id}',
+                  child: Text(
+                    '${sessions.where((s) => s.id == pane.sessionId).firstOrNull?.displayName ?? '빈 칸'}과 교환',
+                  ),
+                ),
+              PopupMenuItem<String>(
+                value: 'pane:remove',
+                enabled: activePaneLayout.count > 1,
+                child: const Text('이 칸 없애기'),
+              ),
+              PopupMenuItem<String>(
+                value: 'pane:toggleZoom',
+                child: Text(
+                  _paneDeckKey.currentState?.isZoomed == true
+                      ? '분할로 돌아가기'
+                      : '이 칸 확대',
+                ),
+              ),
+              if (canUndoPaneLayout)
+                const PopupMenuItem<String>(
+                  value: 'pane:undo',
+                  child: Text('배치 되돌리기'),
+                ),
+            ],
+          ),
+        ),
+        // 앱: 우측 도구.
+        if (mobileMenuTools.isNotEmpty)
+          Builder(
+            builder: (scaffoldContext) => PopupMenuButton<String>(
+              key: const ValueKey('mobile-menu-apps'),
+              tooltip: '앱',
+              icon: const Icon(Icons.apps),
+              onSelected: (value) => handleCompactMenu(value, scaffoldContext),
+              itemBuilder: (_) => [
+                for (final tool in mobileMenuTools)
+                  PopupMenuItem<String>(
+                    value: 'tool:${tool.name}',
+                    child: Row(
+                      children: [
+                        Icon(_rightPanelToolIcon(tool)),
+                        const SizedBox(width: 12),
                         Expanded(child: Text(_rightPanelToolLabel(tool))),
                       ],
                     ),
@@ -1545,22 +1884,35 @@ class _AppShellState extends ConsumerState<AppShell> {
               ],
             ),
           ),
-        );
-      }
+      ];
 
-      return withAppShortcuts(
-        PopScope<void>(
-          canPop: !mobilePanelOpen,
-          onPopInvokedWithResult: (didPop, result) {
-            if (didPop) return;
-            _handleMobileBack();
-          },
-          child: Scaffold(
+      return _withBackNavigation(
+        withAppShortcuts(
+          Scaffold(
             key: _mobileScaffoldKey,
             onDrawerChanged: _setMobileDrawerOpen,
             onEndDrawerChanged: _setMobileEndDrawerOpen,
             appBar: AppBar(
-              title: Text(active?.displayName ?? 'Vibe Terminal'),
+              title: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flexible(
+                    child: Text(
+                      active?.displayName ?? 'Vibe Terminal',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (activeMuted) ...[
+                    const SizedBox(width: 6),
+                    const Icon(
+                      Icons.notifications_off_outlined,
+                      key: ValueKey('mobile-title-muted'),
+                      size: 16,
+                      semanticLabel: '알림 음소거됨',
+                    ),
+                  ],
+                ],
+              ),
               actions: compactToolActions,
             ),
             drawer: Drawer(
@@ -1630,45 +1982,47 @@ class _AppShellState extends ConsumerState<AppShell> {
     }
 
     // 데스크톱: 좌측 세션 보드 + 중앙 터미널 + 우측 도구 스트립.
-    return withAppShortcuts(
-      Scaffold(
-        body: ColoredBox(
-          color: VibeColors.bg,
-          child: Row(
-            children: [
-              _ResizableLeftPanel(
-                onNewSession: () => _newSession(context, ref),
-                onDuplicateSession: (session) =>
-                    _duplicateSession(context, ref, session),
-                onLaunchAgent: (session, spec) =>
-                    _launchAgentSession(context, ref, session, spec),
-                onReviewAgentChanges: (session) =>
-                    _reviewAgentChanges(context, ref, session),
-                onOpenAgentWorktrees: () => _openAgentWorktrees(context, ref),
-                onOpenSettings: () => showVibeTerminalSettings(context),
-                onBulk: () => _showSessionBulk(context),
-                onPreviousSession: _cycleSessionHandler(-1),
-                onNextSession: _cycleSessionHandler(1),
-              ),
-              const _PaneDivider(),
-              Expanded(child: centerArea),
-              if (availableTools.isNotEmpty) ...[
-                const _PaneDivider(),
-                _ToolStrip(
-                  panelState: rightPanel,
-                  availableTools: availableTools,
-                  onToggleTool: (tool) =>
-                      ref.read(rightPanelProvider.notifier).toggle(tool),
+    return _withBackNavigation(
+      withAppShortcuts(
+        Scaffold(
+          body: ColoredBox(
+            color: VibeColors.bg,
+            child: Row(
+              children: [
+                _ResizableLeftPanel(
+                  onNewSession: () => _newSession(context, ref),
+                  onDuplicateSession: (session) =>
+                      _duplicateSession(context, ref, session),
+                  onLaunchAgent: (session, spec) =>
+                      _launchAgentSession(context, ref, session, spec),
+                  onReviewAgentChanges: (session) =>
+                      _reviewAgentChanges(context, ref, session),
+                  onOpenAgentWorktrees: () => _openAgentWorktrees(context, ref),
+                  onOpenSettings: () => showVibeTerminalSettings(context),
+                  onBulk: () => _showSessionBulk(context),
+                  onPreviousSession: _cycleSessionHandler(-1),
+                  onNextSession: _cycleSessionHandler(1),
                 ),
-                if (rightPanel.open) ...[
+                const _PaneDivider(),
+                Expanded(child: centerArea),
+                if (availableTools.isNotEmpty) ...[
                   const _PaneDivider(),
-                  _ResizableRightPanel(
-                    onOpenSettings: () => showVibeTerminalSettings(context),
-                    paneLayoutPanel: _buildPaneLayoutPanel(context),
+                  _ToolStrip(
+                    panelState: rightPanel,
+                    availableTools: availableTools,
+                      onToggleTool: (tool) =>
+                        ref.read(rightPanelProvider.notifier).toggle(tool),
                   ),
+                  if (rightPanel.open) ...[
+                    const _PaneDivider(),
+                    _ResizableRightPanel(
+                      onOpenSettings: () => showVibeTerminalSettings(context),
+                      paneLayoutPanel: _buildPaneLayoutPanel(context),
+                    ),
+                  ],
                 ],
               ],
-            ],
+            ),
           ),
         ),
       ),
@@ -2357,6 +2711,21 @@ class _EmptyConsole extends StatelessWidget {
 
 /// [sessionAttentionProvider]에서 세션별 상태만 뽑은 값. `select` 는 `==` 로
 /// 변경을 판정하므로 맵 내용 비교를 제공한다.
+class _BusyStates {
+  const _BusyStates(this.states);
+
+  final Map<String, bool> states;
+
+  @override
+  bool operator ==(Object other) =>
+      other is _BusyStates && mapEquals(states, other.states);
+
+  @override
+  int get hashCode => Object.hashAll([
+    for (final entry in states.entries) Object.hash(entry.key, entry.value),
+  ]);
+}
+
 class _AttentionStates {
   const _AttentionStates(this.states);
 

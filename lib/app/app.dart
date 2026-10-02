@@ -1,8 +1,6 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'app_version.dart';
 import 'theme.dart';
@@ -10,8 +8,6 @@ import 'update_checker.dart';
 import 'update_notifier.dart';
 import '../state/providers.dart';
 import '../ui/shell/app_shell.dart';
-
-const _appChannel = MethodChannel('vibe_terminal/app');
 
 class VibeTerminalApp extends StatelessWidget {
   const VibeTerminalApp({super.key});
@@ -79,15 +75,7 @@ class _AppRootState extends ConsumerState<_AppRoot>
 
   @override
   Widget build(BuildContext context) {
-    if (!Platform.isAndroid) return const AppShell();
-    return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (didPop, _) async {
-        if (didPop) return;
-        await _appChannel.invokeMethod('moveToBackground');
-      },
-      child: const AppShell(),
-    );
+    return const AppShell();
   }
 
   Future<void> _restoreSessionsOnStartup() async {

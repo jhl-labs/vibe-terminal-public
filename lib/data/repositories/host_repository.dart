@@ -1,4 +1,7 @@
+import 'dart:convert';
+
 import 'package:drift/drift.dart';
+import '../../settings/terminal_preferences.dart';
 
 import '../../security/secure_store.dart';
 import '../../ssh/ssh_credentials.dart';
@@ -48,6 +51,20 @@ class HostRepository {
       next = host.copyWith(identityId: identity.id);
     }
     await _db.into(_db.hosts).insertOnConflictUpdate(_toRow(next));
+  }
+
+  Future<bool> setTerminalPreferences(
+    String id,
+    TerminalPreferences value,
+  ) async {
+    final count = await (_db.update(_db.hosts)..where((t) => t.id.equals(id)))
+        .write(
+          HostsCompanion(
+            terminalPreferences: Value(jsonEncode(value.toJson())),
+            updatedAt: Value(DateTime.now()),
+          ),
+        );
+    return count > 0;
   }
 
   Future<void> delete(String id) async {
@@ -153,6 +170,15 @@ class HostRepository {
     return values[index];
   }
 
+  TerminalPreferences _terminalPreferencesFromJson(String? value) {
+    if (value == null) return const TerminalPreferences();
+    try {
+      return TerminalPreferences.fromJson(jsonDecode(value));
+    } on FormatException {
+      return const TerminalPreferences();
+    }
+  }
+
   Host _toModel(HostRow r) => Host(
     id: r.id,
     alias: r.alias,
@@ -196,6 +222,7 @@ class HostRepository {
     agentForwarding: r.agentForwarding,
     x11Forwarding: r.x11Forwarding,
     startupScript: r.startupScript,
+    terminalPreferences: _terminalPreferencesFromJson(r.terminalPreferences),
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   );
@@ -223,6 +250,7 @@ class HostRepository {
     agentForwarding: Value(h.agentForwarding),
     x11Forwarding: Value(h.x11Forwarding),
     startupScript: Value(h.startupScript),
+    terminalPreferences: Value(jsonEncode(h.terminalPreferences.toJson())),
     createdAt: h.createdAt,
     updatedAt: h.updatedAt,
   );

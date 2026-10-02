@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,12 +8,13 @@ import '../../agent/risk_classifier.dart';
 import '../../ai/ai_chat_service.dart';
 import '../../ai/secret_masker.dart';
 import '../../ai/session_log_request.dart';
+import '../../ai/terminal_tool_call.dart';
 import '../../app/theme.dart';
 import '../../data/models/host.dart';
 import '../../session/session.dart';
 import '../../settings/app_settings.dart';
 import '../../state/providers.dart';
-import '../../terminal/terminal_input_codec.dart';
+import '../../telemetry/telemetry.dart';
 import 'ai_message_renderer.dart';
 
 class AiChatPanel extends ConsumerStatefulWidget {
@@ -29,9 +29,6 @@ class AiChatPanel extends ConsumerStatefulWidget {
 class _AiChatPanelState extends ConsumerState<AiChatPanel> {
   static const _terminalObservationDelay = Duration(milliseconds: 700);
   static const _maxSubmittedInputEcho = 2000;
-  static const _agentActionObservationDelay = Duration(milliseconds: 650);
-  static const _readSessionMaxLines = 60;
-  static const _maxTerminalToolCallRounds = 2;
 
   final _inputController = TextEditingController();
   final _scrollController = ScrollController();
@@ -194,7 +191,9 @@ class _AiChatPanelState extends ConsumerState<AiChatPanel> {
       ).showSnackBar(const SnackBar(content: Text('연결된 활성 세션이 없습니다')));
       return;
     }
-    session.engine.terminal.textInput(_normalizeTerminalInput(input));
+    session.engine.terminal.textInput(
+      TerminalToolExecutor.normalizeTerminalInput(input),
+    );
     ScaffoldMessenger.of(context)
       ..clearSnackBars()
       ..showSnackBar(const SnackBar(content: Text('활성 세션에 전송했습니다')));
@@ -365,7 +364,9 @@ Do not suggest destructive commands unless the log makes the user's intent expli
       return;
     }
     final command = _restoreDirectoryCommand(session, path);
-    session.engine.terminal.textInput(_ensureTerminalSubmit(command));
+    session.engine.terminal.textInput(
+      TerminalToolExecutor.ensureTerminalSubmit(command),
+    );
     ref
         .read(sessionManagerProvider.notifier)
         .markRestorePathCompleted(session.id);
@@ -494,23 +495,6 @@ Read the current terminal context again as the observation after that action. Te
 ''';
   }
 
-  String _normalizeTerminalInput(String input) {
-    final decoded = TerminalInputCodec.decode(input);
-    if (decoded.sawExplicitKey) {
-      return decoded.text;
-    }
-    return _ensureTerminalSubmit(decoded.text);
-  }
-
-  String _ensureTerminalSubmit(String input) {
-    final withoutTerminator = input.endsWith('\r\n')
-        ? input.substring(0, input.length - 2)
-        : input.endsWith('\r') || input.endsWith('\n')
-        ? input.substring(0, input.length - 1)
-        : input;
-    return '$withoutTerminator\r';
-  }
-
   bool _wantsTerminalToolCall(String text) {
     final lowered = text.toLowerCase();
     final mentionsTerminal =
@@ -546,288 +530,6 @@ Read the current terminal context again as the observation after that action. Te
         lowered.contains('tool') ||
         lowered.contains('function');
     return mentionsTerminal && sendCommand && (answerTarget || toolIntent);
-  }
-
-  Future<String> _runTerminalToolCall({
-    required AiSettings settings,
-    required SessionInfo session,
-    required String userGoal,
-    required List<AiChatMessage> requestMessages,
-    required AiChatService service,
-    required AiCancelToken cancelToken,
-  }) async {
-    final permissionScope = _AgentPermissionScope(
-      sessionIds: [session.id],
-      label: '현재 활성 세션',
-    );
-    final conversation = [
-      ...requestMessages,
-      AiChatMessage(
-        role: AiChatRole.user,
-        content: _terminalToolCallPrompt(userGoal, session.id),
-        createdAt: DateTime.now(),
-      ),
-    ];
-
-    // 모델이 먼저 read_sessions로 화면을 읽겠다고 하면 관찰 결과를 붙여 한
-    // 번만 더 묻는다. 그 이상은 Agent Chat의 몫이다.
-    for (var round = 1; round <= _maxTerminalToolCallRounds; round += 1) {
-      final raw = await service.complete(
-        settings: settings,
-        sessionLabel: session.displayName,
-        terminalContext: _terminalContext(session, settings),
-        messages: conversation,
-        cancelToken: cancelToken,
-        additionalSystemPrompt: _terminalToolCallSystemPrompt(session.id),
-      );
-      String? parseFailure;
-      final decision = _AgentDecision.tryParse(
-        raw,
-        onFailure: (reason) => parseFailure = reason,
-      );
-      if (decision == null) {
-        throw AiChatException(
-          '터미널 tool call JSON을 해석하지 못했습니다. '
-          '(${parseFailure ?? 'unknown'})\n\n'
-          '${_textFence(raw)}',
-          kind: AiChatFailureKind.invalidResponse,
-        );
-      }
-
-      final finish = decision.finishSummary;
-      if (finish != null) return finish;
-
-      final sendActions = decision.actions
-          .where((action) => action.tool == 'send_input')
-          .toList();
-      if (sendActions.isNotEmpty) {
-        final action = sendActions.first;
-        final result = await _executeAgentAction(
-          action,
-          homeSessionId: session.id,
-          permissionScope: permissionScope,
-          settings: settings,
-          cancelToken: cancelToken,
-        );
-        if (result.startsWith('send_input rejected')) {
-          return '터미널 tool call이 거부되었습니다.\n\n$result';
-        }
-        return _terminalToolCallFinishedMessage(action, result);
-      }
-
-      final readActions = decision.actions
-          .where(
-            (action) =>
-                action.tool == 'read_sessions' || action.tool == 'read_session',
-          )
-          .toList();
-      if (readActions.isNotEmpty && round < _maxTerminalToolCallRounds) {
-        final observation = await _executeAgentAction(
-          readActions.first,
-          homeSessionId: session.id,
-          permissionScope: permissionScope,
-          settings: settings,
-          cancelToken: cancelToken,
-        );
-        conversation
-          ..add(
-            AiChatMessage(
-              role: AiChatRole.assistant,
-              content: raw,
-              createdAt: DateTime.now(),
-            ),
-          )
-          ..add(
-            AiChatMessage(
-              role: AiChatRole.user,
-              content: _terminalToolCallObservationPrompt(observation),
-              createdAt: DateTime.now(),
-            ),
-          );
-        continue;
-      }
-
-      final fallback = decision.thought.trim();
-      if (fallback.isNotEmpty) return fallback;
-      throw AiChatException(
-        '모델이 실행할 terminal tool call을 선택하지 않았습니다. '
-        '(actions: ${decision.actions.map((a) => a.tool).join(', ')})',
-        kind: AiChatFailureKind.invalidResponse,
-      );
-    }
-    throw AiChatException(
-      '모델이 실행할 terminal tool call을 선택하지 않았습니다. '
-      '(read_sessions 이후에도 send_input/finish가 없음)',
-      kind: AiChatFailureKind.invalidResponse,
-    );
-  }
-
-  String _terminalToolCallObservationPrompt(String observation) =>
-      '''
-Tool result:
-${_textFence(observation)}
-
-Now choose exactly one `send_input` or `finish` action as JSON. Do not call read_sessions again.
-''';
-
-  String _terminalToolCallSystemPrompt(String sessionId) =>
-      '''
-You are Vibe Terminal's single terminal tool dispatcher. The user explicitly wants your generated answer to be sent into the active terminal through a tool call.
-
-Return exactly one JSON object and no Markdown. Schema:
-{
-  "thought": "short Korean reasoning summary",
-  "actions": [
-    {"tool": "send_input", "session_id": "$sessionId", "input": "exact terminal input", "submit": true, "reason": "why this is the requested terminal input"},
-    {"tool": "read_sessions", "session_ids": ["$sessionId"], "reason": "only when the terminal context above is not enough; returns the latest screen text"},
-    {"tool": "finish", "summary": "Korean message when you cannot safely send input"}
-  ],
-  "continue": false
-}
-
-Allowed session id: $sessionId.
-Use send_input only for the active session id above.
-Prefer send_input or finish directly; use read_sessions at most once.
-The input field must contain the answer/input the user asked you to put into the terminal.
-Set submit=true for shell commands or answers that should be submitted with Enter. Set submit=false only when the user clearly wants text typed without Enter.
-For destructive commands, privilege escalation, saving, quitting, deleting files, or irreversible choices, use finish unless the user explicitly requested that exact action.
-If the user's request is ambiguous, use finish with a concise Korean clarification instead of send_input.
-''';
-
-  String _terminalToolCallPrompt(String userGoal, String sessionId) =>
-      '''
-User asked for direct terminal input:
-$userGoal
-
-Choose exactly one terminal tool action for active session `$sessionId`.
-Do not answer in prose except inside the JSON fields.
-''';
-
-  String _terminalToolCallFinishedMessage(_AgentAction action, String result) {
-    final input = action.input ?? '';
-    final submitLabel = action.submit ? '입력 후 Enter' : '입력만';
-    return '''
-터미널 tool call을 실행했습니다. ($submitLabel)
-
-입력 내용:
-${_textFence(input)}
-
-$result
-'''
-        .trimRight();
-  }
-
-  String _textFence(String text) {
-    final fence = text.contains('```') ? '````' : '```';
-    return '$fence text\n$text\n$fence';
-  }
-
-  List<SessionInfo> _agentVisibleSessions({
-    required String homeSessionId,
-    required _AgentPermissionScope permissionScope,
-  }) {
-    final sessions = ref.read(sessionManagerProvider);
-    final visible = [
-      for (final session in sessions)
-        if (permissionScope.allows(session.id)) session,
-    ];
-    if (visible.isNotEmpty) return visible;
-    final home = _findSession(sessions, homeSessionId);
-    return home == null ? const [] : [home];
-  }
-
-  Future<String> _executeAgentAction(
-    _AgentAction action, {
-    required String homeSessionId,
-    required _AgentPermissionScope permissionScope,
-    required AiSettings settings,
-    required AiCancelToken cancelToken,
-  }) async {
-    switch (action.tool) {
-      case 'read_sessions':
-      case 'read_session':
-        final sessions = _agentVisibleSessions(
-          homeSessionId: homeSessionId,
-          permissionScope: permissionScope,
-        );
-        final ids = action.sessionIds;
-        final selected = ids.isEmpty
-            ? sessions
-            : sessions.where((session) => ids.contains(session.id)).toList();
-        if (selected.isEmpty) {
-          return 'read_sessions rejected: no session in permission scope '
-              'matches ${ids.join(', ')}';
-        }
-        return _readSessionsObservation(selected);
-      case 'send_input':
-        final session = _findSession(
-          _agentVisibleSessions(
-            homeSessionId: homeSessionId,
-            permissionScope: permissionScope,
-          ),
-          action.sessionId,
-        );
-        if (session == null) {
-          return 'send_input rejected: session ${action.sessionId ?? '(missing)'} is outside permission scope';
-        }
-        if (session.status != SessionStatus.connected) {
-          return 'send_input rejected: session ${session.id} is ${session.status.name}';
-        }
-        if (action.input == null || action.input!.isEmpty) {
-          return 'send_input rejected: empty input for ${session.id}';
-        }
-        // 모델이 만든 입력을 살아 있는 터미널에 그대로 보내는 지점이다.
-        // 모델 컨텍스트에는 원격 서버가 출력한 내용이 들어가므로, 서버가
-        // 모델을 유도해 파괴적인 명령을 만들어 낼 수 있다. Agent Chat과 같은
-        // 기준으로 분류하고, 위험하면 사용자 승인을 받는다.
-        final approved = await _confirmRiskyTerminalInput(
-          session: session,
-          input: action.input!,
-        );
-        if (!approved) {
-          return 'send_input rejected: user declined a destructive command for '
-              '${session.id}';
-        }
-        final input = action.submit
-            ? _normalizeTerminalInput(action.input!)
-            : TerminalInputCodec.decode(action.input!).text;
-        session.engine.terminal.textInput(input);
-        await Future<void>.delayed(_agentActionObservationDelay);
-        cancelToken.throwIfCancelled();
-        return 'send_input ${session.id}: ${action.reason ?? '(no reason)'}';
-      case 'wait':
-        final milliseconds = (action.milliseconds ?? 1000)
-            .clamp(100, 5000)
-            .toInt();
-        await Future<void>.delayed(Duration(milliseconds: milliseconds));
-        cancelToken.throwIfCancelled();
-        return 'waited ${milliseconds}ms: ${action.reason ?? '(no reason)'}';
-      case 'finish':
-        return 'finish: ${action.summary ?? action.reason ?? ''}';
-      default:
-        return 'tool rejected: unsupported tool `${action.tool}`';
-    }
-  }
-
-  /// 각 세션의 최근 화면(최대 [_readSessionMaxLines]줄)을 모델용 관찰 텍스트로
-  /// 만든다. provider로 나가는 터미널 텍스트이므로 비밀값을 가린다.
-  String _readSessionsObservation(List<SessionInfo> sessions) {
-    final buffer = StringBuffer()
-      ..writeln(
-        'read_sessions observed ${sessions.map((s) => s.id).join(', ')}',
-      );
-    for (final session in sessions) {
-      final screen = maskTerminalSecrets(
-        session.engine.recentPlainText(maxLines: _readSessionMaxLines),
-      ).trimRight();
-      buffer
-        ..writeln()
-        ..writeln(
-          '[session ${session.id} · ${session.displayName} · ${session.status.name}]',
-        )
-        ..writeln(screen.isEmpty ? '(empty screen)' : screen);
-    }
-    return buffer.toString().trimRight();
   }
 
   /// 세션 로그 tail을 읽어 [request]를 적용한 텍스트와 안내 문구를 돌려준다.
@@ -908,6 +610,14 @@ $result
     final session = _findSession(ref.read(sessionManagerProvider), sessionId);
     if (session == null) return;
     final settings = ref.read(appSettingsProvider).ai;
+    ref
+        .read(telemetryProvider)
+        .logEvent(
+          TelemetryEvent.aiChatSend(
+            settings.provider,
+            includesLog: _includeSessionLog,
+          ),
+        );
     final terminalContext = _terminalContext(session, settings);
     // 대화 히스토리·서비스 참조는 패널이 닫혀도 유효하도록 provider/notifier로
     // 보관·참조한다. ref는 위젯 dispose 후 무효이므로 비동기 전에 잡아둔다.
@@ -922,14 +632,17 @@ $result
       String reply;
       String? contextNote;
       if (useToolCall) {
-        reply = await _runTerminalToolCall(
-          settings: settings,
-          session: session,
-          userGoal: text,
-          requestMessages: requestMessages,
-          service: service,
-          cancelToken: cancelToken,
-        );
+        reply =
+            await TerminalToolCallRunner(
+              service: service,
+              executor: _toolExecutor(),
+            ).run(
+              settings: settings,
+              session: session,
+              userGoal: text,
+              requestMessages: requestMessages,
+              cancelToken: cancelToken,
+            );
       } else {
         // 기본은 화면만 본다. 토글이 켜져 있으면 처음부터 로그를 붙이고,
         // 아니면 모델이 `session-log` 블록으로 요청할 때 한 번만 붙여
@@ -949,6 +662,7 @@ $result
           messages: requestMessages,
           cancelToken: cancelToken,
           sessionLogContext: log?.text,
+          additionalSystemPrompt: _editionSystemPrompt(sessionId),
         );
         final request = log == null ? SessionLogRequest.tryParse(reply) : null;
         if (request != null) {
@@ -964,9 +678,12 @@ $result
             messages: requestMessages,
             cancelToken: cancelToken,
             sessionLogContext: log.text,
+            additionalSystemPrompt: _editionSystemPrompt(sessionId),
           );
         }
         contextNote = log?.note;
+        // 에디션 도구 블록(있으면)을 실행하고 결과 안내로 바꾼다.
+        if (mounted) reply = await _editionHandleReply(sessionId, reply);
       }
       // 패널이 닫혔어도(notifier는 유효) 응답을 저장해 맥락을 유지한다.
       chat.add(
@@ -1002,15 +719,38 @@ $result
   /// 그래도 이 경로에는 반드시 있어야 한다. 여기로 들어오는 입력은 원격
   /// 서버의 화면 내용을 읽은 모델이 만들어 낸 것이라, 사용자가 한 번도 보지
   /// 못한 명령이 그대로 실행될 수 있기 때문이다.
-  Future<bool> _confirmRiskyTerminalInput({
-    required SessionInfo session,
-    required String input,
-  }) async {
-    final verdict = const RiskClassifier().classify(
-      input,
-      screenContext: session.engine.recentPlainText(maxLines: 40),
-    );
-    if (!verdict.destructive) return true;
+  // ---------------------------------------------------------------------------
+  // 에디션 도구 접점. Pro는 AI Chat Pro 도구(예약 루틴·능동 감시)를 붙이고,
+  // Core 내보내기는 아래 다섯 메서드의 본문만 비운다(patches/ai_chat_panel).
+  // ---------------------------------------------------------------------------
+
+  Widget? _editionHeaderAction(SessionInfo? session) =>
+      null;
+
+  Widget? _editionStatusBar(SessionInfo? session) =>
+      null;
+
+  List<Widget> _editionComposerChips(SessionInfo? session, bool sending) =>
+      const [];
+
+  String? _editionSystemPrompt(String sessionId) =>
+      null;
+
+  Future<String> _editionHandleReply(String sessionId, String reply) =>
+      Future.value(reply);
+
+  /// 패널이 살아 있는 동안 세션 목록을 매번 다시 읽는 실행기. 파괴적 입력은
+  /// [_confirmRiskyTerminalInput] 다이얼로그로 승인받는다.
+  TerminalToolExecutor _toolExecutor() => TerminalToolExecutor(
+    sessions: () => ref.read(sessionManagerProvider),
+    approveRisky: _confirmRiskyTerminalInput,
+  );
+
+  Future<bool> _confirmRiskyTerminalInput(
+    SessionInfo session,
+    String input,
+    RiskVerdict verdict,
+  ) async {
     if (!mounted) return false;
 
     final approved = await showDialog<bool>(
@@ -1139,6 +879,7 @@ $result
                 : () => _adjustChatFontSize(1),
             // 대화가 있고 전송 중이 아닐 때만 '새 대화' 버튼 노출.
             onNewChat: messages.isEmpty || sending ? null : _startNewChat,
+            trailing: _editionHeaderAction(session),
           ),
           if (!settings.isConfigured)
             _AiNotice(
@@ -1211,11 +952,13 @@ $result
                     },
                   ),
           ),
+          ?_editionStatusBar(session),
           _AiInputBar(
             controller: _inputController,
             sending: sending,
             onSend: () => _send(),
             onCancel: () => _cancel(sessionId),
+            extraChips: _editionComposerChips(session, sending),
             forceTerminalToolCall: _forceTerminalToolCall,
             onToggleTerminalToolCall: (value) =>
                 setState(() => _forceTerminalToolCall = value),
@@ -1248,156 +991,6 @@ class _RetryableRequest {
   final Future<void> Function() run;
 }
 
-class _AgentPermissionScope {
-  const _AgentPermissionScope({required this.sessionIds, required this.label});
-
-  final List<String> sessionIds;
-  final String label;
-
-  bool get multiSession => sessionIds.length > 1;
-
-  String get idsLabel => sessionIds.join(', ');
-
-  bool allows(String sessionId) => sessionIds.contains(sessionId);
-}
-
-class _AgentDecision {
-  const _AgentDecision({
-    required this.thought,
-    required this.actions,
-    required this.continueLoop,
-  });
-
-  final String thought;
-  final List<_AgentAction> actions;
-  final bool continueLoop;
-
-  String? get finishSummary {
-    for (final action in actions) {
-      if (action.tool == 'finish') {
-        final summary = action.summary ?? action.reason ?? thought;
-        return summary.trim().isEmpty ? 'Agent loop가 완료되었습니다.' : summary;
-      }
-    }
-    return null;
-  }
-
-  /// 해석에 실패하면 null. 실패 이유는 debugPrint로 남기고 [onFailure]로도
-  /// 알려서 오류 말풍선에 짧은 힌트를 붙일 수 있게 한다.
-  static _AgentDecision? tryParse(
-    String raw, {
-    void Function(String reason)? onFailure,
-  }) {
-    void fail(String reason) {
-      debugPrint('AiChatPanel: agent decision parse failed: $reason');
-      onFailure?.call(reason);
-    }
-
-    final jsonText = _extractJson(raw);
-    if (jsonText == null) {
-      fail('응답에서 JSON 객체를 찾지 못함');
-      return null;
-    }
-    try {
-      final decoded = jsonDecode(jsonText);
-      if (decoded is! Map) {
-        fail('JSON 최상위가 객체가 아님: ${decoded.runtimeType}');
-        return null;
-      }
-      final actionsRaw = decoded['actions'];
-      final actions = <_AgentAction>[];
-      if (actionsRaw is List) {
-        for (final item in actionsRaw) {
-          if (item is Map) {
-            final action = _AgentAction.fromJson(item);
-            if (action != null) actions.add(action);
-          }
-        }
-      } else if (actionsRaw is Map) {
-        final action = _AgentAction.fromJson(actionsRaw);
-        if (action != null) actions.add(action);
-      }
-      return _AgentDecision(
-        thought: decoded['thought'] is String
-            ? decoded['thought'] as String
-            : '',
-        actions: actions,
-        continueLoop: decoded['continue'] == true,
-      );
-    } on FormatException catch (e) {
-      fail('JSON 문법 오류: ${e.message}');
-      return null;
-    } catch (e) {
-      fail('JSON 해석 중 예외: $e');
-      return null;
-    }
-  }
-
-  static String? _extractJson(String raw) {
-    final trimmed = raw.trim();
-    if (trimmed.isEmpty) return null;
-    if (trimmed.startsWith('```')) {
-      final lines = trimmed.split('\n');
-      if (lines.length >= 3 && lines.last.trim() == '```') {
-        return lines.sublist(1, lines.length - 1).join('\n').trim();
-      }
-    }
-    final start = trimmed.indexOf('{');
-    final end = trimmed.lastIndexOf('}');
-    if (start == -1 || end <= start) return null;
-    return trimmed.substring(start, end + 1);
-  }
-}
-
-class _AgentAction {
-  const _AgentAction({
-    required this.tool,
-    this.sessionId,
-    this.sessionIds = const [],
-    this.input,
-    this.submit = true,
-    this.milliseconds,
-    this.reason,
-    this.summary,
-  });
-
-  final String tool;
-  final String? sessionId;
-  final List<String> sessionIds;
-  final String? input;
-  final bool submit;
-  final int? milliseconds;
-  final String? reason;
-  final String? summary;
-
-  bool get needsVerification => tool == 'send_input' || tool == 'wait';
-
-  static _AgentAction? fromJson(Map<dynamic, dynamic> json) {
-    final tool = json['tool'];
-    if (tool is! String || tool.trim().isEmpty) return null;
-    final idsRaw = json['session_ids'];
-    final sessionIds = idsRaw is List
-        ? [
-            for (final id in idsRaw)
-              if (id is String && id.trim().isNotEmpty) id.trim(),
-          ]
-        : const <String>[];
-    final milliseconds = json['milliseconds'];
-    return _AgentAction(
-      tool: tool.trim().toLowerCase(),
-      sessionId: json['session_id'] is String
-          ? (json['session_id'] as String).trim()
-          : null,
-      sessionIds: sessionIds,
-      input: json['input'] is String ? json['input'] as String : null,
-      submit: json['submit'] is bool ? json['submit'] as bool : true,
-      milliseconds: milliseconds is int ? milliseconds : null,
-      reason: json['reason'] is String ? json['reason'] as String : null,
-      summary: json['summary'] is String ? json['summary'] as String : null,
-    );
-  }
-}
-
 class _AiPanelHeader extends StatelessWidget {
   const _AiPanelHeader({
     required this.session,
@@ -1407,6 +1000,7 @@ class _AiPanelHeader extends StatelessWidget {
     required this.onDecreaseFontSize,
     required this.onIncreaseFontSize,
     required this.onNewChat,
+    this.trailing,
   });
 
   final SessionInfo? session;
@@ -1416,6 +1010,9 @@ class _AiPanelHeader extends StatelessWidget {
   final VoidCallback? onDecreaseFontSize;
   final VoidCallback? onIncreaseFontSize;
   final VoidCallback? onNewChat;
+
+  /// 새 대화 버튼 앞에 놓을 추가 버튼(에디션별 도구).
+  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) {
@@ -1454,6 +1051,7 @@ class _AiPanelHeader extends StatelessWidget {
               ],
             ),
           ),
+          ?trailing,
           if (onNewChat != null)
             _AiHeaderIconButton(
               tooltip: '새 대화',
@@ -1971,12 +1569,16 @@ class _AiInputBar extends StatefulWidget {
     required this.fontFamily,
     required this.fontFallback,
     required this.fontSize,
+    this.extraChips = const [],
   });
 
   final TextEditingController controller;
   final bool sending;
   final VoidCallback onSend;
   final VoidCallback onCancel;
+
+  /// 기본 토글 앞에 놓을 추가 칩(에디션별 도구).
+  final List<Widget> extraChips;
 
   /// '터미널로 보내기' 토글 상태와 변경 콜백.
   final bool forceTerminalToolCall;
@@ -2053,9 +1655,12 @@ class _AiInputBarState extends State<_AiInputBar> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
+            Wrap(
+              alignment: WrapAlignment.end,
+              spacing: 6,
+              runSpacing: 6,
               children: [
+                ...widget.extraChips,
                 _ComposerToggleChip(
                   label: '로그 포함',
                   icon: Icons.history_toggle_off,
@@ -2065,7 +1670,6 @@ class _AiInputBarState extends State<_AiInputBar> {
                       : '켜면 화면뿐 아니라 세션 로그(스크롤 밖 출력)까지 함께 보냅니다',
                   onSelected: widget.sending ? null : widget.onToggleSessionLog,
                 ),
-                const SizedBox(width: 6),
                 _ComposerToggleChip(
                   label: '터미널로 보내기',
                   icon: Icons.terminal,

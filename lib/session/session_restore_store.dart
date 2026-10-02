@@ -7,6 +7,7 @@ import '../agent/agent_launcher.dart';
 import '../core/atomic_file.dart';
 import '../data/models/host.dart';
 import 'session_group.dart';
+import '../settings/terminal_preferences.dart';
 
 class RestoredSessionEntry {
   const RestoredSessionEntry({
@@ -25,8 +26,12 @@ class RestoredSessionEntry {
     this.remoteSessionId,
     this.localSessionId,
     this.agentWorkspace,
+    this.terminalPreferences,
+    this.terminalDefaults,
   });
 
+  final TerminalPreferences? terminalPreferences;
+  final TerminalPreferences? terminalDefaults;
   final String id;
   final String hostId;
   final String? title;
@@ -46,6 +51,10 @@ class RestoredSessionEntry {
   Map<String, Object?> toJson() => {
     'id': id,
     'hostId': hostId,
+    if (terminalPreferences != null)
+      'terminalPreferences': terminalPreferences!.toJson(),
+    if (terminalDefaults != null)
+      'terminalDefaults': terminalDefaults!.toJson(),
     if (localSessionId != null) 'localSessionId': localSessionId,
     if (title != null) 'title': title,
     if (terminalText != null && terminalText!.isNotEmpty)
@@ -106,6 +115,12 @@ class RestoredSessionEntry {
           ? remoteSessionId
           : null,
       agentWorkspace: agentWorkspace,
+      terminalPreferences: value['terminalPreferences'] is Map
+          ? TerminalPreferences.fromJson(value['terminalPreferences'])
+          : null,
+      terminalDefaults: value['terminalDefaults'] is Map
+          ? TerminalPreferences.fromJson(value['terminalDefaults'])
+          : null,
     );
   }
 

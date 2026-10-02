@@ -6,6 +6,8 @@ import '../agent/agent_semantic_event.dart';
 import '../agent/agent_session_inspector.dart';
 import '../state/providers.dart';
 
+const Object _unchanged = Object();
+
 enum SessionAttentionState { idle, working, done, blocked }
 
 enum SessionAttentionSource { screen, hook, external }
@@ -30,7 +32,7 @@ class SessionAttention {
 
   final String sessionId;
   final SessionAttentionState state;
-  final String agentHint;
+  final String? agentHint;
   final String message;
   final DateTime updatedAt;
   final SessionAttentionSource source;
@@ -49,14 +51,16 @@ class SessionAttention {
 
   SessionAttention copyWith({
     SessionAttentionState? state,
-    String? agentHint,
+    Object? agentHint = _unchanged,
     String? message,
     DateTime? updatedAt,
     SessionAttentionSource? source,
   }) => SessionAttention(
     sessionId: sessionId,
     state: state ?? this.state,
-    agentHint: agentHint ?? this.agentHint,
+    agentHint: identical(agentHint, _unchanged)
+        ? this.agentHint
+        : agentHint as String?,
     message: message ?? this.message,
     updatedAt: updatedAt ?? this.updatedAt,
     source: source ?? this.source,
@@ -78,6 +82,9 @@ class SessionAttentionTracker extends Notifier<Map<String, SessionAttention>> {
   /// 터미널 제목으로 알아낸 Agent. 화면 문구는 스크롤·재그리기로 사라지지만
   /// 제목은 Agent가 살아 있는 동안 유지되므로 화면 판별을 보완한다.
   final Map<String, AgentSessionInspection> _titleHints = {};
+  final Map<String, String> _lastScreens = {};
+  final Map<String, String> _screenHints = {};
+  final Map<String, String> _retiredScreens = {};
 
   @override
   Map<String, SessionAttention> build() {
@@ -95,13 +102,16 @@ class SessionAttentionTracker extends Notifier<Map<String, SessionAttention>> {
   /// 터미널 제목(OSC 0/2)이 바뀌었다.
   ///
   /// Agent 제목이면 이후 화면 판별에서 Agent로 취급한다. Agent 제목이었다가
-  /// 셸 제목(`user@host: ~`)으로 돌아오면 Agent가 종료된 것이므로, hook이나
-  /// 외부 차단이 없는 화면 기반 상태는 지운다 — 그래야 `claude`를 한 번 띄운
-  /// 셸이 영원히 Agent 세션으로 남지 않는다.
+  /// 셸 제목(`user@host: ~`)으로 돌아오면 Agent가 종료된 것으로 보고 식별
+  /// 상태를 정리한다. 외부 차단 알림이 있더라도 Agent 레이블 근거만 지운다.
   void markTitle(String sessionId, String title) {
     final inspection = AgentSessionInspector.inspectTitle(title);
     if (inspection.isPossibleAgent) {
       _titleHints[sessionId] = inspection;
+      _retiredScreens.remove(sessionId);
+      if (_semanticSignals[sessionId]?.provider != inspection.agentHint) {
+        _semanticSignals.remove(sessionId);
+      }
       final current = state[sessionId];
       if (current == null) {
         _set(
@@ -113,54 +123,89 @@ class SessionAttentionTracker extends Notifier<Map<String, SessionAttention>> {
             updatedAt: clock.now(),
           ),
         );
-      } else if (current.source == SessionAttentionSource.screen &&
-          current.agentHint != inspection.agentHint &&
-          _outranksScreenHint(current, inspection)) {
-        _set(current.copyWith(agentHint: inspection.agentHint));
+      } else if (current.agentHint != inspection.agentHint) {
+        _set(
+          current.copyWith(
+            agentHint: inspection.agentHint,
+            state: _externalBlocks.containsKey(sessionId)
+                ? SessionAttentionState.blocked
+                : SessionAttentionState.idle,
+            source: _externalBlocks.containsKey(sessionId)
+                ? SessionAttentionSource.external
+                : SessionAttentionSource.screen,
+            message: _externalBlockMessage(sessionId) ?? inspection.preview,
+            updatedAt: clock.now(),
+          ),
+        );
       }
       return;
     }
-    if (_titleHints.remove(sessionId) == null) return;
+    if (!AgentSessionInspector.isShellTitle(title)) return;
+    final screen = _lastScreens[sessionId];
+    if (screen != null) _retiredScreens[sessionId] = screen;
     final current = state[sessionId];
-    if (current == null ||
-        current.source != SessionAttentionSource.screen ||
-        _externalBlocks.containsKey(sessionId) ||
-        _semanticSignals.containsKey(sessionId)) {
-      return;
-    }
-    state = {...state}..remove(sessionId);
+    _clearAgentState(sessionId, current: current);
   }
 
-  bool _outranksScreenHint(
-    SessionAttention current,
-    AgentSessionInspection title,
-  ) =>
-      title.isConfirmedAgent ||
-      current.agentHint == 'agent' ||
-      current.agentHint == 'unknown';
-
-  /// 화면 판별과 제목 판별을 합쳐 Agent 이름을 정한다. 확정 근거를 우선하고,
-  /// 둘 다 느슨하면 제목(셸 제목이 아닌 TUI 제목)을 믿는다.
+  /// Current titles and fresh branded UI supersede historical screen evidence.
   String? _resolveHint(
     String sessionId,
     AgentAttentionAssessment assessment,
     SessionAttention? previous,
   ) {
-    final title = _titleHints[sessionId];
+    var title = _titleHints[sessionId];
+    final lastScreenHint = _screenHints[sessionId];
+    if (assessment.confidence == AgentDetectionConfidence.confirmed) {
+      _screenHints[sessionId] = assessment.agentHint;
+      if (title != null &&
+          lastScreenHint != null &&
+          assessment.agentHint != lastScreenHint &&
+          assessment.agentHint != title.agentHint) {
+        _titleHints.remove(sessionId);
+        title = null;
+      }
+      if (title == null &&
+          lastScreenHint != null &&
+          lastScreenHint != assessment.agentHint &&
+          _semanticSignals[sessionId]?.provider != assessment.agentHint) {
+        _semanticSignals.remove(sessionId);
+      }
+    }
+    if (title != null) return title.agentHint;
+    final semantic = _semanticSignals[sessionId];
+    if (semantic != null) return semantic.provider;
     if (assessment.confidence == AgentDetectionConfidence.confirmed) {
       return assessment.agentHint;
     }
-    if (title != null) return title.agentHint;
-    // 느슨한 화면 근거('agent', 우연히 지나간 단어)로 이미 정한 이름을 바꾸지 않는다.
-    if (previous != null) return previous.agentHint;
-    return assessment.isAgent ? assessment.agentHint : null;
+    // A generic TUI footer may retain a known identity, a name in prose may not.
+    if (assessment.agentHint == 'agent') return previous?.agentHint ?? 'agent';
+    return null;
+  }
+
+  bool _prepareScreen(String sessionId, String screen) {
+    _lastScreens[sessionId] = screen;
+    if (_retiredScreens[sessionId] == screen) return false;
+    _retiredScreens.remove(sessionId);
+    if (AgentSessionInspector.hasShellPrompt(screen)) {
+      _clearAgentState(sessionId);
+      return false;
+    }
+    return true;
   }
 
   void markWorking(String sessionId, String screen) {
-    final assessment = _classifier.inspect(screen);
+    if (!_prepareScreen(sessionId, screen)) return;
+    final assessment = _classifier.inspect(screen, liveSession: true);
     final previous = state[sessionId];
     final agentHint = _resolveHint(sessionId, assessment, previous);
-    if (agentHint == null) return;
+    if (agentHint == null) {
+      // 빈 화면은 resize/startup 중에도 잠깐 나타날 수 있으므로, 실제 셸
+      // 출력이 확인된 경우에만 Agent 상태를 종료한다.
+      if (assessment.preview != '(화면 내용 없음)') {
+        _clearAgentState(sessionId, current: previous);
+      }
+      return;
+    }
     final externalMessage = _externalBlockMessage(sessionId);
     final semantic = _semanticSignals[sessionId];
     if (externalMessage == null && semantic != null) {
@@ -189,10 +234,16 @@ class SessionAttentionTracker extends Notifier<Map<String, SessionAttention>> {
     required bool completedLongTask,
     required bool userIsWatching,
   }) {
-    final assessment = _classifier.inspect(screen);
+    if (!_prepareScreen(sessionId, screen)) return null;
+    final assessment = _classifier.inspect(screen, liveSession: true);
     final previous = state[sessionId];
     final agentHint = _resolveHint(sessionId, assessment, previous);
-    if (agentHint == null) return null;
+    if (agentHint == null) {
+      if (assessment.preview != '(화면 내용 없음)') {
+        _clearAgentState(sessionId, current: previous);
+      }
+      return null;
+    }
 
     final externalMessage = _externalBlockMessage(sessionId);
     final semantic = _semanticSignals[sessionId];
@@ -252,15 +303,31 @@ class SessionAttentionTracker extends Notifier<Map<String, SessionAttention>> {
     AgentSemanticEvent event, {
     required bool userIsWatching,
   }) {
+    if (event.phase == AgentSemanticPhase.stopped) {
+      final active = _semanticSignals[sessionId];
+      if (state[sessionId]?.agentHint != event.provider ||
+          (active?.providerSessionId != null &&
+              event.providerSessionId != null &&
+              active!.providerSessionId != event.providerSessionId)) {
+        return;
+      }
+      final screen = _lastScreens[sessionId];
+      if (screen != null) _retiredScreens[sessionId] = screen;
+      _clearAgentState(sessionId, current: state[sessionId]);
+      return;
+    }
+    _retiredScreens.remove(sessionId);
+    if (_titleHints[sessionId]?.agentHint != event.provider) {
+      _titleHints.remove(sessionId);
+    }
     _semanticSignals[sessionId] = event;
     final externalMessage = _externalBlockMessage(sessionId);
     if (externalMessage != null) {
-      final current = state[sessionId];
       _set(
         SessionAttention(
           sessionId: sessionId,
           state: SessionAttentionState.blocked,
-          agentHint: current?.agentHint ?? event.provider,
+          agentHint: event.provider,
           message: externalMessage,
           updatedAt: clock.now(),
           source: SessionAttentionSource.external,
@@ -337,10 +404,31 @@ class SessionAttentionTracker extends Notifier<Map<String, SessionAttention>> {
   }
 
   void remove(String sessionId) {
+    _lastScreens.remove(sessionId);
+    _retiredScreens.remove(sessionId);
+    _screenHints.remove(sessionId);
     _externalBlocks.remove(sessionId);
     _semanticSignals.remove(sessionId);
     _titleHints.remove(sessionId);
     if (!state.containsKey(sessionId)) return;
+    state = {...state}..remove(sessionId);
+  }
+
+  /// Agent가 종료되어 일반 셸로 돌아왔을 때 Agent 식별 상태를 정리한다.
+  ///
+  /// 외부 차단(예: Git 충돌)이 남아 있으면 그 알림은 보존하되, 현재 세션을
+  /// Agent로 표시할 근거는 제거한다. 외부 차단이 없으면 attention 자체도
+  /// 제거해 일반 세션으로 되돌린다.
+  void _clearAgentState(String sessionId, {SessionAttention? current}) {
+    _titleHints.remove(sessionId);
+    _semanticSignals.remove(sessionId);
+    _screenHints.remove(sessionId);
+    final attention = current ?? state[sessionId];
+    if (attention == null) return;
+    if (_externalBlocks.containsKey(sessionId)) {
+      _set(attention.copyWith(agentHint: null));
+      return;
+    }
     state = {...state}..remove(sessionId);
   }
 

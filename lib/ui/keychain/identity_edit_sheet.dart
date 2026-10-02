@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../data/models/host.dart';
 import '../../data/models/identity.dart';
 import '../../state/providers.dart';
+import '../../security/secure_screen.dart';
 
 /// Identity 생성/편집 시트. 호스트 편집(Task 11)에서도 재사용한다.
 Future<Identity?> showIdentityEditSheet(
@@ -113,101 +114,103 @@ class _IdentitySheetState extends State<_IdentitySheet> {
   @override
   Widget build(BuildContext context) {
     final keys = widget.ref.read(sshKeyListProvider).value ?? const [];
-    return Padding(
-      padding: EdgeInsets.fromLTRB(
-        20,
-        20,
-        20,
-        20 + MediaQuery.viewInsetsOf(context).bottom,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            widget.existing == null ? '새 Identity' : 'Identity 편집',
-            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            key: const ValueKey('identity-label'),
-            controller: _label,
-            decoration: const InputDecoration(
-              labelText: '라벨',
-              hintText: '예: 운영 계정',
+    return SecureScreenScope(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          20,
+          20,
+          20,
+          20 + MediaQuery.viewInsetsOf(context).bottom,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              widget.existing == null ? '새 Identity' : 'Identity 편집',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
             ),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            key: const ValueKey('identity-username'),
-            controller: _username,
-            decoration: const InputDecoration(labelText: '사용자명'),
-          ),
-          const SizedBox(height: 12),
-          DropdownButtonFormField<HostAuthType>(
-            key: const ValueKey('identity-auth-type'),
-            initialValue: _authType,
-            decoration: const InputDecoration(labelText: '인증 방식'),
-            items: const [
-              DropdownMenuItem(
-                value: HostAuthType.password,
-                child: Text('비밀번호'),
+            const SizedBox(height: 12),
+            TextField(
+              key: const ValueKey('identity-label'),
+              controller: _label,
+              decoration: const InputDecoration(
+                labelText: '라벨',
+                hintText: '예: 운영 계정',
               ),
-              DropdownMenuItem(
-                value: HostAuthType.publicKey,
-                child: Text('공개키'),
-              ),
-              DropdownMenuItem(
-                value: HostAuthType.keyboardInteractive,
-                child: Text('키보드 인터랙티브 / 2FA'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              key: const ValueKey('identity-username'),
+              controller: _username,
+              decoration: const InputDecoration(labelText: '사용자명'),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<HostAuthType>(
+              key: const ValueKey('identity-auth-type'),
+              initialValue: _authType,
+              decoration: const InputDecoration(labelText: '인증 방식'),
+              items: const [
+                DropdownMenuItem(
+                  value: HostAuthType.password,
+                  child: Text('비밀번호'),
+                ),
+                DropdownMenuItem(
+                  value: HostAuthType.publicKey,
+                  child: Text('공개키'),
+                ),
+                DropdownMenuItem(
+                  value: HostAuthType.keyboardInteractive,
+                  child: Text('키보드 인터랙티브 / 2FA'),
+                ),
+              ],
+              onChanged: (v) => setState(() => _authType = v ?? _authType),
+            ),
+            const SizedBox(height: 12),
+            if (_authType == HostAuthType.password)
+              TextField(
+                key: const ValueKey('identity-password'),
+                controller: _password,
+                obscureText: true,
+                decoration: InputDecoration(
+                  labelText: '비밀번호',
+                  helperText: widget.existing?.secretRef != null
+                      ? '비워두면 기존 비밀번호를 유지합니다'
+                      : null,
+                ),
+              )
+            else if (_authType == HostAuthType.publicKey)
+              keys.isEmpty
+                  ? const Text('키체인에 먼저 키를 만들거나 가져오세요.')
+                  : DropdownButtonFormField<String>(
+                      key: const ValueKey('identity-key'),
+                      initialValue: keys.any((k) => k.id == _keyId)
+                          ? _keyId
+                          : null,
+                      decoration: const InputDecoration(labelText: 'SSH 키'),
+                      items: [
+                        for (final k in keys)
+                          DropdownMenuItem(
+                            value: k.id,
+                            child: Text('${k.name} · ${k.shortFingerprint}'),
+                          ),
+                      ],
+                      onChanged: (v) => setState(() => _keyId = v),
+                    ),
+            if (_error != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                _error!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
               ),
             ],
-            onChanged: (v) => setState(() => _authType = v ?? _authType),
-          ),
-          const SizedBox(height: 12),
-          if (_authType == HostAuthType.password)
-            TextField(
-              key: const ValueKey('identity-password'),
-              controller: _password,
-              obscureText: true,
-              decoration: InputDecoration(
-                labelText: '비밀번호',
-                helperText: widget.existing?.secretRef != null
-                    ? '비워두면 기존 비밀번호를 유지합니다'
-                    : null,
-              ),
-            )
-          else if (_authType == HostAuthType.publicKey)
-            keys.isEmpty
-                ? const Text('키체인에 먼저 키를 만들거나 가져오세요.')
-                : DropdownButtonFormField<String>(
-                    key: const ValueKey('identity-key'),
-                    initialValue: keys.any((k) => k.id == _keyId)
-                        ? _keyId
-                        : null,
-                    decoration: const InputDecoration(labelText: 'SSH 키'),
-                    items: [
-                      for (final k in keys)
-                        DropdownMenuItem(
-                          value: k.id,
-                          child: Text('${k.name} · ${k.shortFingerprint}'),
-                        ),
-                    ],
-                    onChanged: (v) => setState(() => _keyId = v),
-                  ),
-          if (_error != null) ...[
-            const SizedBox(height: 8),
-            Text(
-              _error!,
-              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            const SizedBox(height: 16),
+            FilledButton(
+              onPressed: _busy ? null : _save,
+              child: const Text('저장'),
             ),
           ],
-          const SizedBox(height: 16),
-          FilledButton(
-            onPressed: _busy ? null : _save,
-            child: const Text('저장'),
-          ),
-        ],
+        ),
       ),
     );
   }

@@ -32,6 +32,7 @@ class TerminalView extends StatefulWidget {
     this.padding,
     this.scrollController,
     this.autoResize = true,
+    this.resizeDebounce = Duration.zero,
     this.backgroundOpacity = 1,
     this.focusNode,
     this.autofocus = false,
@@ -73,6 +74,10 @@ class TerminalView extends StatefulWidget {
   /// Should this widget automatically notify the underlying terminal when its
   /// size changes. [true] by default.
   final bool autoResize;
+
+  /// Wait for viewport changes to settle before resizing the buffer and PTY.
+  /// The initial layout is always applied immediately.
+  final Duration resizeDebounce;
 
   /// Opacity of the terminal background. Set to 0 to make the terminal
   /// background transparent.
@@ -147,6 +152,8 @@ class TerminalView extends StatefulWidget {
 }
 
 class TerminalViewState extends State<TerminalView> {
+  bool _touchSelecting = false;
+
   late FocusNode _focusNode;
 
   late final ShortcutManager _shortcutManager;
@@ -266,6 +273,7 @@ class TerminalViewState extends State<TerminalView> {
           offset: offset,
           padding: MediaQuery.of(context).padding,
           autoResize: widget.autoResize,
+          resizeDebounce: widget.resizeDebounce,
           textStyle: widget.textStyle,
           textScaler: widget.textScaler ?? MediaQuery.textScalerOf(context),
           theme: widget.theme,
@@ -283,6 +291,7 @@ class TerminalViewState extends State<TerminalView> {
     child = TerminalScrollGestureHandler(
       terminal: widget.terminal,
       simulateScroll: widget.simulateScroll,
+      isSelecting: () => _touchSelecting,
       // The handler receives global pointer positions; convert them to the
       // render object's local space before mapping to a cell.
       getCellOffset: (offset) =>
@@ -341,6 +350,7 @@ class TerminalViewState extends State<TerminalView> {
     child = TerminalGestureHandler(
       terminalView: this,
       terminalController: _controller,
+      onTouchSelectionChanged: (selecting) => _touchSelecting = selecting,
       onTapUp: _onTapUp,
       onTapDown: _onTapDown,
       onSecondaryTapDown:
@@ -500,6 +510,7 @@ class _TerminalView extends LeafRenderObjectWidget {
     required this.offset,
     required this.padding,
     required this.autoResize,
+    required this.resizeDebounce,
     required this.textStyle,
     required this.textScaler,
     required this.theme,
@@ -520,6 +531,8 @@ class _TerminalView extends LeafRenderObjectWidget {
   final EdgeInsets padding;
 
   final bool autoResize;
+
+  final Duration resizeDebounce;
 
   final TerminalStyle textStyle;
 
@@ -547,6 +560,7 @@ class _TerminalView extends LeafRenderObjectWidget {
       offset: offset,
       padding: padding,
       autoResize: autoResize,
+      resizeDebounce: resizeDebounce,
       textStyle: textStyle,
       textScaler: textScaler,
       theme: theme,
@@ -567,6 +581,7 @@ class _TerminalView extends LeafRenderObjectWidget {
       ..offset = offset
       ..padding = padding
       ..autoResize = autoResize
+      ..resizeDebounce = resizeDebounce
       ..textStyle = textStyle
       ..textScaler = textScaler
       ..theme = theme

@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show SynchronousFuture;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,6 +10,8 @@ import '../../app/theme.dart';
 import '../../cli_config/cli_config_home.dart';
 import '../../cli_config/cli_installation_provider.dart';
 import '../../cli_config/wsl_cli_config_home.dart';
+import '../../session/session.dart';
+import '../../state/providers.dart';
 
 /// 우측 패널: 코딩 에이전트 CLI(Claude Code, Codex, OpenCode)의 전역 설정과
 /// 확장(지침·스킬·커맨드·에이전트 등)을 한곳에서 보고 편집한다.
@@ -54,6 +58,10 @@ class _CliConfigPanelState extends ConsumerState<CliConfigPanel> {
   bool _wslLoading = false;
   String? _wslError;
 
+  /// Remote(현재 활성 SSH 세션) 소스를 보고 있는지. true면 [_RemoteCliConfigBody]가
+  /// 자기 상태를 스스로 관리하므로 아래 local/WSL 필드들은 쓰지 않는다.
+  bool _useRemote = false;
+
   CliConfigSection? _section;
   CliConfigEntry? _entry;
   List<CliConfigEntry> _entries = const [];
@@ -62,31 +70,37 @@ class _CliConfigPanelState extends ConsumerState<CliConfigPanel> {
 
   CliConfigHome? get _home => _useWsl ? _wslHome : _nativeHome;
 
+  _CliSource get _source => _useRemote
+      ? _CliSource.remote
+      : (_useWsl ? _CliSource.wsl : _CliSource.local);
+
   @override
   void initState() {
     super.initState();
     _reloadCounts();
   }
 
-  Future<void> _toggleWsl() async {
-    if (_wslLoading) return;
+  Future<void> _selectSource(_CliSource target) async {
+    if (target == _source) return;
     setState(() {
-      _useWsl = !_useWsl;
+      _useRemote = target == _CliSource.remote;
+      _useWsl = target == _CliSource.wsl;
       _section = null;
       _entry = null;
       _entries = const [];
       _counts = const {};
       _error = null;
     });
-    if (!_useWsl) {
-      _reloadCounts();
+    if (target == _CliSource.remote) return;
+    if (target == _CliSource.wsl) {
+      if (_wslHome != null) {
+        _reloadCounts();
+      } else {
+        await _loadWslHome();
+      }
       return;
     }
-    if (_wslHome != null) {
-      _reloadCounts();
-      return;
-    }
-    await _loadWslHome();
+    _reloadCounts();
   }
 
   Future<void> _loadWslHome() async {
@@ -236,11 +250,23 @@ class _CliConfigPanelState extends ConsumerState<CliConfigPanel> {
   @override
   Widget build(BuildContext context) {
     final home = _home;
-    final wslToggle = _wslAvailable
-        ? _WslToggle(
-            selected: _useWsl,
-            enabled: !_wslLoading,
-            onPressed: _toggleWsl,
+    final activeSessionId = ref.watch(activeSessionIdProvider);
+    final sessions = ref.watch(sessionManagerProvider);
+    SessionInfo? activeSession;
+    for (final session in sessions) {
+      if (session.id == activeSessionId) {
+        activeSession = session;
+        break;
+      }
+    }
+    final remoteAvailable =
+        activeSession != null && !activeSession.host.isLocalShell;
+    final sourceSelector = (_wslAvailable || remoteAvailable)
+        ? _CliSourceSelector(
+            source: _source,
+            wslEnabled: _wslAvailable && !_wslLoading,
+            remoteEnabled: remoteAvailable,
+            onChanged: (source) => unawaited(_selectSource(source)),
           )
         : null;
     // 설치 감지는 로컬 PATH 기준이라 아직 로딩 중일 수 있다. 로딩 중에는
@@ -250,53 +276,76 @@ class _CliConfigPanelState extends ConsumerState<CliConfigPanel> {
         ref.watch(installedCliAppsProvider).asData?.value;
     final notInstalledNative =
         !_useWsl &&
+        !_useRemote &&
         home != null &&
         installedApps != null &&
         !installedApps.contains(widget.app);
+    final body = _useRemote
+        ? const Center(
+            key: ValueKey('cli-config-remote-pro-only'),
+            child: Text('Remote 설정은 Pro 에디션에서 제공합니다.'),
+          )
+        : home == null
+        ? _MissingHome(
+            app: widget.app,
+            wsl: _useWsl,
+            loading: _wslLoading,
+            message: _useWsl ? _wslError : null,
+            onRetry: _useWsl && !_wslLoading ? _loadWslHome : null,
+          )
+        : notInstalledNative
+        ? _NotInstalled(app: widget.app, wslAvailable: _wslAvailable)
+        : _entry != null
+        ? _CliFileEditor(
+            key: ValueKey('cli-config-editor:${_entry!.path}'),
+            onRead: (entry) => SynchronousFuture(home.read(entry)),
+            initialContentFor: home.initialContentFor,
+            onWrite: (entry, contents) {
+              home.write(entry, contents);
+              return SynchronousFuture(null);
+            },
+            entry: _entry!,
+            onBack: _back,
+            onCopyPath: _copyPath,
+          )
+        : _section != null
+        ? _SectionView(
+            home: home,
+            section: _section!,
+            entries: _entries,
+            error: _error,
+            onBack: _back,
+            onRefresh: _reloadEntries,
+            onCopyPath: _copyPath,
+            onOpen: _openEntry,
+            onCreate: _createEntry,
+            onDelete: _deleteEntry,
+          )
+        : _OverviewView(
+            home: home,
+            wsl: _useWsl,
+            counts: _counts,
+            error: _error,
+            onRefresh: _reloadCounts,
+            onCopyPath: _copyPath,
+            onOpen: _openSection,
+          );
     return Material(
       color: VibeColors.surface,
-      child: home == null
-          ? _MissingHome(
-              app: widget.app,
-              wsl: _useWsl,
-              loading: _wslLoading,
-              message: _useWsl ? _wslError : null,
-              onRetry: _useWsl && !_wslLoading ? _loadWslHome : null,
-              wslToggle: wslToggle,
-            )
-          : notInstalledNative
-          ? _NotInstalled(app: widget.app, wslToggle: wslToggle)
-          : _entry != null
-          ? _CliFileEditor(
-              key: ValueKey('cli-config-editor:${_entry!.path}'),
-              home: home,
-              entry: _entry!,
-              onBack: _back,
-              onCopyPath: _copyPath,
-            )
-          : _section != null
-          ? _SectionView(
-              home: home,
-              section: _section!,
-              entries: _entries,
-              error: _error,
-              onBack: _back,
-              onRefresh: _reloadEntries,
-              onCopyPath: _copyPath,
-              onOpen: _openEntry,
-              onCreate: _createEntry,
-              onDelete: _deleteEntry,
-            )
-          : _OverviewView(
-              home: home,
-              wsl: _useWsl,
-              counts: _counts,
-              error: _error,
-              onRefresh: _reloadCounts,
-              onCopyPath: _copyPath,
-              onOpen: _openSection,
-              wslToggle: wslToggle,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (sourceSelector != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: sourceSelector,
+              ),
             ),
+          Expanded(child: body),
+        ],
+      ),
     );
   }
 }
@@ -310,7 +359,6 @@ class _MissingHome extends StatelessWidget {
     required this.loading,
     required this.message,
     required this.onRetry,
-    required this.wslToggle,
   });
 
   final CliConfigApp app;
@@ -320,7 +368,6 @@ class _MissingHome extends StatelessWidget {
   /// WSL 실패 사유. null이면 환경변수 안내를 보여 준다.
   final String? message;
   final VoidCallback? onRetry;
-  final Widget? wslToggle;
 
   @override
   Widget build(BuildContext context) {
@@ -331,7 +378,6 @@ class _MissingHome extends StatelessWidget {
           icon: appIconFor(app),
           title: _appTitle(app, wsl: wsl),
           subtitle: loading ? 'WSL 홈 디렉터리를 찾는 중…' : '—',
-          actions: [?wslToggle],
         ),
         Expanded(
           child: loading
@@ -382,10 +428,10 @@ String _appTitle(CliConfigApp app, {required bool wsl}) =>
 /// 편집 UI 대신 설치 여부와 설치 방법을 명확히 알려, 빈 화면이나 오류로
 /// 오인하지 않게 한다.
 class _NotInstalled extends StatelessWidget {
-  const _NotInstalled({required this.app, required this.wslToggle});
+  const _NotInstalled({required this.app, required this.wslAvailable});
 
   final CliConfigApp app;
-  final Widget? wslToggle;
+  final bool wslAvailable;
 
   String get _installHint => switch (app) {
     CliConfigApp.claude => 'npm install -g @anthropic-ai/claude-code',
@@ -402,7 +448,6 @@ class _NotInstalled extends StatelessWidget {
           icon: appIconFor(app),
           title: app.title,
           subtitle: '설치되지 않음',
-          actions: [?wslToggle],
         ),
         Expanded(
           child: Padding(
@@ -447,11 +492,11 @@ class _NotInstalled extends StatelessWidget {
                     ),
                   ),
                 ),
-                if (wslToggle != null) ...[
+                if (wslAvailable) ...[
                   const SizedBox(height: 12),
                   const Text(
                     'Windows라면 WSL 배포판 안에 설치되어 있을 수 있습니다. '
-                    '위의 WSL 버튼으로 전환해 확인하세요.',
+                    '위의 소스 선택기에서 WSL로 전환해 확인하세요.',
                     style: TextStyle(
                       color: VibeColors.onSurfaceMuted,
                       fontSize: 12.5,
@@ -469,46 +514,48 @@ class _NotInstalled extends StatelessWidget {
 
 /// Windows 홈과 WSL 배포판 홈 사이를 오가는 토글. 선택되면 accent 색으로 채워
 /// 지금 WSL 쪽을 보고 있음을 드러낸다.
-class _WslToggle extends StatelessWidget {
-  const _WslToggle({
-    required this.selected,
-    required this.enabled,
-    required this.onPressed,
+enum _CliSource { local, wsl, remote }
+
+/// Local/WSL/Remote 중 어느 소스를 보고 있는지 고르는 3단 선택기. WSL은
+/// wsl.exe가 있을 때만, Remote는 활성 세션이 SSH일 때만 켜진다(숨기지 않고
+/// 항상 세 값을 보여준 채 비활성화한다).
+class _CliSourceSelector extends StatelessWidget {
+  const _CliSourceSelector({
+    required this.source,
+    required this.wslEnabled,
+    required this.remoteEnabled,
+    required this.onChanged,
   });
 
-  final bool selected;
-  final bool enabled;
-  final VoidCallback onPressed;
+  final _CliSource source;
+  final bool wslEnabled;
+  final bool remoteEnabled;
+  final ValueChanged<_CliSource> onChanged;
 
   @override
   Widget build(BuildContext context) {
-    return IconButton(
-      key: const ValueKey('cli-config-wsl-toggle'),
-      tooltip: selected ? 'Windows 설정 보기' : 'WSL 설정 보기',
-      isSelected: selected,
-      onPressed: enabled ? onPressed : null,
-      // 켜진 상태는 배경을 채워 글자 하나로도 WSL 쪽을 보고 있음이 보이게 한다.
-      style: ButtonStyle(
-        foregroundColor: WidgetStateProperty.resolveWith(
-          (states) => states.contains(WidgetState.selected)
-              ? VibeColors.surface
-              : VibeColors.onSurfaceMuted,
-        ),
-        backgroundColor: WidgetStateProperty.resolveWith(
-          (states) => states.contains(WidgetState.selected)
-              ? VibeColors.accent
-              : Colors.transparent,
-        ),
+    return SegmentedButton<_CliSource>(
+      key: const ValueKey('cli-config-source-selector'),
+      showSelectedIcon: false,
+      style: const ButtonStyle(
+        visualDensity: VisualDensity.compact,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       ),
-      icon: const Text(
-        'WSL',
-        style: TextStyle(
-          fontSize: 10,
-          fontWeight: FontWeight.w800,
-          letterSpacing: 0.3,
-          height: 1,
+      segments: [
+        const ButtonSegment(value: _CliSource.local, label: Text('Local')),
+        ButtonSegment(
+          value: _CliSource.wsl,
+          label: const Text('WSL'),
+          enabled: wslEnabled,
         ),
-      ),
+        ButtonSegment(
+          value: _CliSource.remote,
+          label: const Text('Remote'),
+          enabled: remoteEnabled,
+        ),
+      ],
+      selected: {source},
+      onSelectionChanged: (selection) => onChanged(selection.first),
     );
   }
 }
@@ -641,7 +688,6 @@ class _OverviewView extends StatelessWidget {
     required this.onRefresh,
     required this.onCopyPath,
     required this.onOpen,
-    required this.wslToggle,
   });
 
   final CliConfigHome home;
@@ -651,9 +697,6 @@ class _OverviewView extends StatelessWidget {
   final VoidCallback onRefresh;
   final ValueChanged<String> onCopyPath;
   final ValueChanged<CliConfigSection> onOpen;
-
-  /// Windows에서 WSL을 쓸 수 있을 때만 있다. '경로 복사' 왼쪽에 놓는다.
-  final Widget? wslToggle;
 
   @override
   Widget build(BuildContext context) {
@@ -665,7 +708,6 @@ class _OverviewView extends StatelessWidget {
           title: _appTitle(home.app, wsl: wsl),
           subtitle: home.rootPath,
           actions: [
-            ?wslToggle,
             IconButton(
               tooltip: '경로 복사',
               onPressed: () => onCopyPath(home.rootPath),
@@ -877,15 +919,13 @@ class _SectionView extends StatelessWidget {
 }
 
 class _EntryTile extends StatelessWidget {
-  const _EntryTile({
-    required this.entry,
-    required this.onTap,
-    required this.onDelete,
-  });
+  const _EntryTile({required this.entry, required this.onTap, this.onDelete});
 
   final CliConfigEntry entry;
   final VoidCallback onTap;
-  final VoidCallback onDelete;
+
+  /// null이면 삭제 버튼을 감춘다(예: Remote 소스는 삭제를 지원하지 않는다).
+  final VoidCallback? onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -928,16 +968,18 @@ class _EntryTile extends StatelessWidget {
                 fontSize: 11,
               ),
             ),
-      trailing: IconButton(
-        key: ValueKey('cli-config-delete:${entry.name}'),
-        tooltip: '삭제',
-        onPressed: onDelete,
-        icon: const Icon(
-          Icons.delete_outline,
-          size: 18,
-          color: VibeColors.onSurfaceDim,
-        ),
-      ),
+      trailing: onDelete == null
+          ? null
+          : IconButton(
+              key: ValueKey('cli-config-delete:${entry.name}'),
+              tooltip: '삭제',
+              onPressed: onDelete,
+              icon: const Icon(
+                Icons.delete_outline,
+                size: 18,
+                color: VibeColors.onSurfaceDim,
+              ),
+            ),
     );
   }
 }
@@ -1013,13 +1055,19 @@ class _NewEntryDialogState extends State<_NewEntryDialog> {
 class _CliFileEditor extends StatefulWidget {
   const _CliFileEditor({
     super.key,
-    required this.home,
+    required this.onRead,
+    required this.initialContentFor,
+    required this.onWrite,
     required this.entry,
     required this.onBack,
     required this.onCopyPath,
   });
 
-  final CliConfigHome home;
+  /// Local/WSL은 [SynchronousFuture]로 감싼 동기 파일 IO, Remote는 SFTP로
+  /// 실제 네트워크를 타는 비동기 읽기/쓰기다. 편집기는 그 차이를 모른다.
+  final Future<String> Function(CliConfigEntry entry) onRead;
+  final String Function(CliConfigSection section) initialContentFor;
+  final Future<void> Function(CliConfigEntry entry, String contents) onWrite;
   final CliConfigEntry entry;
   final VoidCallback onBack;
   final ValueChanged<String> onCopyPath;
@@ -1054,13 +1102,13 @@ class _CliFileEditorState extends State<_CliFileEditor> {
     super.dispose();
   }
 
-  void _load() {
+  Future<void> _load() async {
     try {
       final entry = widget.entry;
-      final text = widget.home.read(entry);
+      final text = await widget.onRead(entry);
       _exists = text.isNotEmpty || entry.exists;
       final content = text.isEmpty && !entry.exists
-          ? widget.home.initialContentFor(entry.section)
+          ? widget.initialContentFor(entry.section)
           : text;
       final validation = _isJson ? JsonObjectValidation.of(content) : null;
       _controller.text = content;
@@ -1091,7 +1139,7 @@ class _CliFileEditorState extends State<_CliFileEditor> {
     });
   }
 
-  void _save() {
+  Future<void> _save() async {
     if (_isJson) {
       final validation = JsonObjectValidation.of(_controller.text);
       if (!validation.valid) {
@@ -1105,7 +1153,7 @@ class _CliFileEditorState extends State<_CliFileEditor> {
     }
     setState(() => _saving = true);
     try {
-      widget.home.write(widget.entry, _controller.text);
+      await widget.onWrite(widget.entry, _controller.text);
       _exists = true;
       _dirty = false;
       _statusOk = true;

@@ -1,4 +1,4 @@
-import 'dart:math' show min;
+import 'dart:math' show max, min;
 import 'dart:typed_data';
 
 import 'package:xterm/src/core/buffer/cell_offset.dart';
@@ -135,6 +135,13 @@ class BufferLine with IndexedItem {
   /// Erase cells whose index satisfies [start] <= index < [end]. Erased cells
   /// are filled with [style].
   void eraseRange(int start, int end, CursorStyle style) {
+    // 빈 범위(예: 0열에서 EL1)는 지울 것이 없다. 이 가드가 없으면 end == 0일 때
+    // getWidth(-1)이 RangeError를 던지고, Terminal.write가 notifyListeners 전에
+    // 중단돼 화면이 멈춘다.
+    start = max(start, 0);
+    end = min(end, _length);
+    if (start >= end) return;
+
     // reset cell one to the left if start is second cell of a wide char
     if (start > 0 && getWidth(start - 1) == 2) {
       eraseCell(start - 1, style);
@@ -145,7 +152,6 @@ class BufferLine with IndexedItem {
       eraseCell(end - 1, style);
     }
 
-    end = min(end, _length);
     for (var i = start; i < end; i++) {
       eraseCell(i, style);
     }
@@ -331,13 +337,26 @@ class BufferLine with IndexedItem {
       to = _length;
     }
 
+    // Vibe Terminal patch: empty cells (code point 0) between characters are
+    // spaces. TUIs often skip blanks with cursor movement instead of writing
+    // spaces, and dropping those cells glued words and table columns together
+    // on copy. Trailing empty cells are still dropped, and the trailing half
+    // of a wide character is not an empty cell.
     final builder = StringBuffer();
+    var pendingSpaces = 0;
     for (var i = from; i < to; i++) {
       final codePoint = getCodePoint(i);
-      final width = getWidth(i);
-      if (codePoint != 0 && i + width <= to) {
-        builder.writeCharCode(codePoint);
+      if (codePoint == 0) {
+        final wideTail =
+            i > 0 && getWidth(i - 1) == 2 && getCodePoint(i - 1) != 0;
+        if (!wideTail) pendingSpaces++;
+        continue;
       }
+      if (i + getWidth(i) > to) continue;
+      for (; pendingSpaces > 0; pendingSpaces--) {
+        builder.write(' ');
+      }
+      builder.writeCharCode(codePoint);
     }
 
     return builder.toString();

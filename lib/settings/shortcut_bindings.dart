@@ -87,6 +87,9 @@ String? shortcutTokenForKey(LogicalKeyboardKey key) {
 
   return switch (key) {
     LogicalKeyboardKey.equal => '=',
+    LogicalKeyboardKey.add => 'Plus',
+    LogicalKeyboardKey.numpadAdd => 'NumpadAdd',
+    LogicalKeyboardKey.numpadSubtract => 'NumpadSubtract',
     LogicalKeyboardKey.minus => '-',
     LogicalKeyboardKey.slash => '/',
     LogicalKeyboardKey.backslash => r'\',
@@ -156,6 +159,9 @@ LogicalKeyboardKey? _logicalKeyForToken(String token) {
   }
 
   return switch (token) {
+    'plus' => LogicalKeyboardKey.add,
+    'numpadadd' => LogicalKeyboardKey.numpadAdd,
+    'numpadsubtract' => LogicalKeyboardKey.numpadSubtract,
     'tab' => LogicalKeyboardKey.tab,
     'enter' || 'return' => LogicalKeyboardKey.enter,
     'esc' || 'escape' => LogicalKeyboardKey.escape,

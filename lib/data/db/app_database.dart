@@ -36,6 +36,7 @@ class Hosts extends Table {
   BoolColumn get x11Forwarding =>
       boolean().withDefault(const Constant(false))();
   TextColumn get startupScript => text().nullable()();
+  TextColumn get terminalPreferences => text().nullable()();
   // 인증 원본은 identities 테이블이다. username/auth_type/credential_ref는
   // 하위 호환용 비정규화 사본이며 HostRepository가 Identity로 덮어쓴다.
   TextColumn get identityId => text().nullable()();
@@ -165,7 +166,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase([QueryExecutor? executor]) : super(executor ?? _open());
 
   @override
-  int get schemaVersion => 15;
+  int get schemaVersion => 16;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -218,6 +219,9 @@ class AppDatabase extends _$AppDatabase {
         await _createTableIfMissing(m, identities);
         await _addColumnIfMissing(m, hosts, hosts.identityId);
         await _addColumnIfMissing(m, hostKeys, hostKeys.lastSeenAt);
+      }
+      if (from < 16) {
+        await _addColumnIfMissing(m, hosts, hosts.terminalPreferences);
       }
     },
   );

@@ -11,6 +11,7 @@ import '../../data/models/ssh_key.dart';
 import '../../data/repositories/identity_repository.dart';
 import '../../data/repositories/ssh_key_repository.dart';
 import '../../state/providers.dart';
+import '../../telemetry/telemetry.dart';
 import 'identity_edit_sheet.dart';
 import 'ssh_key_create_sheet.dart';
 import 'ssh_key_import_sheet.dart';
@@ -43,7 +44,14 @@ class _KeychainPageState extends ConsumerState<KeychainPage> {
   }
 
   Future<void> _create() async {
-    await showSshKeyCreateSheet(context, ref, onInstall: widget.onInstallKey);
+    final created = await showSshKeyCreateSheet(
+      context,
+      ref,
+      onInstall: widget.onInstallKey,
+    );
+    if (created != null) {
+      ref.read(telemetryProvider).logEvent(TelemetryEvent.keychainKeyCreate());
+    }
   }
 
   Future<void> _import() async {

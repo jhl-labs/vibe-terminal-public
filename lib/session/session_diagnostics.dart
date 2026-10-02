@@ -5,6 +5,7 @@ enum SessionEventType {
   pingSent('keepalive 전송'),
   pingFailed('keepalive 실패'),
   dropped('연결 끊김'),
+  remoteChannelClosed('원격 채널 종료'),
   reconnectScheduled('재연결 예약'),
   reconnectAttempt('재연결 시도'),
   reconnected('재연결 성공'),

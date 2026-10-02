@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 
+import 'error_reporter.dart';
+
 /// keepalive 박자 공급원. 박자가 울릴 때마다 [onPulse]가 호출된다.
 ///
 /// 박자 이후의 로직(세션 ping)은 전 플랫폼 공용이고, "누가 박자를 치는가"만
@@ -43,14 +45,38 @@ class ChannelKeepalivePulse implements KeepalivePulse {
   void Function()? _onPulse;
   bool _listening = false;
 
+  /// 네이티브 서비스가 스스로 멈췄을 때(시간 한도·시작 실패) 호출된다.
+  void Function()? onServiceStopped;
+
   @override
   void start(void Function() onPulse) {
     _onPulse = onPulse;
     if (_listening) return;
     _listening = true;
     _channel.setMethodCallHandler((call) async {
-      if (call.method == 'keepalivePulse') {
-        _onPulse?.call();
+      switch (call.method) {
+        case 'keepalivePulse':
+          _onPulse?.call();
+        case 'keepaliveTimeout':
+          // Android 15+ dataSync 포그라운드 서비스의 하루 6시간 한도. 서비스는
+          // 이미 내려갔고 세션은 앱이 포그라운드일 때만 유지된다. 원인을 남겨
+          // 사용자가 "왜 백그라운드에서 끊겼는지" 볼 수 있게 한다.
+          appErrorReporter.report(
+            '포그라운드 서비스가 시스템 시간 한도(하루 6시간)에 도달해 중지됐습니다. '
+            '앱이 백그라운드에 있는 동안 SSH 연결이 끊길 수 있습니다.',
+            null,
+            source: 'keepalive',
+            context: 'service timeout',
+          );
+          onServiceStopped?.call();
+        case 'keepaliveError':
+          appErrorReporter.report(
+            call.arguments?.toString() ?? 'unknown',
+            null,
+            source: 'keepalive',
+            context: 'service startForeground failed',
+          );
+          onServiceStopped?.call();
       }
     });
   }

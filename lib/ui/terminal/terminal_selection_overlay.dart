@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../../app/theme.dart';
@@ -88,6 +89,7 @@ class TerminalSelectionOverlay extends StatelessWidget {
     required this.toolbar,
     this.onHandleDragStart,
     this.onHandleDragStop,
+    this.onPointerSignal,
   });
 
   final SelectionGeometry? geometry;
@@ -99,6 +101,11 @@ class TerminalSelectionOverlay extends StatelessWidget {
   /// 드래그 종료 시 해제하도록 신호를 준다(양끝이 같이 끌려가는 버그 방지).
   final VoidCallback? onHandleDragStart;
   final VoidCallback? onHandleDragStop;
+
+  /// 핸들 위에서 발생한 휠/트랙패드 스크롤을 넘겨받는다. 마우스로 드래그
+  /// 선택하면 끝 핸들이 포인터 바로 아래를 따라다니므로, 핸들이 휠을 삼키면
+  /// 드래그하면서 스크롤할 수 없다. 부모가 아래 터미널로 전달해야 한다.
+  final ValueChanged<PointerSignalEvent>? onPointerSignal;
 
   static const double _handleRadius = 8;
   static const double _touchPadding = 14;
@@ -135,21 +142,24 @@ class TerminalSelectionOverlay extends StatelessWidget {
     return Positioned(
       left: anchor.dx - _handleRadius - _touchPadding,
       top: anchor.dy - _handleRadius - _touchPadding,
-      child: GestureDetector(
-        key: key,
-        behavior: HitTestBehavior.opaque,
-        onPanStart: (_) => onHandleDragStart?.call(),
-        onPanUpdate: (d) => onDrag(d.globalPosition),
-        onPanEnd: (_) => onHandleDragStop?.call(),
-        onPanCancel: () => onHandleDragStop?.call(),
-        child: Padding(
-          padding: const EdgeInsets.all(_touchPadding),
-          child: Container(
-            width: _handleRadius * 2,
-            height: _handleRadius * 2,
-            decoration: const BoxDecoration(
-              color: VibeColors.accent,
-              shape: BoxShape.circle,
+      child: Listener(
+        onPointerSignal: onPointerSignal,
+        child: GestureDetector(
+          key: key,
+          behavior: HitTestBehavior.opaque,
+          onPanStart: (_) => onHandleDragStart?.call(),
+          onPanUpdate: (d) => onDrag(d.globalPosition),
+          onPanEnd: (_) => onHandleDragStop?.call(),
+          onPanCancel: () => onHandleDragStop?.call(),
+          child: Padding(
+            padding: const EdgeInsets.all(_touchPadding),
+            child: Container(
+              width: _handleRadius * 2,
+              height: _handleRadius * 2,
+              decoration: const BoxDecoration(
+                color: VibeColors.accent,
+                shape: BoxShape.circle,
+              ),
             ),
           ),
         ),

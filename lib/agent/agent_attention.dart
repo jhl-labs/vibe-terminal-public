@@ -24,7 +24,10 @@ class AgentAttentionAssessment {
 /// 화면 휴리스틱은 보조 신호일 뿐 보안 경계가 아니다. Agent로 판별된 화면의
 /// 최근 줄에만 적용해 일반 셸 출력과 오래된 대화 내용을 오인하는 범위를 줄인다.
 class AgentAttentionClassifier {
-  const AgentAttentionClassifier();
+  const AgentAttentionClassifier({this.requireAgent = true});
+
+  /// 무인 입력 경로는 일반 셸의 확인 프롬프트도 차단해야 한다.
+  final bool requireAgent;
 
   static final _inputPatterns = <RegExp>[
     RegExp(
@@ -52,9 +55,13 @@ class AgentAttentionClassifier {
     ),
   ];
 
-  AgentAttentionAssessment inspect(String screen) {
-    final inspection = AgentSessionInspector.inspect(screen, previewLines: 3);
-    if (!inspection.isPossibleAgent) {
+  AgentAttentionAssessment inspect(String screen, {bool liveSession = false}) {
+    final inspection = AgentSessionInspector.inspect(
+      screen,
+      previewLines: 3,
+      liveSession: liveSession,
+    );
+    if (requireAgent && !inspection.isPossibleAgent) {
       return AgentAttentionAssessment(
         agentHint: inspection.agentHint,
         confidence: inspection.confidence,
