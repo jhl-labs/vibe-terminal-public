@@ -187,7 +187,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
           .read(sessionActivityProvider.notifier)
           .markActivity(
             id,
-            readScreen: () => engine.recentPlainText(maxLines: 80),
+            readScreen: () =>
+                engine.recentPlainText(maxLines: engine.terminal.viewHeight),
           );
       _schedulePersistOpenSessions();
     };

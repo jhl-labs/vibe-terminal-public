@@ -55,8 +55,12 @@ class AgentAttentionClassifier {
     ),
   ];
 
-  AgentAttentionAssessment inspect(String screen) {
-    final inspection = AgentSessionInspector.inspect(screen, previewLines: 3);
+  AgentAttentionAssessment inspect(String screen, {bool liveSession = false}) {
+    final inspection = AgentSessionInspector.inspect(
+      screen,
+      previewLines: 3,
+      liveSession: liveSession,
+    );
     if (requireAgent && !inspection.isPossibleAgent) {
       return AgentAttentionAssessment(
         agentHint: inspection.agentHint,

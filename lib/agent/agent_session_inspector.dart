@@ -33,7 +33,7 @@ class AgentSessionInspector {
       RegExp(
         r'\bclaude\s+code\b|\banthropic\s+claude\b|'
         // 실행 커맨드와 종료 안내는 배너가 사라진 뒤에도 자주 남는다.
-        r'welcome\s+to\s+claude|\bclaude\s+--\w|/help\s+for\s+help',
+        r'welcome\s+to\s+claude|\bclaude\s+--\w',
       ),
       'claude',
     ),
@@ -66,8 +66,16 @@ class AgentSessionInspector {
     (RegExp(r'\bgithub\s+copilot\s+cli\b'), 'copilot'),
     (RegExp(r'\bkiro\s+cli\b'), 'kiro'),
     (RegExp(r'\bqodercli\b|\bqoder\s+cli\b'), 'qoder'),
-    (RegExp(r'vim\s+-\s+vi\s+improved|--\s*insert\s*--|--\s*visual\s*--'), 'vim'),
-    (RegExp(r'\bsepilot\s+cli\s+v|welcome\s+to\s+sepilot|\bsepilotd\b'), 'sepilot'),
+    (
+      RegExp(r'vim\s+-\s+vi\s+improved|--\s*insert\s*--|--\s*visual\s*--'),
+      'vim',
+    ),
+    (
+      RegExp(
+        r'\bsepilot(?:\s+cli)?(?:\s*[·|]\s*|\s+)v\d|welcome\s+to\s+sepilot|\bsepilotd\b',
+      ),
+      'sepilot',
+    ),
   ];
 
   /// 대화가 길어져 시작 배너가 스크롤백 밖으로 밀려난 뒤에도 화면 하단에 계속
@@ -301,13 +309,19 @@ class AgentSessionInspector {
     int previewLines = 3,
     Iterable<String> extraFamilies = const [],
     String? title,
+    bool liveSession = false,
   }) {
     final fromScreen = _inspectScreen(
       screen,
       previewLines: previewLines,
       extraFamilies: extraFamilies,
+      liveSession: liveSession,
     );
-    if (title == null || fromScreen.isConfirmedAgent) return fromScreen;
+    if (title == null ||
+        (!liveSession && fromScreen.isConfirmedAgent) ||
+        (liveSession && hasShellPrompt(screen))) {
+      return fromScreen;
+    }
     final fromTitle = inspectTitle(title);
     if (!fromTitle.isPossibleAgent) return fromScreen;
     return AgentSessionInspection(
@@ -323,6 +337,7 @@ class AgentSessionInspector {
     String screen, {
     required int previewLines,
     required Iterable<String> extraFamilies,
+    required bool liveSession,
   }) {
     final (modelHint, modelConfidence) = detectModel(
       screen,
@@ -333,6 +348,21 @@ class AgentSessionInspector {
         ? lines
         : lines.sublist(lines.length - 60);
     final searchable = recent.join('\n').toLowerCase();
+    if (liveSession) {
+      final hint = _liveHint(lines);
+      return AgentSessionInspection(
+        agentHint: hint ?? 'unknown',
+        confidence: hint == null
+            ? AgentDetectionConfidence.none
+            : hint == 'agent'
+            ? AgentDetectionConfidence.possible
+            : AgentDetectionConfidence.confirmed,
+        preview: _preview(lines, previewLines),
+        modelHint: modelHint,
+        modelConfidence: modelConfidence,
+      );
+    }
+
     // 확정 패턴은 화면 전체에서 찾는다. agent의 시작 배너는 대화가 길어지면
     // 최근 60줄 밖으로 밀려나는데, 그때마다 unknown으로 떨어지면 안 된다.
     // 반면 느슨한 패턴은 최근 화면에서만 본다 — 지나간 출력에 우연히 들어간
@@ -393,6 +423,84 @@ class AgentSessionInspector {
     );
   }
 
+  /// 세션 배지는 실행 중인 UI만 식별한다. 문서/파일명 속 제품명은 근거가 아니다.
+  /// 마지막 셸 프롬프트보다 앞의 배너와 문구는 이미 종료된 작업일 수 있다.
+  static bool hasShellPrompt(String screen) {
+    final lines = _normalizedLines(screen);
+    return lines.isNotEmpty && _shellPrompt.hasMatch(lines.last.trim());
+  }
+
+  static final _shellPrompt = RegExp(
+    r'^(?:[$#%]|(?:\([^\n]*\)\s*)?[^\s@]+@[^\s]+[^\n]*[$#%]|'
+    r'PS\s+[^\n]+>|[A-Za-z]:\\[^\n]*>|[~/.]\S*[$#%])(?:\s.*)?$',
+    caseSensitive: false,
+  );
+
+  static bool isShellTitle(String title) => RegExp(
+    r'^(?:(?:ba|z|fi)?sh|pwsh|powershell|cmd)(?:\.exe)?$|'
+    r'^[^\s@]+@[^\s:]+[: ]|^(?:[A-Za-z]:[\\/]|[~/])',
+    caseSensitive: false,
+  ).hasMatch(title.trim());
+
+  static final _liveBrandedBanner = RegExp(
+    r'^(?:welcome\s+to\s+)?(openai\s+codex(?:\s+cli)?|codex(?:\s+cli)?|'
+    r'claude(?:\s+code)?|anthropic\s+claude|google\s+gemini|'
+    r'gemini(?:\s+cli)?|sepilot(?:\s+cli)?)'
+    r'(?:\s*(?:[!│|·(]|v?\d).*)?$',
+  );
+  static const _primaryAgents = {'claude', 'codex', 'gemini', 'sepilot'};
+
+  static String? _liveHint(List<String> lines) {
+    final boundary = lines.lastIndexWhere(
+      (line) => _shellPrompt.hasMatch(line.trim()),
+    );
+    final active = lines.sublist(boundary + 1);
+    // A banner lower on screen supersedes an older agent's banner/footer.
+    for (var row = active.length - 1; row >= 0; row--) {
+      final raw = active[row];
+      final line = raw
+          .trim()
+          .replaceFirst(RegExp(r'^[│┃║╭╰┌└─━\s✳✶✻✽✢]+'), '')
+          .toLowerCase();
+      for (final (pattern, hint) in _chromePatterns) {
+        if (pattern.hasMatch(line) &&
+            !line.startsWith('>') &&
+            !line.startsWith('›')) {
+          return hint;
+        }
+      }
+      final banner = _liveBrandedBanner.firstMatch(line);
+      if (banner != null) {
+        final brand = banner[1]!;
+        for (final hint in _primaryAgents) {
+          if (brand.contains(hint)) return hint;
+        }
+      }
+      for (final (pattern, hint) in _confirmedPatterns) {
+        if (_primaryAgents.contains(hint)) continue;
+        final match = pattern.firstMatch(line);
+        if (match?.start == 0) return hint;
+      }
+      // Gemini's ASCII logo may not contain a searchable product name. Require
+      // both its input placeholder and model/sandbox footer, never a model alone.
+      final footer = active
+          .sublist(row > 5 ? row - 5 : 0, row + 1)
+          .join('\n')
+          .toLowerCase();
+      if (row >= active.length - 3 &&
+          footer.contains('type your message or @path/to/file') &&
+          footer.contains('sandbox') &&
+          RegExp(r'\bgemini-\d[\w.-]*').hasMatch(footer)) {
+        return 'gemini';
+      }
+    }
+    final footer = active
+        .skip(active.length > 6 ? active.length - 6 : 0)
+        .join('\n')
+        .toLowerCase();
+    return _genericChromePattern.hasMatch(footer) ? 'agent' : null;
+  }
+
   /// 터미널 제목(OSC 0/2)에서 Agent를 판별한다.
   ///
   /// Claude Code는 "✳ Claude Code" 또는 "✳ <대화 요약>"으로, 다른 CLI는 제품명을
@@ -402,8 +510,26 @@ class AgentSessionInspector {
   static AgentSessionInspection inspectTitle(String title) {
     final trimmed = title.trim();
     final lower = trimmed.toLowerCase();
+    if (isShellTitle(trimmed)) {
+      return AgentSessionInspection(
+        agentHint: 'unknown',
+        confidence: AgentDetectionConfidence.none,
+        preview: trimmed,
+      );
+    }
+    final branded = RegExp(
+      r'^(?:[✳✶✻✽✢]\s*)?(claude(?: code)?|codex|gemini(?: cli)?|sepilot)(?:$|\s*(?:[|:·—–-]|\(?v?\d)\s*)',
+      caseSensitive: false,
+    ).firstMatch(trimmed);
+    if (branded != null) {
+      return AgentSessionInspection(
+        agentHint: branded[1]!.toLowerCase().split(' ').first,
+        confidence: AgentDetectionConfidence.confirmed,
+        preview: trimmed,
+      );
+    }
     for (final (pattern, hint) in _confirmedPatterns) {
-      if (pattern.hasMatch(lower)) {
+      if (pattern.firstMatch(lower)?.start == 0) {
         return AgentSessionInspection(
           agentHint: hint,
           confidence: AgentDetectionConfidence.confirmed,
