@@ -44,7 +44,7 @@ class NotificationService {
       linux: linux,
     );
     await _plugin.initialize(
-      settings,
+      settings: settings,
       onDidReceiveNotificationResponse: (response) {
         final payload = response.payload;
         if (payload == null || payload.isEmpty) return;
@@ -78,10 +78,10 @@ class NotificationService {
         linux: LinuxNotificationDetails(),
       );
       await _plugin.show(
-        _counter++,
-        '작업 완료',
-        '$sessionName 세션의 작업이 끝났습니다.',
-        details,
+        id: _counter++,
+        title: '작업 완료',
+        body: '$sessionName 세션의 작업이 끝났습니다.',
+        notificationDetails: details,
       );
     } catch (_) {
       // 알림 실패는 핵심 기능에 영향이 없으므로 무시한다.
@@ -112,10 +112,10 @@ class NotificationService {
         linux: LinuxNotificationDetails(),
       );
       await _plugin.show(
-        _announcementId,
-        title,
-        body,
-        details,
+        id: _announcementId,
+        title: title,
+        body: body,
+        notificationDetails: details,
         payload: url?.toString(),
       );
     } catch (_) {
