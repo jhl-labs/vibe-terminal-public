@@ -37,9 +37,17 @@ typedef struct PtyOptions
 
 typedef struct PtyHandle PtyHandle;
 
+/* pty_write 결과. 입력은 PTY별 전용 스레드가 쓰므로 호출자는 막히지 않는다. */
+#define PTY_WRITE_QUEUED 0
+#define PTY_WRITE_CLOSED -1
+#define PTY_WRITE_FULL -2
+
+/* 아직 쓰지 못한 입력의 상한. 자식이 입력을 읽지 않으면 이후 입력은 버린다. */
+#define PTY_WRITE_QUEUE_LIMIT (8 * 1024 * 1024)
+
 FFI_PLUGIN_EXPORT PtyHandle *pty_create(PtyOptions *options);
 
-FFI_PLUGIN_EXPORT void pty_write(PtyHandle *handle, char *buffer, int length);
+FFI_PLUGIN_EXPORT int pty_write(PtyHandle *handle, char *buffer, int length);
 
 FFI_PLUGIN_EXPORT void pty_ack_read(PtyHandle *handle);
 

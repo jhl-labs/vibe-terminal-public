@@ -541,6 +541,41 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     return text.contains('\n') || text.contains('\r');
   }
 
+  Future<void> _restartLocalDaemonAndRetry() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('로컬 daemon 재시작'),
+        content: const Text(
+          '응답하지 않는 daemon을 강제로 종료하고 새로 시작합니다. '
+          '그 daemon에서 실행 중이던 로컬 셸(WSL·PowerShell 등)은 모두 종료됩니다. 계속할까요?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('재시작'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await ref.read(sessionManagerProvider.notifier).restartLocalDaemon();
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('daemon 재시작 실패: $error')));
+      return;
+    }
+    if (!mounted) return;
+    widget.onRetry?.call();
+  }
+
   Future<bool> _confirmMultilinePaste(BuildContext context, String text) async {
     final lineCount = text.split(RegExp(r'\r\n|\r|\n')).length;
     final confirmed = await showDialog<bool>(
@@ -2269,6 +2304,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
                     ref.invalidate(knownHostListProvider);
                     widget.onRetry!();
                   },
+            onRestartLocalDaemon: widget.onRetry == null
+                ? null
+                : _restartLocalDaemonAndRetry,
           ),
         );
       case SessionStatus.disconnected:
@@ -2990,6 +3028,7 @@ class _SessionErrorView extends StatelessWidget {
     required this.onFallbackToCmd,
     required this.isPowershellFallbackAvailable,
     this.onForgetHostKey,
+    this.onRestartLocalDaemon,
   });
 
   final Failure? failure;
@@ -2999,9 +3038,11 @@ class _SessionErrorView extends StatelessWidget {
   final VoidCallback? onFallbackToCmd;
   final bool isPowershellFallbackAvailable;
   final VoidCallback? onForgetHostKey;
+  final VoidCallback? onRestartLocalDaemon;
 
   String get _title => switch (failure) {
     LocalShellMissingExecutableFailure() => '로컬 셸 실행 파일 누락',
+    LocalDaemonUnresponsiveFailure() => '로컬 daemon이 응답하지 않습니다',
     AuthFailure() => '인증에 실패했습니다',
     HostKeyMismatchFailure() => '호스트 키가 변경되었습니다',
     NetworkFailure() => '네트워크 연결에 실패했습니다',
@@ -3021,6 +3062,10 @@ class _SessionErrorView extends StatelessWidget {
       '로컬 셸 [$missingShellLabel]를 시작할 실행 파일을 찾지 못했습니다.\n'
           '$executable\n'
           '$guidance',
+    LocalDaemonUnresponsiveFailure(:final pid) =>
+      '로컬 작업을 맡은 daemon(pid $pid)이 실행 중이지만 응답하지 않아 '
+          '새 로컬 셸도 시작할 수 없습니다. daemon을 재시작하면 복구되며, '
+          '그 daemon에서 실행 중이던 로컬 셸은 모두 종료됩니다.',
     AuthFailure() => '사용자명, 비밀번호 또는 인증 방식을 확인하세요.',
     HostKeyMismatchFailure() =>
       '서버 신원이 저장된 호스트 키와 다릅니다. 서버 변경 여부를 확인한 뒤 다시 시도하세요.',
@@ -3102,6 +3147,13 @@ class _SessionErrorView extends StatelessWidget {
                       ),
                       icon: const Icon(Icons.content_copy),
                       label: const Text('실행 파일 경로 복사'),
+                    ),
+                  if (failure is LocalDaemonUnresponsiveFailure &&
+                      onRestartLocalDaemon != null)
+                    FilledButton.icon(
+                      onPressed: onRestartLocalDaemon,
+                      icon: const Icon(Icons.restart_alt),
+                      label: const Text('daemon 재시작 후 다시 시도'),
                     ),
                   if (failure is HostKeyMismatchFailure &&
                       onForgetHostKey != null)

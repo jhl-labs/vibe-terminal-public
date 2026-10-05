@@ -387,7 +387,7 @@ class FlutterPtyBindings {
   late final _pty_create = _pty_createPtr
       .asFunction<ffi.Pointer<PtyHandle> Function(ffi.Pointer<PtyOptions>)>();
 
-  void pty_write(
+  int pty_write(
     ffi.Pointer<PtyHandle> handle,
     ffi.Pointer<ffi.Char> buffer,
     int length,
@@ -401,10 +401,10 @@ class FlutterPtyBindings {
 
   late final _pty_writePtr = _lookup<
       ffi.NativeFunction<
-          ffi.Void Function(ffi.Pointer<PtyHandle>, ffi.Pointer<ffi.Char>,
+          ffi.Int Function(ffi.Pointer<PtyHandle>, ffi.Pointer<ffi.Char>,
               ffi.Int)>>('pty_write');
   late final _pty_write = _pty_writePtr.asFunction<
-      void Function(ffi.Pointer<PtyHandle>, ffi.Pointer<ffi.Char>, int)>();
+      int Function(ffi.Pointer<PtyHandle>, ffi.Pointer<ffi.Char>, int)>();
 
   void pty_ack_read(
     ffi.Pointer<PtyHandle> handle,

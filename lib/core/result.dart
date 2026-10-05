@@ -63,6 +63,17 @@ class LocalShellMissingExecutableFailure extends Failure {
   final String guidance;
 }
 
+/// 로컬 daemon 프로세스가 살아 있지만 응답하지 않는다.
+///
+/// 이 데몬이 잠금을 쥐고 있어 새 데몬도 뜰 수 없으므로, 사용자가 확인한 뒤
+/// 데몬을 강제로 재시작해야 복구된다.
+class LocalDaemonUnresponsiveFailure extends Failure {
+  const LocalDaemonUnresponsiveFailure(this.pid)
+    : super('로컬 daemon이 응답하지 않습니다.');
+
+  final int pid;
+}
+
 sealed class Result<T> {
   const Result();
 }

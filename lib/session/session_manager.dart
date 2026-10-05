@@ -820,6 +820,19 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     return openSession(host, onHostKey: onHostKey, localSessionId: localId);
   }
 
+  /// 응답하지 않는 로컬 daemon을 강제로 재시작한다.
+  ///
+  /// daemon이 맡던 셸은 모두 종료되므로, 열려 있던 로컬 작업 탭은 다시 시도할 때
+  /// 같은 ID로 새 셸을 만들도록 표시한다.
+  Future<void> restartLocalDaemon() async {
+    final client = await ref.read(localTerminalServiceProvider).daemonClient();
+    await client.restartUnresponsive();
+    for (final session in state) {
+      final localId = session.localSessionId;
+      if (localId != null) _newLocalSessions.add(localId);
+    }
+  }
+
   Future<void> terminateLocalBackgroundSession(String localId) async {
     final client = await ref.read(localTerminalServiceProvider).daemonClient();
     await client.call('terminate', {'id': localId});

@@ -84,6 +84,8 @@ class LocalTerminalService {
         create: create,
       );
       return Ok(handle);
+    } on LocalDaemonUnresponsiveException catch (error) {
+      return Err(LocalDaemonUnresponsiveFailure(error.pid));
     } catch (error) {
       return Err(UnknownFailure('로컬 작업 복구 실패: $error'));
     }
