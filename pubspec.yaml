@@ -1,7 +1,7 @@
 name: vibe_terminal
 description: A cross-platform SSH terminal app.
 publish_to: none
-version: 0.19.2+47
+version: 0.19.3+48
 environment:
   sdk: ^3.12.2
 dependencies:

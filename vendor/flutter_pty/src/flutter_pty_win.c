@@ -259,6 +259,8 @@ static DWORD WINAPI read_loop(LPVOID arg)
         Dart_PostCObject_DL(options->port, &result);
     }
 
+    CloseHandle(options->fd);
+    free(options);
     return 0;
 }
 
@@ -279,6 +281,192 @@ static void start_read_thread(HANDLE fd, Dart_Port port, HANDLE mutex, BOOL ackR
     {
         free(options);
     }
+    else
+    {
+        CloseHandle(thread);
+    }
+}
+
+typedef enum WriteKind
+{
+    WRITE_DATA,
+    WRITE_RESIZE,
+} WriteKind;
+
+typedef struct WriteChunk
+{
+    struct WriteChunk *next;
+
+    WriteKind kind;
+
+    COORD size;
+
+    DWORD length;
+
+    char data[];
+
+} WriteChunk;
+
+typedef struct PtyHandle
+{
+    HPCON hPty;
+
+    DWORD dwProcessId;
+
+    BOOL ackRead;
+
+    HANDLE hMutex;
+
+    /* 입력과 resize는 전용 스레드가 처리한다. Dart 스레드에서 WriteFile이나
+     * ResizePseudoConsole이 conhost를 기다리며 막히면 호출한 isolate의
+     * 이벤트 루프 전체가 멈춘다(로컬 데몬이 ping에도 응답하지 못함). */
+    HANDLE inputPipe;
+
+    HANDLE writerThread;
+
+    CRITICAL_SECTION writeLock;
+
+    CONDITION_VARIABLE writeReady;
+
+    WriteChunk *writeHead;
+
+    WriteChunk *writeTail;
+
+    SIZE_T writePending;
+
+    BOOL writeClosed;
+
+} PtyHandle;
+
+static void drop_pending_writes(PtyHandle *handle)
+{
+    WriteChunk *chunk = handle->writeHead;
+    handle->writeHead = NULL;
+    handle->writeTail = NULL;
+    handle->writePending = 0;
+    while (chunk != NULL)
+    {
+        WriteChunk *next = chunk->next;
+        free(chunk);
+        chunk = next;
+    }
+}
+
+static DWORD WINAPI write_loop(LPVOID arg)
+{
+    PtyHandle *handle = (PtyHandle *)arg;
+
+    while (1)
+    {
+        EnterCriticalSection(&handle->writeLock);
+        while (handle->writeHead == NULL && !handle->writeClosed)
+        {
+            SleepConditionVariableCS(&handle->writeReady, &handle->writeLock, INFINITE);
+        }
+        if (handle->writeClosed)
+        {
+            drop_pending_writes(handle);
+            LeaveCriticalSection(&handle->writeLock);
+            return 0;
+        }
+        /* 머리 청크는 이 스레드만 꺼내므로 락 밖에서 처리해도 안전하다. */
+        WriteChunk *chunk = handle->writeHead;
+        LeaveCriticalSection(&handle->writeLock);
+
+        BOOL failed = FALSE;
+        if (chunk->kind == WRITE_RESIZE)
+        {
+            ResizePseudoConsole(handle->hPty, chunk->size);
+        }
+        else
+        {
+            DWORD offset = 0;
+            while (offset < chunk->length)
+            {
+                DWORD written = 0;
+                if (!WriteFile(handle->inputPipe, chunk->data + offset, chunk->length - offset, &written, NULL) ||
+                    written == 0)
+                {
+                    failed = TRUE;
+                    break;
+                }
+                offset += written;
+            }
+        }
+
+        EnterCriticalSection(&handle->writeLock);
+        handle->writeHead = chunk->next;
+        if (handle->writeHead == NULL)
+        {
+            handle->writeTail = NULL;
+        }
+        handle->writePending -= chunk->length;
+        if (failed)
+        {
+            handle->writeClosed = TRUE;
+        }
+        LeaveCriticalSection(&handle->writeLock);
+        free(chunk);
+    }
+}
+
+static int enqueue_write(PtyHandle *handle, WriteChunk *chunk)
+{
+    int status = PTY_WRITE_QUEUED;
+    EnterCriticalSection(&handle->writeLock);
+    if (handle->writeClosed)
+    {
+        status = PTY_WRITE_CLOSED;
+    }
+    else if (handle->writePending + chunk->length > PTY_WRITE_QUEUE_LIMIT)
+    {
+        status = PTY_WRITE_FULL;
+    }
+    else
+    {
+        if (handle->writeTail == NULL)
+        {
+            handle->writeHead = chunk;
+        }
+        else
+        {
+            handle->writeTail->next = chunk;
+        }
+        handle->writeTail = chunk;
+        handle->writePending += chunk->length;
+        WakeConditionVariable(&handle->writeReady);
+    }
+    LeaveCriticalSection(&handle->writeLock);
+
+    if (status != PTY_WRITE_QUEUED)
+    {
+        free(chunk);
+    }
+    return status;
+}
+
+/* 자식 종료 뒤 PTY 자원을 정리한다. 입력 스레드가 WriteFile에 막혀 있을 수
+ * 있으므로 끝날 때까지 동기 I/O를 취소한 뒤 의사 콘솔(conhost)을 닫는다.
+ * 의사 콘솔이 닫히면 출력 파이프가 끊겨 읽기 스레드도 끝난다. */
+static void release_pty(PtyHandle *handle)
+{
+    EnterCriticalSection(&handle->writeLock);
+    handle->writeClosed = TRUE;
+    WakeConditionVariable(&handle->writeReady);
+    LeaveCriticalSection(&handle->writeLock);
+
+    if (handle->writerThread != NULL)
+    {
+        while (WaitForSingleObject(handle->writerThread, 100) == WAIT_TIMEOUT)
+        {
+            CancelSynchronousIo(handle->writerThread);
+        }
+        CloseHandle(handle->writerThread);
+        handle->writerThread = NULL;
+    }
+
+    ClosePseudoConsole(handle->hPty);
+    CloseHandle(handle->inputPipe);
 }
 
 typedef struct WaitExitOptions
@@ -288,7 +476,7 @@ typedef struct WaitExitOptions
 
     Dart_Port port;
 
-    HANDLE hMutex;
+    PtyHandle *handle;
 } WaitExitOptions;
 
 static DWORD WINAPI wait_exit_thread(LPVOID arg)
@@ -303,21 +491,23 @@ static DWORD WINAPI wait_exit_thread(LPVOID arg)
 
     CloseHandle(options->job); /* KILL_ON_JOB_CLOSE also terminates descendants. */
     CloseHandle(options->pid);
-    CloseHandle(options->hMutex);
 
     Dart_PostInteger_DL(options->port, exit_code);
+
+    release_pty(options->handle);
+
     free(options);
     return 0;
 }
 
-static void start_wait_exit_thread(HANDLE pid, Dart_Port port, HANDLE mutex, HANDLE job)
+static void start_wait_exit_thread(HANDLE pid, Dart_Port port, HANDLE job, PtyHandle *handle)
 {
     WaitExitOptions *options = malloc(sizeof(WaitExitOptions));
 
     options->pid = pid;
     options->job = job;
     options->port = port;
-    options->hMutex = mutex;
+    options->handle = handle;
 
     DWORD thread_id;
 
@@ -327,23 +517,11 @@ static void start_wait_exit_thread(HANDLE pid, Dart_Port port, HANDLE mutex, HAN
     {
         free(options);
     }
+    else
+    {
+        CloseHandle(thread);
+    }
 }
-
-typedef struct PtyHandle
-{
-    PHANDLE inputWriteSide;
-
-    PHANDLE outputReadSide;
-
-    HPCON hPty;
-
-    DWORD dwProcessId;
-
-    BOOL ackRead;
-
-    HANDLE hMutex;
-
-} PtyHandle;
 
 char *error_message = NULL;
 
@@ -381,6 +559,12 @@ FFI_PLUGIN_EXPORT PtyHandle *pty_create(PtyOptions *options)
         error_message = "Failed to create pseudo console";
         return NULL;
     }
+
+    /* conhost가 PTY 쪽 파이프 끝을 복제해 가지므로 우리 사본은 바로 닫는다.
+     * 쥐고 있으면 conhost가 끝나도 출력 파이프가 끊기지 않아 읽기 스레드가
+     * 영원히 ReadFile에서 기다린다. */
+    CloseHandle(inputReadSide);
+    CloseHandle(outputWriteSide);
 
     STARTUPINFOEX startupInfo;
 
@@ -460,6 +644,9 @@ FFI_PLUGIN_EXPORT PtyHandle *pty_create(PtyOptions *options)
         error_message = "Failed to create process";
         DWORD error = GetLastError();
         printf("error no: %d\n", error);
+        ClosePseudoConsole(hPty);
+        CloseHandle(inputWriteSide);
+        CloseHandle(outputReadSide);
         return NULL;
     }
 
@@ -475,6 +662,9 @@ FFI_PLUGIN_EXPORT PtyHandle *pty_create(PtyOptions *options)
         CloseHandle(processInfo.hThread);
         CloseHandle(processInfo.hProcess);
         if (job != NULL) CloseHandle(job);
+        ClosePseudoConsole(hPty);
+        CloseHandle(inputWriteSide);
+        CloseHandle(outputReadSide);
         error_message = "Failed to assign PTY process to owned Job Object";
         return NULL;
     }
@@ -483,6 +673,9 @@ FFI_PLUGIN_EXPORT PtyHandle *pty_create(PtyOptions *options)
         CloseHandle(job);
         CloseHandle(processInfo.hThread);
         CloseHandle(processInfo.hProcess);
+        ClosePseudoConsole(hPty);
+        CloseHandle(inputWriteSide);
+        CloseHandle(outputReadSide);
         error_message = "Failed to resume owned PTY process";
         return NULL;
     }
@@ -494,37 +687,63 @@ FFI_PLUGIN_EXPORT PtyHandle *pty_create(PtyOptions *options)
         1,    // maximum count
         NULL);
 
-    start_read_thread(outputReadSide, options->stdout_port, mutex, options->ackRead);
-
-    start_wait_exit_thread(processInfo.hProcess, options->exit_port, mutex, job);
-
     PtyHandle *pty = malloc(sizeof(PtyHandle));
 
     if (pty == NULL)
     {
+        /* 출력/종료 스레드 없이 자식을 남기지 않도록 job을 닫아 종료시킨다. */
+        CloseHandle(job);
+        CloseHandle(processInfo.hProcess);
+        ClosePseudoConsole(hPty);
+        CloseHandle(inputWriteSide);
+        CloseHandle(outputReadSide);
         error_message = "Failed to allocate pty handle";
         return NULL;
     }
 
-    pty->inputWriteSide = inputWriteSide;
-    pty->outputReadSide = outputReadSide;
     pty->hPty = hPty;
     pty->dwProcessId = processInfo.dwProcessId;
     pty->ackRead = options->ackRead;
     pty->hMutex = mutex;
+    pty->inputPipe = inputWriteSide;
+    InitializeCriticalSection(&pty->writeLock);
+    InitializeConditionVariable(&pty->writeReady);
+    pty->writeHead = NULL;
+    pty->writeTail = NULL;
+    pty->writePending = 0;
+    pty->writeClosed = FALSE;
+
+    DWORD writer_id;
+    pty->writerThread = CreateThread(NULL, 0, write_loop, pty, 0, &writer_id);
+    if (pty->writerThread == NULL)
+    {
+        pty->writeClosed = TRUE;
+    }
+
+    start_read_thread(outputReadSide, options->stdout_port, mutex, options->ackRead);
+
+    start_wait_exit_thread(processInfo.hProcess, options->exit_port, job, pty);
 
     return pty;
 }
 
-FFI_PLUGIN_EXPORT void pty_write(PtyHandle *handle, char *buffer, int length)
+FFI_PLUGIN_EXPORT int pty_write(PtyHandle *handle, char *buffer, int length)
 {
-    DWORD bytesWritten;
+    if (length <= 0)
+    {
+        return PTY_WRITE_QUEUED;
+    }
 
-    WriteFile(handle->inputWriteSide, buffer, length, &bytesWritten, NULL);
-
-    FlushFileBuffers(handle->inputWriteSide);
-
-    return;
+    WriteChunk *chunk = malloc(sizeof(WriteChunk) + (size_t)length);
+    if (chunk == NULL)
+    {
+        return PTY_WRITE_FULL;
+    }
+    chunk->next = NULL;
+    chunk->kind = WRITE_DATA;
+    chunk->length = (DWORD)length;
+    memcpy(chunk->data, buffer, (size_t)length);
+    return enqueue_write(handle, chunk);
 }
 
 FFI_PLUGIN_EXPORT void pty_ack_read(PtyHandle *handle)
@@ -537,12 +756,17 @@ FFI_PLUGIN_EXPORT void pty_ack_read(PtyHandle *handle)
 
 FFI_PLUGIN_EXPORT int pty_resize(PtyHandle *handle, int rows, int cols)
 {
-    COORD size;
-
-    size.X = cols;
-    size.Y = rows;
-
-    return ResizePseudoConsole(handle->hPty, size);
+    WriteChunk *chunk = malloc(sizeof(WriteChunk));
+    if (chunk == NULL)
+    {
+        return -1;
+    }
+    chunk->next = NULL;
+    chunk->kind = WRITE_RESIZE;
+    chunk->size.X = (SHORT)cols;
+    chunk->size.Y = (SHORT)rows;
+    chunk->length = 0;
+    return enqueue_write(handle, chunk) == PTY_WRITE_QUEUED ? 0 : -1;
 }
 
 FFI_PLUGIN_EXPORT int pty_getpid(PtyHandle *handle)

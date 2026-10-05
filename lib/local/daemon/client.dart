@@ -4,11 +4,35 @@ import 'dart:io';
 import '../../terminal/terminal_session_handle.dart';
 import 'protocol.dart';
 
+/// 데몬 프로세스는 살아 있지만 요청에 응답하지 않는 상태.
+///
+/// 이 데몬이 `daemon.lock`을 쥐고 있어 새 데몬도 뜰 수 없으므로, 사용자가
+/// 확인한 뒤 [LocalDaemonClient.restartUnresponsive]로만 복구한다.
+class LocalDaemonUnresponsiveException implements Exception {
+  const LocalDaemonUnresponsiveException(this.pid);
+  final int pid;
+
+  @override
+  String toString() => '로컬 daemon(pid $pid)이 실행 중이지만 응답하지 않습니다.';
+}
+
+class LocalDaemonStartException implements Exception {
+  const LocalDaemonStartException(this.message);
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 class LocalDaemonClient {
   LocalDaemonClient(this.directory, {this.executable, this.library});
   final Directory directory;
   final String? executable, library;
   Future<void>? _starting;
+
+  /// ping은 즉시 응답해야 한다. 멈춘 데몬에 매번 10초씩 기다리면 오류 표시가
+  /// 30초 넘게 늦어진다.
+  static const _pingTimeout = Duration(seconds: 3);
   Future<Map<String, dynamic>> _connection() async {
     final json =
         jsonDecode(
@@ -26,6 +50,7 @@ class LocalDaemonClient {
   Future<Object?> call(
     String method, [
     Map<String, Object?> params = const {},
+    Duration timeout = const Duration(seconds: 10),
   ]) async {
     final connection = await _connection();
     final socket = await Socket.connect(
@@ -42,9 +67,7 @@ class LocalDaemonClient {
           'method': method,
         }),
       );
-      final result = await daemonMessages(
-        socket,
-      ).first.timeout(const Duration(seconds: 10));
+      final result = await daemonMessages(socket).first.timeout(timeout);
       if (result['error'] != null) throw StateError('${result['error']}');
       return result['result'];
     } finally {
@@ -56,11 +79,13 @@ class LocalDaemonClient {
       _starting ??= _start().whenComplete(() => _starting = null);
   Future<void> _start() async {
     try {
-      await call('ping');
+      await call('ping', const {}, _pingTimeout);
       return;
     } catch (_) {}
     if (executable == null || !await File(executable!).exists()) {
-      throw StateError('로컬 daemon 실행 파일이 없습니다. 데스크톱 전체 빌드를 실행하세요.');
+      throw const LocalDaemonStartException(
+        '로컬 daemon 실행 파일이 없습니다. 데스크톱 전체 빌드를 실행하세요.',
+      );
     }
     await secureDaemonDirectory(directory);
     await Process.start(
@@ -73,12 +98,81 @@ class LocalDaemonClient {
     final deadline = DateTime.now().add(const Duration(seconds: 10));
     while (DateTime.now().isBefore(deadline)) {
       try {
-        await call('ping');
+        await call('ping', const {}, _pingTimeout);
         return;
       } catch (_) {}
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
-    throw StateError('로컬 daemon 시작을 확인하지 못했습니다.');
+    final stuck = await _recordedDaemonPid();
+    if (stuck != null) throw LocalDaemonUnresponsiveException(stuck);
+    throw const LocalDaemonStartException('로컬 daemon 시작을 확인하지 못했습니다.');
+  }
+
+  /// `connection.json`에 기록된 pid가 아직 살아 있는 데몬 프로세스이면 반환한다.
+  Future<int?> _recordedDaemonPid() async {
+    final int pid;
+    try {
+      final recorded = (await _connection())['pid'];
+      if (recorded is! int || recorded <= 0) return null;
+      pid = recorded;
+    } catch (_) {
+      return null;
+    }
+    return await _isDaemonProcess(pid) ? pid : null;
+  }
+
+  /// pid가 재사용됐을 수 있으므로 실행 파일 이름까지 확인한다.
+  Future<bool> _isDaemonProcess(int pid) async {
+    final name =
+        (executable == null
+                ? (Platform.isWindows ? 'vibe-daemon.exe' : 'vibe-daemon')
+                : executable!.split(RegExp(r'[\\/]')).last)
+            .toLowerCase();
+    try {
+      if (Platform.isWindows) {
+        final result = await Process.run('tasklist.exe', [
+          '/FI',
+          'PID eq $pid',
+          '/FO',
+          'CSV',
+          '/NH',
+        ]).timeout(const Duration(seconds: 5));
+        return '${result.stdout}'.toLowerCase().contains('"$name"');
+      }
+      final result = await Process.run('ps', [
+        '-p',
+        '$pid',
+        '-o',
+        'comm=',
+      ]).timeout(const Duration(seconds: 5));
+      final command = '${result.stdout}'.trim().toLowerCase();
+      return result.exitCode == 0 && command.split('/').last == name;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 응답하지 않는 데몬을 강제 종료하고 새 데몬을 시작한다.
+  ///
+  /// 데몬이 맡은 로컬 셸도 모두 종료된다. Windows는 데몬이 쥔 Job Object가
+  /// 닫히며, Unix는 PTY master가 닫히며(SIGHUP) 자식이 정리된다.
+  Future<void> restartUnresponsive() async {
+    try {
+      await call('ping', const {}, _pingTimeout);
+      return; // 그 사이 회복됐으면 세션을 건드리지 않는다.
+    } catch (_) {}
+    final pid = await _recordedDaemonPid();
+    if (pid != null) {
+      Process.killPid(pid, ProcessSignal.sigkill);
+      final deadline = DateTime.now().add(const Duration(seconds: 10));
+      while (await _isDaemonProcess(pid)) {
+        if (DateTime.now().isAfter(deadline)) {
+          throw LocalDaemonStartException('로컬 daemon(pid $pid)을 종료하지 못했습니다.');
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      }
+    }
+    await ensureStarted();
   }
 
   Future<DaemonTerminalHandle> open({

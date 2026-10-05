@@ -212,11 +212,20 @@ class Pty {
   int get pid => _bindings.pty_getpid(_handle);
 
   /// Write data to the pseudo-terminal.
-  void write(Uint8List data) {
+  ///
+  /// The data is copied into a per-PTY queue drained by a native writer
+  /// thread, so this never blocks the calling isolate even when the child does
+  /// not read its input. Returns `false` when the data was dropped because the
+  /// process has exited or too much input is still pending.
+  bool write(Uint8List data) {
+    if (data.isEmpty) return true;
     final buf = malloc<Int8>(data.length);
-    buf.asTypedList(data.length).setAll(0, data);
-    _bindings.pty_write(_handle, buf.cast(), data.length);
-    malloc.free(buf);
+    try {
+      buf.asTypedList(data.length).setAll(0, data);
+      return _bindings.pty_write(_handle, buf.cast(), data.length) == 0;
+    } finally {
+      malloc.free(buf);
+    }
   }
 
   /// Resize the pseudo-terminal.

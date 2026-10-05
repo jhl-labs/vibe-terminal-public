@@ -315,14 +315,17 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   /// that it supports [bracketedPasteMode], the text is wrapped in escape
   /// sequences to indicate that it is a paste operation. Prefer this method
   /// over [textInput] when pasting text.
+  /// Clipboard CRLF and LF line endings are sent as a single carriage return,
+  /// matching the Enter key. Existing blank lines are preserved.
   ///
   /// See also:
   /// - [textInput]
   void paste(String text) {
+    final normalized = text.replaceAll('\r\n', '\r').replaceAll('\n', '\r');
     if (_bracketedPasteMode) {
-      onOutput?.call(_emitter.bracketedPaste(text));
+      onOutput?.call(_emitter.bracketedPaste(normalized));
     } else {
-      textInput(text);
+      textInput(normalized);
     }
   }
 

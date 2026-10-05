@@ -289,7 +289,7 @@ class _PersistentPty {
         (m) => '\x1b[${int.parse(m[1]!) + 1};${int.parse(m[2]!) + 1}R',
       );
       if (exitCode == null) {
-        pty.write(Uint8List.fromList(utf8.encode(corrected)));
+        _writeInput(Uint8List.fromList(utf8.encode(corrected)));
       }
     };
     final decoder = const Utf8Decoder(allowMalformed: true)
@@ -326,6 +326,20 @@ class _PersistentPty {
   Socket? _owner;
   Future<void>? _termination;
   final _events = StreamController<String>.broadcast(sync: true);
+  bool _inputDropNoticed = false;
+
+  /// PTY 입력은 네이티브 큐로 넘어가므로 막히지 않는다. 셸이 입력을 읽지 않아
+  /// 큐가 가득 차면 버려지므로, 연속된 손실은 한 번만 알린다.
+  void _writeInput(Uint8List data) {
+    if (pty.write(data)) {
+      _inputDropNoticed = false;
+      return;
+    }
+    if (_inputDropNoticed || exitCode != null) return;
+    _inputDropNoticed = true;
+    _record({'type': 'notice', 'message': '셸이 입력을 읽지 않아 일부 입력을 전달하지 못했습니다.'});
+  }
+
   Map<String, Object?> describe() => {
     'id': id,
     'hostId': hostId,
@@ -460,7 +474,7 @@ class _PersistentPty {
             final data = base64Decode(request['data'] as String);
             if (data.length > 65536) throw ArgumentError('Input too large');
             if (exitCode != null) throw StateError('프로세스가 종료됐습니다.');
-            pty.write(Uint8List.fromList(data));
+            _writeInput(Uint8List.fromList(data));
           case 'resize':
             final cols = _dimension(request['cols']),
                 rows = _dimension(request['rows']);

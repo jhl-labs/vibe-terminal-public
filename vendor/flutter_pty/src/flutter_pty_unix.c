@@ -3,7 +3,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <errno.h>
 #include <pthread.h>
+#include <string.h>
 #include <unistd.h>
 #include <termios.h>
 #include <sys/ioctl.h>
@@ -16,6 +18,16 @@
 #include "include/dart_api_dl.h"
 #include "include/dart_native_api.h"
 
+typedef struct WriteChunk
+{
+    struct WriteChunk *next;
+
+    size_t length;
+
+    char data[];
+
+} WriteChunk;
+
 typedef struct PtyHandle
 {
     int ptm;
@@ -25,6 +37,20 @@ typedef struct PtyHandle
     pthread_mutex_t mutex;
 
     bool ackRead;
+
+    /* 입력은 전용 스레드가 쓴다. Dart 스레드에서 write()가 막히면(자식이 입력을
+     * 읽지 않아 tty 입력 큐가 가득 참) 호출한 isolate의 이벤트 루프 전체가 멈춘다. */
+    pthread_mutex_t writeLock;
+
+    pthread_cond_t writeReady;
+
+    WriteChunk *writeHead;
+
+    WriteChunk *writeTail;
+
+    size_t writePending;
+
+    bool writeClosed;
 
 } PtyHandle;
 
@@ -98,11 +124,89 @@ static void start_read_thread(int fd, Dart_Port port, pthread_mutex_t *mutex, bo
     pthread_create(&_thread, NULL, &read_loop, options);
 }
 
+static void drop_pending_writes(PtyHandle *handle)
+{
+    WriteChunk *chunk = handle->writeHead;
+    handle->writeHead = NULL;
+    handle->writeTail = NULL;
+    handle->writePending = 0;
+    while (chunk != NULL)
+    {
+        WriteChunk *next = chunk->next;
+        free(chunk);
+        chunk = next;
+    }
+}
+
+static void close_write_queue(PtyHandle *handle)
+{
+    pthread_mutex_lock(&handle->writeLock);
+    handle->writeClosed = true;
+    pthread_cond_signal(&handle->writeReady);
+    pthread_mutex_unlock(&handle->writeLock);
+}
+
+static void *write_loop(void *arg)
+{
+    PtyHandle *handle = (PtyHandle *)arg;
+
+    while (1)
+    {
+        pthread_mutex_lock(&handle->writeLock);
+        while (handle->writeHead == NULL && !handle->writeClosed)
+        {
+            pthread_cond_wait(&handle->writeReady, &handle->writeLock);
+        }
+        if (handle->writeClosed)
+        {
+            drop_pending_writes(handle);
+            pthread_mutex_unlock(&handle->writeLock);
+            return NULL;
+        }
+        /* 머리 청크는 이 스레드만 꺼내므로 락 밖에서 써도 안전하다. */
+        WriteChunk *chunk = handle->writeHead;
+        pthread_mutex_unlock(&handle->writeLock);
+
+        size_t offset = 0;
+        bool failed = false;
+        while (offset < chunk->length)
+        {
+            ssize_t n = write(handle->ptm, chunk->data + offset, chunk->length - offset);
+            if (n < 0)
+            {
+                if (errno == EINTR)
+                {
+                    continue;
+                }
+                failed = true;
+                break;
+            }
+            offset += (size_t)n;
+        }
+
+        pthread_mutex_lock(&handle->writeLock);
+        handle->writeHead = chunk->next;
+        if (handle->writeHead == NULL)
+        {
+            handle->writeTail = NULL;
+        }
+        handle->writePending -= chunk->length;
+        if (failed)
+        {
+            handle->writeClosed = true;
+        }
+        pthread_mutex_unlock(&handle->writeLock);
+        free(chunk);
+    }
+}
+
 typedef struct WaitExitOptions
 {
     int pid;
 
     Dart_Port port;
+
+    PtyHandle *handle;
 
 } WaitExitOptions;
 
@@ -123,16 +227,21 @@ static void *wait_exit_thread(void *arg)
         Dart_PostInteger_DL(options->port, -WTERMSIG(status));
     }
 
+    close_write_queue(options->handle);
+    free(options);
+
     return NULL;
 }
 
-static void start_wait_exit_thread(int pid, Dart_Port port)
+static void start_wait_exit_thread(int pid, Dart_Port port, PtyHandle *handle)
 {
     WaitExitOptions *options = malloc(sizeof(WaitExitOptions));
 
     options->pid = pid;
 
     options->port = port;
+
+    options->handle = handle;
 
     pthread_t _thread;
 
@@ -204,16 +313,77 @@ FFI_PLUGIN_EXPORT PtyHandle *pty_create(PtyOptions *options)
     pthread_mutex_init(&handle->mutex, NULL);
     handle->ackRead = options->ackRead;
 
+    pthread_mutex_init(&handle->writeLock, NULL);
+    pthread_cond_init(&handle->writeReady, NULL);
+    handle->writeHead = NULL;
+    handle->writeTail = NULL;
+    handle->writePending = 0;
+    handle->writeClosed = false;
+
+    pthread_t writer;
+    if (pthread_create(&writer, NULL, &write_loop, handle) == 0)
+    {
+        pthread_detach(writer);
+    }
+    else
+    {
+        handle->writeClosed = true;
+    }
+
     start_read_thread(ptm, options->stdout_port, &handle->mutex, options->ackRead);
 
-    start_wait_exit_thread(pid, options->exit_port);
+    start_wait_exit_thread(pid, options->exit_port, handle);
 
     return handle;
 }
 
-FFI_PLUGIN_EXPORT void pty_write(PtyHandle *handle, char *buffer, int length)
+FFI_PLUGIN_EXPORT int pty_write(PtyHandle *handle, char *buffer, int length)
 {
-    write(handle->ptm, buffer, length);
+    if (length <= 0)
+    {
+        return PTY_WRITE_QUEUED;
+    }
+
+    WriteChunk *chunk = malloc(sizeof(WriteChunk) + (size_t)length);
+    if (chunk == NULL)
+    {
+        return PTY_WRITE_FULL;
+    }
+    chunk->next = NULL;
+    chunk->length = (size_t)length;
+    memcpy(chunk->data, buffer, (size_t)length);
+
+    pthread_mutex_lock(&handle->writeLock);
+    int status = PTY_WRITE_QUEUED;
+    if (handle->writeClosed)
+    {
+        status = PTY_WRITE_CLOSED;
+    }
+    else if (handle->writePending + chunk->length > PTY_WRITE_QUEUE_LIMIT)
+    {
+        status = PTY_WRITE_FULL;
+    }
+    else
+    {
+        if (handle->writeTail == NULL)
+        {
+            handle->writeHead = chunk;
+        }
+        else
+        {
+            handle->writeTail->next = chunk;
+        }
+        handle->writeTail = chunk;
+        handle->writePending += chunk->length;
+        pthread_cond_signal(&handle->writeReady);
+    }
+    pthread_mutex_unlock(&handle->writeLock);
+
+    if (status != PTY_WRITE_QUEUED)
+    {
+        free(chunk);
+    }
+    return status;
 }
 
 FFI_PLUGIN_EXPORT void pty_ack_read(PtyHandle *handle)
