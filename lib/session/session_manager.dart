@@ -121,6 +121,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   }
 
   bool _restoreStarted = false;
+
   Future<void>? _agentWorktreeInitialization;
 
   /// pingActiveSessions 재진입 방지 플래그.

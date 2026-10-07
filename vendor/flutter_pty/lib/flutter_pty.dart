@@ -249,8 +249,13 @@ class Pty {
     _bindings.pty_ack_read(_handle);
   }
 
+  /// 자식이 끝난 뒤에도 PTY 버퍼에는 아직 읽히지 않은 출력이 남아 있을 수 있다
+  /// (특히 소비자가 ackRead로 읽기를 늦출 때). 출력 포트를 바로 닫으면 그 마지막
+  /// 출력이 유실되므로 잠시 열어 둔다.
+  static const _outputDrainGrace = Duration(seconds: 3);
+
   void _onExitCode(dynamic exitCode) {
-    _stdoutPort.close();
+    Timer(_outputDrainGrace, _stdoutPort.close);
     _exitPort.close();
     _exitCodeCompleter.complete(exitCode);
   }

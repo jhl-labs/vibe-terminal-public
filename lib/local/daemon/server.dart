@@ -268,6 +268,7 @@ class _PersistentPty {
         environment: Platform.environment,
         columns: cols,
         rows: rows,
+        ackRead: true,
       );
     } catch (_) {
       _journal.closeSync();
@@ -298,14 +299,24 @@ class _PersistentPty {
         );
     pty.output.listen(
       (data) {
-        decoder.add(data);
-        _record({'type': 'output', 'data': base64Encode(data)});
+        _ackOutstanding = true;
+        _lastOutputAt = DateTime.now();
+        try {
+          decoder.add(data);
+          _record({'type': 'output', 'data': base64Encode(data)});
+        } finally {
+          _settleRead();
+        }
       },
       onDone: decoder.close,
       onError: (Object error) =>
           _record({'type': 'notice', 'message': 'PTY output error: $error'}),
     );
-    pty.exitCode.then((code) {
+    pty.exitCode.then((code) async {
+      _childExited = true;
+      _releaseRead();
+      // 종료 직전에 쓴 출력이 exit보다 먼저 기록·전달되도록 출력이 잠잠해질 때까지 기다린다.
+      await _waitForOutputToSettle();
       exitCode = code;
       _record({'type': 'exit', 'code': code});
     });
@@ -322,6 +333,28 @@ class _PersistentPty {
   int _sequence = 0;
   int _bytes = 0;
   bool _truncated = false;
+
+  /// 재연결 때 기록 전체를 재생할 수 있는 최대 크기(전송 바이트 기준). 3 MB/s로
+  /// 읽는 클라이언트도 30초 재생 제한 안에 끝낼 수 있는 값보다 충분히 작다.
+  static const _maxReplayJournalBytes = 32 * 1024 * 1024;
+
+  /// 연결된 클라이언트에게 아직 못 보낸 출력이 이만큼 쌓이면 PTY 읽기를 멈춘다.
+  /// 읽기를 멈추면 자식 프로세스의 쓰기가 막혀 출력 속도가 클라이언트에 맞춰진다.
+  static const _readBackpressureHighBytes = 1024 * 1024;
+
+  /// 멈춘 PTY 읽기를 다시 시작하는 대기량. 너무 자주 멈췄다 풀리지 않게 간격을 둔다.
+  static const _readBackpressureLowBytes = 256 * 1024;
+
+  /// 클라이언트가 이 시간 동안 대기량을 줄이지 못하면 죽은 것으로 보고 연결을
+  /// 끊는다. 재생 제한(30초)보다 길어야 느린 재생이 중간에 끊기지 않는다.
+  static const _readStallLimit = Duration(seconds: 40);
+
+  int _clientBacklogBytes = 0;
+  bool _childExited = false;
+  DateTime _lastOutputAt = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _ackOutstanding = false;
+  bool _readHeld = false;
+  Timer? _stallTimer;
   bool _disposed = false;
   Socket? _owner;
   Future<void>? _termination;
@@ -338,6 +371,54 @@ class _PersistentPty {
     if (_inputDropNoticed || exitCode != null) return;
     _inputDropNoticed = true;
     _record({'type': 'notice', 'message': '셸이 입력을 읽지 않아 일부 입력을 전달하지 못했습니다.'});
+  }
+
+  /// 방금 받은 출력 청크의 ack를 정한다. 네이티브 읽기 스레드는 ack를 받아야 다음
+  /// 청크를 읽으므로, 보류하는 것이 곧 backpressure다.
+  void _settleRead() {
+    if (_clientBacklogBytes > _readBackpressureHighBytes &&
+        !_childExited &&
+        !_disposed) {
+      _readHeld = true;
+      _stallTimer ??= Timer(_readStallLimit, _dropStalledClient);
+      return;
+    }
+    _releaseRead();
+  }
+
+  /// 청크마다 정확히 한 번만 ack한다. 이미 ack한 뒤 다시 보내면 네이티브 쪽 잠금이
+  /// 꼬이므로 [_ackOutstanding]으로 막는다.
+  void _releaseRead() {
+    _readHeld = false;
+    _stallTimer?.cancel();
+    _stallTimer = null;
+    if (!_ackOutstanding) return;
+    _ackOutstanding = false;
+    pty.ackRead();
+  }
+
+  /// 자식이 끝난 뒤 남은 출력(PTY 버퍼 분량)이 모두 도착할 때까지 기다린다.
+  /// 포트 유예(3초)보다 짧게 끝내야 한다.
+  Future<void> _waitForOutputToSettle() async {
+    const quiet = Duration(milliseconds: 300);
+    final deadline = DateTime.now().add(const Duration(milliseconds: 2500));
+    while (!_disposed &&
+        DateTime.now().isBefore(deadline) &&
+        DateTime.now().difference(_lastOutputAt) < quiet) {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+  }
+
+  void _setClientBacklog(int bytes) {
+    _clientBacklogBytes = bytes;
+    if (_readHeld && bytes <= _readBackpressureLowBytes) _releaseRead();
+  }
+
+  void _dropStalledClient() {
+    _stallTimer = null;
+    _owner?.destroy();
+    _clientBacklogBytes = 0;
+    _releaseRead();
   }
 
   Map<String, Object?> describe() => {
@@ -374,6 +455,7 @@ class _PersistentPty {
   ) async {
     _owner?.destroy();
     _owner = socket;
+    _setClientBacklog(0);
     final queued = <String>[];
     var queuedBytes = 0;
     var replay = true;
@@ -386,6 +468,7 @@ class _PersistentPty {
         while (queued.isNotEmpty) {
           final line = queued.removeAt(0);
           queuedBytes -= line.length;
+          _setClientBacklog(queuedBytes);
           socket.write(line);
           await socket.flush();
         }
@@ -399,6 +482,7 @@ class _PersistentPty {
     final live = _events.stream.listen((line) {
       queued.add(line);
       queuedBytes += line.length;
+      _setClientBacklog(queuedBytes);
       if (queuedBytes > 4 * 1024 * 1024) {
         overflow = true;
         socket.destroy();
@@ -409,14 +493,17 @@ class _PersistentPty {
     try {
       if (!_truncated) _journal.flushSync();
       final length = _truncated ? 0 : journal.lengthSync();
+      // 기록이 너무 크면 전체 재생 대신 현재 화면 체크포인트로 복원한다. 느린
+      // 클라이언트는 큰 기록을 30초 안에 소화하지 못해, 재연결이 매번 실패한다.
+      final checkpointOnly = _truncated || length > _maxReplayJournalBytes;
       socket.write(
         daemonFrame({
           'type': 'replayStart',
           'generation': generation,
-          'truncated': _truncated,
+          'truncated': checkpointOnly,
         }),
       );
-      if (_truncated) {
+      if (checkpointOnly) {
         socket.write(
           daemonFrame({
             'type': 'resize',
@@ -452,6 +539,7 @@ class _PersistentPty {
       replay = false;
       queued.clear();
       queuedBytes = 0;
+      _setClientBacklog(0);
       if (overflow) throw StateError('Replay reader too slow');
       for (final wire in _semantic.values) {
         socket.write(
@@ -489,7 +577,10 @@ class _PersistentPty {
       }
     } finally {
       await live.cancel();
-      if (identical(_owner, socket)) _owner = null;
+      if (identical(_owner, socket)) {
+        _owner = null;
+        _setClientBacklog(0);
+      }
     }
   }
 
@@ -497,6 +588,8 @@ class _PersistentPty {
   Future<void> _terminate() async {
     _owner?.destroy();
     _owner = null;
+    _setClientBacklog(0);
+    _releaseRead();
     if (exitCode == null) {
       if (Platform.isWindows) {
         await Process.run('taskkill.exe', [
