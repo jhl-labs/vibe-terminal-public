@@ -10,6 +10,7 @@ import '../../data/repositories/memo_repository.dart';
 import '../../session/session.dart';
 import '../../state/providers.dart';
 import 'memo_history_view.dart';
+import '../../sync/sync_coordinator.dart';
 
 /// 저장 상태. 헤더에 작게 표시해 편집이 실제로 저장됐는지 알 수 있게 한다.
 enum _SaveStatus { idle, saving, saved, failed }
@@ -112,6 +113,30 @@ class _MemoPanelState extends ConsumerState<MemoPanel>
       _dirty = false;
       _saveStatus = _SaveStatus.idle;
       _failedSave = null;
+    });
+  }
+
+  /// 다른 기기에서 받은 메모로 바꾼다. 읽는 사이 사용자가 입력했거나 저장
+  /// 중이면 그 편집이 더 늦은 변경이므로 덮지 않는다.
+  Future<void> _reloadAfterSync(String hostId) async {
+    if (_dirty || _saveStatus == _SaveStatus.saving) return;
+    final before = _controller.text;
+    final Memo? memo;
+    try {
+      memo = await ref.read(memoRepositoryProvider).getForHost(hostId);
+    } catch (_) {
+      return;
+    }
+    if (!mounted ||
+        _loadedHostId != hostId ||
+        _dirty ||
+        _saveStatus == _SaveStatus.saving ||
+        _controller.text != before) {
+      return;
+    }
+    setState(() {
+      _controller.text = memo?.body ?? '';
+      _updatedAt = memo?.updatedAt;
     });
   }
 
@@ -269,6 +294,16 @@ class _MemoPanelState extends ConsumerState<MemoPanel>
 
   @override
   Widget build(BuildContext context) {
+    // 다른 기기에서 받은 메모를 보여 준다. 편집 중이면 이 기기의 편집이 더
+    // 늦은 변경으로 저장되므로 덮지 않는다.
+    ref.listen<int>(syncCoordinatorProvider.select((s) => s.pulledRevision), (
+      _,
+      _,
+    ) {
+      final hostId = _loadedHostId;
+      if (hostId != null) unawaited(_reloadAfterSync(hostId));
+      _refreshList();
+    });
     // 활성 세션/host 변화에 반응.
     final sessions = ref.watch(sessionManagerProvider);
     final activeId = ref.watch(activeSessionIdProvider);

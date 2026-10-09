@@ -6,10 +6,17 @@ const kSyncTombstoneRetention = Duration(days: 90);
 
 /// 로컬에 반영할 섹션별 변경.
 class SyncSectionChanges {
-  const SyncSectionChanges({this.upserts = const [], this.deletes = const []});
+  const SyncSectionChanges({
+    this.upserts = const [],
+    this.deletes = const [],
+    this.deletedAt = const {},
+  });
 
   final List<SyncRecord> upserts;
   final List<String> deletes;
+
+  /// 지우는 레코드별 삭제 기록 시각.
+  final Map<String, DateTime> deletedAt;
 
   bool get isEmpty => upserts.isEmpty && deletes.isEmpty;
   int get count => upserts.length + deletes.length;
@@ -42,7 +49,7 @@ class SyncMergeResult {
 }
 
 /// 레코드마다 마지막에 고친 쪽을 남긴다. 삭제 기록이 레코드보다 늦거나 같으면
-/// 지운다. [initial]이면 처음 합치는 것이므로 어느 쪽 레코드도 지우지 않는다.
+/// 지운다. [initial]이면 처음 합치는 것이므로 이 기기의 삭제 기록은 쓰지 않는다.
 ///
 /// [local]의 섹션 목록이 이 기기가 아는 섹션이다. 원격에만 있는 섹션(이 앱
 /// 빌드가 다루지 않는 데이터)은 그대로 결과에 남겨 다른 기기의 데이터를
@@ -55,7 +62,13 @@ SyncMergeResult mergeSnapshots({
 }) {
   final cutoff = now.toUtc().subtract(kSyncTombstoneRetention);
   final tombstones = <String, SyncTombstone>{};
-  for (final tombstone in [...local.tombstones, ...remote.tombstones]) {
+  // 처음 맞추는 저장소에는 이 기기의 삭제 기록을 쓰지 않는다. 다른 저장소와
+  // 동기화하던 때나 동기화 전의 기록이라 이 저장소의 항목과는 관계가 없다.
+  // 원격의 삭제 기록은 이 저장소에서 실제로 지운 것이므로 따른다.
+  final candidates = initial
+      ? remote.tombstones
+      : [...local.tombstones, ...remote.tombstones];
+  for (final tombstone in candidates) {
     if (tombstone.deletedAt.isBefore(cutoff)) continue;
     final existing = tombstones[tombstone.key];
     if (existing == null || tombstone.deletedAt.isAfter(existing.deletedAt)) {
@@ -74,6 +87,7 @@ SyncMergeResult mergeSnapshots({
     final records = <SyncRecord>[];
     final upserts = <SyncRecord>[];
     final deletes = <String>[];
+    final deletedAt = <String, DateTime>{};
     for (final id in {...localById.keys, ...remoteById.keys}) {
       final localRecord = localById[id];
       final remoteRecord = remoteById[id];
@@ -81,7 +95,7 @@ SyncMergeResult mergeSnapshots({
       final tombstoneKey = SyncTombstone.keyOf(name, id);
       final tombstone = tombstones[tombstoneKey];
       if (tombstone != null && winner != null) {
-        if (initial || winner.updatedAt.isAfter(tombstone.deletedAt)) {
+        if (winner.updatedAt.isAfter(tombstone.deletedAt)) {
           tombstones.remove(tombstoneKey);
         } else {
           winner = null;
@@ -90,7 +104,10 @@ SyncMergeResult mergeSnapshots({
 
       if (winner != null) records.add(winner);
       if (known) {
-        if (winner == null && localRecord != null) deletes.add(id);
+        if (winner == null && localRecord != null) {
+          deletes.add(id);
+          deletedAt[id] = tombstone!.deletedAt;
+        }
         if (winner != null &&
             (localRecord == null || !localRecord.sameAs(winner))) {
           upserts.add(winner);
@@ -106,6 +123,7 @@ SyncMergeResult mergeSnapshots({
       localChanges[name] = SyncSectionChanges(
         upserts: upserts,
         deletes: deletes,
+        deletedAt: deletedAt,
       );
     }
   }
@@ -154,10 +172,14 @@ SyncSettingsBlock? _newerSettings(
   final localAt = local.updatedAt;
   final remoteAt = remote.updatedAt;
   // 한 번도 바꾸지 않은 쪽(null)은 바꾼 쪽에 진다.
-  if (localAt == null) return remoteAt == null ? local : remote;
-  if (remoteAt == null) return local;
-  if (localAt.isAfter(remoteAt)) return local;
-  if (remoteAt.isAfter(localAt)) return remote;
+  if (localAt == null && remoteAt != null) return remote;
+  if (remoteAt == null && localAt != null) return local;
+  if (localAt != null && remoteAt != null) {
+    if (localAt.isAfter(remoteAt)) return local;
+    if (remoteAt.isAfter(localAt)) return remote;
+  }
+  // 시각이 같거나 둘 다 없으면 내용으로 정한다. 기기마다 자기 쪽을 고르면
+  // 서로 번갈아 덮어쓰며 끝없이 다시 올린다.
   return canonicalJson(local.values).compareTo(canonicalJson(remote.values)) >=
           0
       ? local

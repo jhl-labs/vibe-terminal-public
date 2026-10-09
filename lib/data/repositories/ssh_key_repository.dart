@@ -43,16 +43,22 @@ class SshKeyRepository {
   }
 
   Future<SshKey?> findByFingerprint(String fingerprint) async {
-    final row = await (_db.select(
-      _db.sshKeys,
-    )..where((t) => t.fingerprint.equals(fingerprint))).getSingleOrNull();
+    // 다른 기기에서 같은 키를 따로 가져와 동기화되면 같은 값이 둘 이상일 수 있다.
+    final row =
+        await (_db.select(_db.sshKeys)
+              ..where((t) => t.fingerprint.equals(fingerprint))
+              ..limit(1))
+            .getSingleOrNull();
     return row == null ? null : _toModel(row);
   }
 
   Future<SshKey?> findBySecretRef(String secretRef) async {
-    final row = await (_db.select(
-      _db.sshKeys,
-    )..where((t) => t.secretRef.equals(secretRef))).getSingleOrNull();
+    // 다른 기기에서 같은 키를 따로 가져와 동기화되면 같은 값이 둘 이상일 수 있다.
+    final row =
+        await (_db.select(_db.sshKeys)
+              ..where((t) => t.secretRef.equals(secretRef))
+              ..limit(1))
+            .getSingleOrNull();
     return row == null ? null : _toModel(row);
   }
 
@@ -133,7 +139,10 @@ class SshKeyRepository {
     final key = await getById(id);
     if (key == null) return;
     await (_db.delete(_db.sshKeys)..where((t) => t.id.equals(id))).go();
-    await _secureStore.deleteSecret(key.secretRef);
+    // 같은 비밀을 가리키는 다른 키(동기화로 들어온 중복)가 있으면 남긴다.
+    if (await findBySecretRef(key.secretRef) == null) {
+      await _secureStore.deleteSecret(key.secretRef);
+    }
   }
 
   SshKey _toModel(SshKeyRow r) => SshKey(

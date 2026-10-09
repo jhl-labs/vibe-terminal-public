@@ -241,8 +241,11 @@ class HostListPage extends ConsumerWidget {
     await ref
         .read(hostRepositoryProvider)
         .upsert(
+          // 복원도 새 변경이다. 옛 시각으로 넣으면 그새 동기화된 삭제 기록이
+          // 더 늦어 다음 동기화에서 다시 지워진다.
           host.copyWith(
             identityId: _isHostScoped(host) ? null : host.identityId,
+            updatedAt: DateTime.now(),
           ),
         );
     ref.invalidate(hostListProvider);

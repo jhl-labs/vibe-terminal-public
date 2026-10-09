@@ -69,6 +69,11 @@ class _AppRootState extends ConsumerState<_AppRoot>
         state == AppLifecycleState.paused) {
       _wasBackgrounded = true;
     }
+    // 창 포커스만 바뀌는 inactive는 제외하고, 실제로 내려갈 때만 올린다.
+    if (state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused) {
+      ref.read(syncCoordinatorProvider.notifier).flushPending();
+    }
     final resumed = state == AppLifecycleState.resumed;
     ref.read(appForegroundProvider.notifier).set(resumed);
     if (!resumed) {
@@ -77,7 +82,6 @@ class _AppRootState extends ConsumerState<_AppRoot>
             .read(sessionManagerProvider.notifier)
             .persistOpenSessionsForRestore(),
       );
-      ref.read(syncCoordinatorProvider.notifier).flushPending();
     }
     // 포그라운드 복귀 시, 백그라운드에서 끊긴 세션을 백오프(최대 30초, Doze로
     // 지연될 수 있음)를 기다리지 않고 즉시 재연결한다. 창 포커스 전환
@@ -86,6 +90,7 @@ class _AppRootState extends ConsumerState<_AppRoot>
     if (resumed && _wasBackgrounded) {
       _wasBackgrounded = false;
       ref.read(sessionManagerProvider.notifier).reconnectDisconnectedNow();
+      ref.read(syncCoordinatorProvider.notifier).onResumed();
     }
   }
 

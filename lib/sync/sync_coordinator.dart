@@ -40,9 +40,18 @@ class SyncStatus {
     this.nextRunAt,
     this.error,
     this.confirmation,
+    this.pulledRevision = 0,
+    this.keyRejected = false,
   });
 
+  /// 원격 파일을 이 기기의 암호화 키로 열지 못해 멈췄다.
+  final bool keyRejected;
+
   final SyncPhase phase;
+
+  /// 다른 기기의 변경을 받아 로컬에 반영할 때마다 1씩 오른다. 열어 둔 편집
+  /// 화면은 이 값이 바뀌면 다시 읽는다.
+  final int pulledRevision;
 
   /// 마지막으로 성공한 동기화에서 가져오고 보낸 항목 수.
   final int? lastPulled;
@@ -66,6 +75,8 @@ class SyncStatus {
     Object? nextRunAt = _keep,
     Object? error = _keep,
     Object? confirmation = _keep,
+    int? pulledRevision,
+    bool? keyRejected,
   }) => SyncStatus(
     phase: phase ?? this.phase,
     lastPulled: lastPulled ?? this.lastPulled,
@@ -78,6 +89,8 @@ class SyncStatus {
     confirmation: identical(confirmation, _keep)
         ? this.confirmation
         : confirmation as SyncNeedsConfirmationException?,
+    pulledRevision: pulledRevision ?? this.pulledRevision,
+    keyRejected: keyRejected ?? this.keyRejected,
   );
 }
 
@@ -107,13 +120,9 @@ final syncLocalStoreProvider = Provider<SyncLocalStore>((ref) {
 });
 
 final syncRemoteProvider = Provider<SyncRemote>((ref) {
-  final service = ref.watch(gitHubSyncServiceProvider);
-  final refresher = GitHubTokenRefresher(
-    service: service,
-    save: ref.read(appSettingsProvider.notifier).setGitHubSyncAuthorization,
-  );
+  final refresher = ref.watch(gitHubTokenRefresherProvider);
   return GitHubSyncRemote(
-    service: service,
+    service: ref.watch(gitHubSyncServiceProvider),
     settings: () =>
         refresher.fresh(ref.read(appSettingsProvider).cloudSync.github),
   );
@@ -138,9 +147,13 @@ class SyncCoordinator extends Notifier<SyncStatus> {
   StreamSubscription<Set<TableUpdate>>? _tableUpdates;
   Future<void>? _running;
   bool _rerun = false;
+  bool _startRequested = false;
   bool _started = false;
   int _failures = 0;
   SyncCheckpoint? _checkpoint;
+
+  /// 첫 동기화에서 합치기를 확인하고 실제로 반영까지 한 대상.
+  String? _confirmedTarget;
 
   @override
   SyncStatus build() {
@@ -156,12 +169,23 @@ class SyncCoordinator extends Notifier<SyncStatus> {
       state.phase != SyncPhase.blocked &&
       state.phase != SyncPhase.needsConfirmation;
 
+  /// 앱 실행 중의 자동 실행(주기 확인, 변경 감지, 백그라운드 전환) 조건.
+  /// - 재시도 대기 중이면 백오프 타이머에 맡긴다.
+  /// - 아직 한 번도 맞추지 않은 대상이면 기다린다. 설정 화면에서 저장소·키를
+  ///   입력하는 도중의 값으로 첫 파일을 만들지 않게, 첫 동기화는 앱 시작이나
+  ///   자동 동기화 켜기, `지금 동기화`로만 시작한다.
+  bool get _canAutoRun =>
+      _autoReady && state.phase != SyncPhase.retrying && !_sync.isFirstSync;
+
   /// 설정을 다 읽은 뒤 한 번 호출한다. 자동 동기화가 켜져 있으면 바로 실행한다.
   Future<void> start() async {
-    if (_started) return;
-    _started = true;
+    if (_startRequested) return;
+    _startRequested = true;
     await ref.read(appSettingsProvider.notifier).loaded;
     if (!ref.mounted) return;
+    // 저장된 설정을 읽어 들이는 변경은 사용자의 설정 변경이 아니므로, 다 읽은
+    // 뒤부터 설정 변경에 반응한다.
+    _started = true;
     final local = ref.read(syncLocalStoreProvider);
     if (local is AppSyncLocalStore) {
       unawaited(local.pruneTombstones(DateTime.now()).catchError((_) {}));
@@ -171,14 +195,19 @@ class SyncCoordinator extends Notifier<SyncStatus> {
         .tableUpdates(const TableUpdateQuery.any())
         .listen(_onTableUpdates);
     _poll = Timer.periodic(pollInterval, (_) {
-      if (_autoReady) unawaited(syncNow());
+      if (_canAutoRun) unawaited(syncNow());
     });
     if (_autoReady) unawaited(syncNow());
   }
 
+  /// 앱으로 돌아오면 그사이 다른 기기의 변경을 받는다.
+  void onResumed() {
+    if (_started && _canAutoRun && _running == null) unawaited(syncNow());
+  }
+
   /// 앱이 백그라운드로 갈 때 기다리던 변경을 바로 올린다.
   void flushPending() {
-    if (_scheduled == null || !_autoReady) return;
+    if (_scheduled == null || !_canAutoRun) return;
     _schedule(Duration.zero);
   }
 
@@ -194,7 +223,8 @@ class SyncCoordinator extends Notifier<SyncStatus> {
     _scheduled = null;
     final run = _run(confirmed: confirmed).whenComplete(() {
       _running = null;
-      if (_rerun && ref.mounted) {
+      // 실행 중에 생긴 변경은 자동 동기화가 켜져 있을 때만 이어서 올린다.
+      if (_rerun && ref.mounted && _sync.isConfigured) {
         _rerun = false;
         _schedule(Duration.zero);
       }
@@ -216,6 +246,7 @@ class SyncCoordinator extends Notifier<SyncStatus> {
     state = state.copyWith(
       phase: SyncPhase.running,
       error: null,
+      keyRejected: false,
       confirmation: null,
       nextRunAt: null,
     );
@@ -227,11 +258,20 @@ class SyncCoordinator extends Notifier<SyncStatus> {
         crypto: ref.read(syncCryptoProvider),
       );
       final initial = sync.isFirstSync;
+      // 합치기로 확인한 뒤 반영까지 됐는데 업로드가 실패했으면, 재시도에서
+      // 같은 확인을 다시 묻지 않는다.
+      final alreadyConfirmed = confirmed || _confirmedTarget == target;
       final result = await engine.run(
         encryptionKey: sync.encryptionKey,
         initial: initial,
-        confirmed: confirmed,
+        confirmed: alreadyConfirmed,
         checkpoint: initial ? null : _checkpoint,
+        onApplied: (_) {
+          if (!ref.mounted) return;
+          if (initial) _confirmedTarget = target;
+          _refreshSyncedData();
+          state = state.copyWith(pulledRevision: state.pulledRevision + 1);
+        },
       );
       if (!ref.mounted) return;
       _checkpoint = result.checkpoint;
@@ -240,7 +280,6 @@ class SyncCoordinator extends Notifier<SyncStatus> {
       ref
           .read(appSettingsProvider.notifier)
           .recordSyncCompleted(target: target, at: now);
-      if (result.pulled > 0) _refreshSyncedData();
       state = state.copyWith(
         phase: SyncPhase.idle,
         lastPulled: result.pulled,
@@ -262,10 +301,12 @@ class SyncCoordinator extends Notifier<SyncStatus> {
   }
 
   void _onFailure(Object error) {
-    if (!_isRetryable(error)) {
+    // 자동 동기화가 꺼져 있으면 다시 시도할 주체가 없으므로 멈춘 상태로 둔다.
+    if (!_isRetryable(error) || !_sync.isConfigured) {
       state = state.copyWith(
         phase: SyncPhase.blocked,
         error: error.toString(),
+        keyRejected: error is SyncWrongKeyException,
         nextRunAt: null,
       );
       return;
@@ -277,23 +318,20 @@ class SyncCoordinator extends Notifier<SyncStatus> {
     state = state.copyWith(
       phase: SyncPhase.retrying,
       error: error.toString(),
-      nextRunAt: _sync.isConfigured ? DateTime.now().add(wait) : null,
+      nextRunAt: DateTime.now().add(wait),
     );
-    if (_sync.isConfigured) _schedule(wait);
+    _schedule(wait);
   }
 
-  /// 네트워크·서버 오류와 겹침만 자동으로 다시 시도한다. 키·권한·설정 문제는
-  /// 사용자가 고칠 때까지 같은 결과이므로 멈춘다.
+  /// 네트워크·서버 오류, 사용량 제한, 겹침만 자동으로 다시 시도한다. 키·권한·
+  /// 설정 문제는 사용자가 고칠 때까지 같은 결과이므로 멈춘다.
   bool _isRetryable(Object error) {
     if (error is SyncWrongKeyException ||
         error is SyncRemoteFormatException ||
         error is FormatException) {
       return false;
     }
-    if (error is GitHubSyncException) {
-      final status = error.statusCode;
-      return status == null || status >= 500 || status == 429;
-    }
+    if (error is GitHubSyncException) return error.transient;
     return true;
   }
 
@@ -309,7 +347,7 @@ class SyncCoordinator extends Notifier<SyncStatus> {
   }
 
   void _onTableUpdates(Set<TableUpdate> updates) {
-    if (!_autoReady) return;
+    if (!_canAutoRun) return;
     final tracked = updates.any(
       (u) => AppDatabase.syncTrackedTables.containsKey(u.table),
     );
@@ -339,9 +377,17 @@ class SyncCoordinator extends Notifier<SyncStatus> {
       // 설정을 고쳤으니 멈춰 있던 오류와 기억한 원격 상태를 버린다.
       _checkpoint = null;
       _failures = 0;
+      // 확인 대기도 다른 대상의 개수이므로 버린다. 남겨 두면 `합치기`가 새
+      // 대상을 개수도 보여 주지 않고 합친다.
       if (state.phase == SyncPhase.blocked ||
-          state.phase == SyncPhase.retrying) {
-        state = state.copyWith(phase: SyncPhase.idle, error: null);
+          state.phase == SyncPhase.retrying ||
+          state.phase == SyncPhase.needsConfirmation) {
+        state = state.copyWith(
+          phase: SyncPhase.idle,
+          error: null,
+          keyRejected: false,
+          confirmation: null,
+        );
       }
       if (!after.isConfigured) {
         _scheduled?.cancel();
@@ -351,13 +397,16 @@ class SyncCoordinator extends Notifier<SyncStatus> {
       }
     }
     if (!_started || !_autoReady) return;
-    if (setupChanged) {
+    if (!before.enabled && after.enabled) {
+      // 자동 동기화를 켜는 것은 명시적인 시작 신호다.
       if (_running != null) {
         _rerun = true;
       } else {
         _schedule(const Duration(seconds: 1));
       }
-    } else if (before.settingsUpdatedAt != after.settingsUpdatedAt) {
+    } else if (!setupChanged &&
+        _canAutoRun &&
+        before.settingsUpdatedAt != after.settingsUpdatedAt) {
       _onLocalChange();
     }
   }

@@ -16,9 +16,15 @@ abstract interface class SyncSection {
   /// [includeSecrets]가 false면 보안 저장소를 읽지 않는다(변경 감지용).
   Future<List<SyncRecord>> read({bool includeSecrets = true});
 
+  /// DB 트랜잭션 안에서 호출된다. 모든 섹션의 추가·수정이 삭제보다 먼저
+  /// 끝나므로, 삭제는 다른 섹션의 최종 상태를 보고 판단할 수 있다. 실제로
+  /// 쓴 행 수를 돌려준다(기기별 데이터라 건너뛴 레코드는 세지 않는다).
+  Future<int> applyUpserts(List<SyncRecord> records);
+
   /// DB 트랜잭션 안에서 호출된다. 비밀값 삭제는 롤백할 수 없으므로
-  /// [secretRefsToDelete]에 모아 두면 커밋 뒤에 지운다.
-  Future<void> apply(
+  /// [secretRefsToDelete]에 모아 두면 커밋 뒤에 지운다. 지운 행 수와, 참조
+  /// 중이라 지우지 않고 되살린 행 수를 돌려준다.
+  Future<({int deleted, int kept})> applyDeletes(
     SyncSectionChanges changes, {
     required List<String> secretRefsToDelete,
   });
@@ -47,8 +53,37 @@ abstract class RowSyncSection<R> implements SyncSection {
   /// 비밀값이 있는 테이블이면 그 보안 저장소 키.
   String? secretRefOf(R row) => null;
 
-  /// 동기화하지 않는 행(예: 기기별 로컬 셸 호스트).
+  /// 받은 레코드의 비밀값을 저장할 키.
+  String? secretRefOfRecord(SyncRecord record) => null;
+
+  /// 동기화하지 않는 행(예: 기기별 로컬 셸 호스트). 이런 행은 받은 레코드로
+  /// 덮어쓰거나 지우지 않는다.
   bool includes(R row) => true;
+
+  /// 이 기기에 들이지 않을 레코드(예: 이 기기의 로컬 셸에 딸린 메모).
+  bool accepts(SyncRecord record) => true;
+
+  /// 다른 행이 아직 참조하는 행인지. 참조 중이면 지우지 않는다.
+  Future<bool> isReferenced(String id) async => false;
+
+  /// 참조 중이라 지우지 않은 행을 다른 기기에도 되살리도록 변경 시각을
+  /// [after]보다 늦게 바꾼다. 변경 시각 컬럼이 있는 테이블만 재정의한다.
+  Future<void> keepReferenced(String id, {required DateTime after}) async {}
+
+  /// 보안 저장소의 비밀값을 아직 다른 행이 쓰는지. 호스트의 credentialRef는
+  /// Identity·키의 비밀을 함께 가리키므로 세 테이블을 모두 본다.
+  Future<bool> secretInUse(String ref) async {
+    if ((await loadRows()).any((row) => secretRefOf(row) == ref)) return true;
+    final rows = await db
+        .customSelect(
+          'SELECT 1 FROM ssh_keys WHERE secret_ref = ?1 '
+          'UNION ALL SELECT 1 FROM identities WHERE secret_ref = ?1 '
+          'UNION ALL SELECT 1 FROM hosts WHERE credential_ref = ?1 LIMIT 1',
+          variables: [Variable<String>(ref)],
+        )
+        .get();
+    return rows.isNotEmpty;
+  }
 
   @override
   Future<List<SyncRecord>> read({bool includeSecrets = true}) async {
@@ -69,32 +104,63 @@ abstract class RowSyncSection<R> implements SyncSection {
   }
 
   @override
-  Future<void> apply(
-    SyncSectionChanges changes, {
-    required List<String> secretRefsToDelete,
-  }) async {
+  Future<int> applyUpserts(List<SyncRecord> records) async {
+    if (records.isEmpty) return 0;
+    var written = 0;
     final existing = {for (final row in await loadRows()) idOf(row): row};
-    for (final record in changes.upserts) {
-      final row = decode(record, existing[record.id]);
+    for (final record in records) {
+      final current = existing[record.id];
+      if (current != null && !includes(current)) continue;
+      if (!accepts(record)) continue;
       final secret = record.data[kSyncSecretField];
       final ref = secretRefOfRecord(record);
       if (secret is String && ref != null) {
         await secureStore.writeSecret(ref, secret);
       }
-      await db.into(table).insertOnConflictUpdate(row);
+      await db.into(table).insertOnConflictUpdate(decode(record, current));
+      written++;
     }
-    final idColumn = AppDatabase.syncTrackedTables[name]!;
-    for (final id in changes.deletes) {
-      final row = existing[id];
-      if (row == null || !includes(row)) continue;
-      final ref = secretRefOf(row);
-      if (ref != null) secretRefsToDelete.add(ref);
-      await db.customStatement('DELETE FROM $name WHERE $idColumn = ?', [id]);
-    }
+    return written;
   }
 
-  /// 받은 레코드의 비밀값을 저장할 키.
-  String? secretRefOfRecord(SyncRecord record) => null;
+  @override
+  Future<({int deleted, int kept})> applyDeletes(
+    SyncSectionChanges changes, {
+    required List<String> secretRefsToDelete,
+  }) async {
+    final ids = changes.deletes;
+    var deleted = 0;
+    var kept = 0;
+    final existing = {for (final row in await loadRows()) idOf(row): row};
+    final idColumn = AppDatabase.syncTrackedTables[name]!;
+    for (final id in ids) {
+      final row = existing[id];
+      if (row == null || !includes(row)) continue;
+      // 다른 기기에서 지웠지만 이 기기의 호스트가 아직 쓰고 있다(오프라인 중에
+      // 연결한 경우 등). 지우면 접속 정보가 끊기므로 남기고 다시 올린다.
+      if (await isReferenced(id)) {
+        await keepReferenced(
+          id,
+          after: changes.deletedAt[id] ?? DateTime.now(),
+        );
+        kept++;
+        continue;
+      }
+      await db.customStatement('DELETE FROM $name WHERE $idColumn = ?', [id]);
+      deleted++;
+      final ref = secretRefOf(row);
+      if (ref != null && !await secretInUse(ref)) secretRefsToDelete.add(ref);
+    }
+    return (deleted: deleted, kept: kept);
+  }
+}
+
+/// 삭제 기록([deletedAt])을 이기는 변경 시각을 drift 저장 형식(유닉스 초)으로
+/// 만든다. 지금이 삭제와 같은 초이면 시각이 같아 삭제가 이기므로 1초 뒤로 둔다.
+int syncKeepSeconds(DateTime deletedAt) {
+  final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+  final deleted = deletedAt.millisecondsSinceEpoch ~/ 1000;
+  return now > deleted ? now : deleted + 1;
 }
 
 /// 레코드 데이터를 읽는 도우미. 형식이 틀린 값은 기본값으로 둔다.

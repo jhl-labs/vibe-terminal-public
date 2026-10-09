@@ -47,7 +47,7 @@ class SyncRetryExhaustedException implements Exception {
   const SyncRetryExhaustedException();
 
   @override
-  String toString() => '다른 기기와 동기화가 계속 겹쳤습니다. 잠시 뒤 다시 시도합니다.';
+  String toString() => '다른 기기와 동기화가 계속 겹쳤습니다.';
 }
 
 /// 마지막으로 맞춘 원격 파일과 로컬 상태. 둘 다 그대로면 병합을 건너뛴다.
@@ -95,13 +95,21 @@ class SyncEngine {
 
   /// [initial]이면 이 저장소와 처음 맞추는 것이다. 이때 양쪽에 데이터가 있고
   /// [confirmed]가 아니면 [SyncNeedsConfirmationException]을 던진다.
+  ///
+  /// [onApplied]는 로컬에 무언가를 반영할 때마다 바로 불린다. 그 뒤 업로드가
+  /// 실패해도 로컬은 이미 바뀌었으므로, 화면 갱신은 여기에 맞춘다.
   Future<SyncRunResult> run({
     required String encryptionKey,
     required bool initial,
     bool confirmed = false,
     SyncCheckpoint? checkpoint,
+    void Function(int changed)? onApplied,
   }) async {
-    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+    var pulled = 0;
+    var pushed = 0;
+    var attempts = maxAttempts;
+    var anotherPassUsed = false;
+    for (var attempt = 1; attempt <= attempts; attempt++) {
       final file = await _remote.download();
       final local = await _local.read();
       if (!initial &&
@@ -115,13 +123,15 @@ class SyncEngine {
       final remote = remoteBlob == null
           ? SyncSnapshot.empty
           : await _decrypt(remoteBlob, encryptionKey);
+      // 이 앱이 다루지 않는 섹션은 보존만 하므로 확인 문구의 개수에서 뺀다.
+      final remoteCount = _knownRecordCount(remote, local.snapshot);
       if (initial &&
           !confirmed &&
           local.snapshot.recordCount > 0 &&
-          remote.recordCount > 0) {
+          remoteCount > 0) {
         throw SyncNeedsConfirmationException(
           localCount: local.snapshot.recordCount,
-          remoteCount: remote.recordCount,
+          remoteCount: remoteCount,
         );
       }
 
@@ -133,15 +143,17 @@ class SyncEngine {
       );
       // 체크포인트 지문은 적용 직후 값이어야 한다. 업로드를 기다리는 사이의
       // 로컬 변경까지 담으면 다음 실행이 그 변경을 올리지 않고 건너뛴다.
-      final String appliedFingerprint;
+      final SyncApplied applied;
       try {
-        appliedFingerprint = await _local.apply(
+        applied = await _local.apply(
           result,
           expectedFingerprint: local.fingerprint,
         );
       } on SyncLocalChangedException {
         continue;
       }
+      pulled += applied.changed;
+      if (applied.changed > 0) onApplied?.call(applied.changed);
 
       var remoteSha = file?.sha;
       final needsUpload =
@@ -161,17 +173,31 @@ class SyncEngine {
           continue;
         }
       }
+      if (needsUpload) pushed += result.pushed;
+      // 지우지 않고 남긴 행은 아직 원격에 없다. 같은 실행에서 한 번 더 합쳐
+      // 바로 올린다. 겹침 재시도와 별개로 한 번만 더 돈다. 이미 합치기로 한
+      // 첫 동기화이므로 다시 묻지 않는다.
+      if (applied.needsAnotherPass && !anotherPassUsed) {
+        anotherPassUsed = true;
+        attempts++;
+        confirmed = true;
+        continue;
+      }
       return SyncRunResult(
-        pulled: result.pulled,
-        pushed: needsUpload ? result.pushed : 0,
+        pulled: pulled,
+        pushed: pushed,
         checkpoint: SyncCheckpoint(
           remoteSha: remoteSha,
-          localFingerprint: appliedFingerprint,
+          localFingerprint: applied.fingerprint,
         ),
       );
     }
     throw const SyncRetryExhaustedException();
   }
+
+  static int _knownRecordCount(SyncSnapshot remote, SyncSnapshot local) => [
+    for (final name in local.sections.keys) remote.sections[name]?.length ?? 0,
+  ].fold(0, (sum, count) => sum + count);
 
   EncryptedSyncBlob _parseBlob(String content) {
     try {

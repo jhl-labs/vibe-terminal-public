@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:isolate';
 import 'dart:math';
 
 import 'package:crypto/crypto.dart' show sha256;
@@ -160,15 +161,7 @@ class SyncCryptoService {
     ].join(':');
     final cached = _derivedKeys.remove(cacheKey);
     final derived =
-        cached ??
-        Pbkdf2(
-          macAlgorithm: Hmac.sha256(),
-          iterations: iterations,
-          bits: 256,
-        ).deriveKey(
-          secretKey: SecretKey(utf8.encode(encryptionKey)),
-          nonce: salt,
-        );
+        cached ?? _deriveInBackground(encryptionKey, salt, iterations);
     _derivedKeys[cacheKey] = derived;
     while (_derivedKeys.length > _maxDerivedKeys) {
       _derivedKeys.remove(_derivedKeys.keys.first);
@@ -176,6 +169,28 @@ class SyncCryptoService {
     // 실패한 유도는 캐시에 남기지 않는다.
     derived.then<void>((_) {}, onError: (_) => _derivedKeys.remove(cacheKey));
     return derived;
+  }
+
+  /// PBKDF2는 의도적으로 느리다(60만 회에 1~2초). UI isolate에서 돌리면 그동안
+  /// 화면이 멈추므로 별도 isolate에서 계산한다.
+  static Future<SecretKey> _deriveInBackground(
+    String encryptionKey,
+    List<int> salt,
+    int iterations,
+  ) async {
+    final bytes = await Isolate.run(() async {
+      final key =
+          await Pbkdf2(
+            macAlgorithm: Hmac.sha256(),
+            iterations: iterations,
+            bits: 256,
+          ).deriveKey(
+            secretKey: SecretKey(utf8.encode(encryptionKey)),
+            nonce: salt,
+          );
+      return key.extractBytes();
+    });
+    return SecretKey(bytes);
   }
 
   static String _sha256Hex(String value) =>

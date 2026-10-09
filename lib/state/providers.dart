@@ -46,6 +46,7 @@ import '../settings/app_settings_store.dart';
 import '../ssh/public_key_installer.dart';
 import '../ssh/ssh_service.dart';
 import '../ssh/remote_session_catalog.dart';
+import '../sync/github_sync_remote.dart';
 import '../sync/github_sync_service.dart';
 import '../sync/sync_snapshot.dart';
 import '../sync/synced_settings.dart';
@@ -152,6 +153,14 @@ final telemetryProvider = Provider<Telemetry>(
 
 final gitHubSyncServiceProvider = Provider<GitHubSyncService>(
   (ref) => GitHubSyncService(),
+);
+
+/// GitHub App token 갱신. 동시에 두 번 갱신하지 않도록 앱 전체가 함께 쓴다.
+final gitHubTokenRefresherProvider = Provider<GitHubTokenRefresher>(
+  (ref) => GitHubTokenRefresher(
+    service: ref.watch(gitHubSyncServiceProvider),
+    save: ref.read(appSettingsProvider.notifier).setGitHubSyncAuthorization,
+  ),
 );
 
 final gitHubCommunityServiceProvider = Provider<GitHubCommunityService>(
@@ -1000,20 +1009,17 @@ class AppSettingsController extends Notifier<AppSettings> {
     );
   }
 
+  /// 직접 입력한 token. 로그인으로 받은 token이 아니므로 갱신 정보를 버린다.
+  /// 남겨 두면 만료 시각에 갱신이 직접 입력한 token을 앱 token으로 덮어쓴다.
   void setGitHubSyncToken(String token) {
-    final clearToken = token.trim().isEmpty;
     update(
       state.copyWith(
         cloudSync: state.cloudSync.copyWith(
           github: state.cloudSync.github.copyWith(
             token: token,
-            refreshToken: clearToken ? '' : null,
-            tokenExpiresAt: clearToken
-                ? null
-                : state.cloudSync.github.tokenExpiresAt,
-            refreshTokenExpiresAt: clearToken
-                ? null
-                : state.cloudSync.github.refreshTokenExpiresAt,
+            refreshToken: '',
+            tokenExpiresAt: null,
+            refreshTokenExpiresAt: null,
           ),
         ),
       ),

@@ -29,6 +29,9 @@ class _GitHubSyncSettingsTabState
   String? _status;
   bool _statusOk = false;
 
+  /// 결과 메시지를 보여 줄 단계. 메시지는 그 단계의 버튼 바로 아래에 둔다.
+  int _statusStep = 0;
+
   @override
   void initState() {
     super.initState();
@@ -105,18 +108,23 @@ class _GitHubSyncSettingsTabState
         path: _pathController.text.trim(),
       );
 
-  GitHubTokenRefresher get _refresher => GitHubTokenRefresher(
-    service: ref.read(gitHubSyncServiceProvider),
-    save: ref.read(appSettingsProvider.notifier).setGitHubSyncAuthorization,
-  );
+  GitHubTokenRefresher get _refresher => ref.read(gitHubTokenRefresherProvider);
 
-  void _showStatus(String message, {required bool ok}) {
+  void _showStatus(String message, {required bool ok, required int step}) {
     if (!mounted) return;
     setState(() {
       _status = message;
       _statusOk = ok;
+      _statusStep = step;
     });
   }
+
+  List<Widget> _statusFor(int step) => [
+    if (_status != null && _statusStep == step) ...[
+      const SizedBox(height: 10),
+      _AsyncStatusText(message: _status!, success: _statusOk),
+    ],
+  ];
 
   Future<void> _checkConnection() async {
     FocusManager.instance.primaryFocus?.unfocus();
@@ -130,10 +138,10 @@ class _GitHubSyncSettingsTabState
       await ref.read(gitHubSyncServiceProvider).validateToken(settings);
       if (!mounted) return;
       setState(() => _connectionOk = true);
-      _showStatus('저장소에 연결했습니다. 읽기·쓰기 권한이 있습니다.', ok: true);
+      _showStatus('저장소에 연결했습니다. 읽기·쓰기 권한이 있습니다.', ok: true, step: 3);
     } catch (e) {
       if (mounted) setState(() => _connectionOk = false);
-      _showStatus(e.toString(), ok: false);
+      _showStatus(e.toString(), ok: false, step: 3);
     } finally {
       if (mounted) setState(() => _checkingConnection = false);
     }
@@ -146,6 +154,10 @@ class _GitHubSyncSettingsTabState
       _deviceCode = null;
       _status = null;
     });
+    // 인증은 최대 15분 걸린다. 그사이 설정 화면을 닫아도 로그인 결과를
+    // 저장할 수 있게 필요한 객체를 미리 잡아 둔다.
+    final settingsController = ref.read(appSettingsProvider.notifier);
+    final launcher = ref.read(externalUrlLauncherProvider);
     try {
       final service = ref.read(gitHubSyncServiceProvider);
       final settings = _effectiveGitHubSettings();
@@ -155,30 +167,26 @@ class _GitHubSyncSettingsTabState
           ClipboardData(text: code.userCode),
         ).catchError((_) {}),
       );
-      final launched = await ref
-          .read(externalUrlLauncherProvider)
-          .call(code.verificationUri);
-      if (!mounted) return;
-      setState(() => _deviceCode = code);
+      final launched = await launcher(code.verificationUri);
+      if (mounted) setState(() => _deviceCode = code);
       _showStatus(
         launched
             ? '브라우저에서 아래 인증 코드를 입력하세요. 코드는 클립보드에 복사했습니다.'
             : '브라우저를 열지 못했습니다. 아래 주소에서 인증 코드를 입력하세요.',
         ok: launched,
+        step: 1,
       );
 
       final authorization = await service.waitForDeviceAuthorization(
         settings: settings,
         deviceCode: code,
       );
-      ref
-          .read(appSettingsProvider.notifier)
-          .setGitHubSyncAuthorization(authorization);
+      settingsController.setGitHubSyncAuthorization(authorization);
       if (!mounted) return;
       setState(() => _deviceCode = null);
-      _showStatus('GitHub에 로그인했습니다. 다음 단계에서 앱을 저장소에 설치하세요.', ok: true);
+      _showStatus('GitHub에 로그인했습니다. 다음 단계에서 앱을 저장소에 설치하세요.', ok: true, step: 1);
     } catch (e) {
-      _showStatus(e.toString(), ok: false);
+      _showStatus(e.toString(), ok: false, step: 1);
     } finally {
       if (mounted) setState(() => _authorizing = false);
     }
@@ -192,6 +200,7 @@ class _GitHubSyncSettingsTabState
       _showStatus(
         '브라우저를 열지 못했습니다: ${GitHubSyncSettings.githubComAppInstallUrl}',
         ok: false,
+        step: 2,
       );
     }
   }
@@ -213,7 +222,9 @@ class _GitHubSyncSettingsTabState
         content: Text(
           '원격 저장소의 ${pending.remoteCount}개 항목과 이 기기의 '
           '${pending.localCount}개 항목을 합칩니다.\n\n'
-          '양쪽 항목은 지워지지 않습니다. 같은 항목은 더 최근에 고친 쪽이 남습니다.',
+          '한쪽에만 있는 항목은 양쪽에 모두 남고, 같은 항목은 더 최근에 고친 쪽이 '
+          '남습니다. 원격에서 지운 항목은 이 기기에서도 지웁니다. 터미널·알림·AI '
+          '설정은 더 최근에 바꾼 쪽을 따릅니다.',
         ),
         actions: [
           TextButton(
@@ -324,6 +335,7 @@ class _GitHubSyncSettingsTabState
                       : const Icon(Icons.login_outlined),
                   label: Text(signedIn ? 'GitHub 다시 로그인' : 'GitHub App으로 로그인'),
                 ),
+                ..._statusFor(1),
                 if (_deviceCode != null) ...[
                   const SizedBox(height: 12),
                   _GitHubDeviceCodeCard(code: _deviceCode!),
@@ -374,6 +386,7 @@ class _GitHubSyncSettingsTabState
                     icon: const Icon(Icons.open_in_new),
                     label: const Text('앱 설치 페이지 열기'),
                   ),
+                  ..._statusFor(2),
                 ] else
                   const _SyncHelpText(
                     'GitHub Enterprise에서는 직접 만든 GitHub App을 동기화할 저장소에 '
@@ -456,17 +469,21 @@ class _GitHubSyncSettingsTabState
                       : const Icon(Icons.link),
                   label: const Text('연결 확인'),
                 ),
+                ..._statusFor(3),
               ],
             ),
             _SyncStep(
               number: 4,
               title: '암호화 키',
-              done: keyReady,
+              // 원격 파일을 열지 못한 키는 완료로 보이지 않는다.
+              done: keyReady && !status.keyRejected,
               children: [
                 const _SyncHelpText(
                   '저장소에는 이 키로 암호화한 파일만 올라갑니다. 모든 기기에서 같은 키를 '
                   '입력하세요. 키는 이 기기의 보안 저장소에만 있고 GitHub로 보내지 '
-                  '않으므로, 잃어버리면 원격 데이터를 복구할 수 없습니다.',
+                  '않으므로, 잃어버리면 원격 데이터를 복구할 수 없습니다. 동기화한 뒤 '
+                  '키를 바꾸면 기존 파일을 열 수 없어 동기화가 멈춥니다. 키를 바꾸려면 '
+                  '저장소의 동기화 파일을 지우거나 파일 경로를 바꾸세요.',
                 ),
                 const SizedBox(height: 12),
                 TextFormField(
@@ -496,17 +513,14 @@ class _GitHubSyncSettingsTabState
                 _SwitchSetting(
                   title: '자동 동기화',
                   subtitle:
-                      '앱을 열 때, 데이터를 바꾸고 10초 뒤, 열려 있는 동안 5분마다, '
-                      '앱을 내릴 때 동기화합니다.',
+                      '켜면 바로 첫 동기화를 합니다. 그 뒤로는 앱을 열거나 돌아올 때, '
+                      '데이터를 바꾸고 10초 뒤, 열려 있는 동안 5분마다, 앱을 내릴 때 '
+                      '동기화합니다.',
                   value: sync.enabled,
                   onChanged: controller.setCloudSyncEnabled,
                 ),
               ],
             ),
-            if (_status != null) ...[
-              const SizedBox(height: 10),
-              _AsyncStatusText(message: _status!, success: _statusOk),
-            ],
           ],
         ),
       ],
@@ -533,7 +547,10 @@ class _SyncStatusCard extends StatelessWidget {
     SyncPhase.needsConfirmation => '처음 동기화: 확인이 필요합니다',
     SyncPhase.blocked => '동기화가 멈췄습니다',
     SyncPhase.retrying => '동기화 실패: 잠시 뒤 다시 시도합니다',
-    SyncPhase.idle when !sync.canSync => '아직 설정되지 않았습니다',
+    SyncPhase.idle when !sync.github.isSignedIn => 'GitHub 로그인이 필요합니다',
+    SyncPhase.idle when !sync.canSync => '저장소와 암호화 키를 설정하세요',
+    SyncPhase.idle when sync.isFirstSync =>
+      '첫 동기화 전입니다. 지금 동기화를 누르거나 자동 동기화를 켜세요',
     SyncPhase.idle when sync.enabled => '자동 동기화 켜짐',
     SyncPhase.idle => '자동 동기화 꺼짐',
   };
@@ -557,7 +574,8 @@ class _SyncStatusCard extends StatelessWidget {
         status.phase == SyncPhase.retrying ||
         status.phase == SyncPhase.needsConfirmation;
     final details = <String>[
-      '마지막 동기화: ${_formatSyncTime(sync.lastSyncedAt)}',
+      // 대상을 바꿨으면 이전 대상의 시각은 이 저장소와 관계가 없다.
+      '마지막 동기화: ${_formatSyncTime(sync.isFirstSync ? null : sync.lastSyncedAt)}',
       if (status.lastPulled != null && status.lastPushed != null)
         '가져옴 ${status.lastPulled}개 · 보냄 ${status.lastPushed}개',
       if (status.nextRunAt != null)

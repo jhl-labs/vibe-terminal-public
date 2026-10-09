@@ -22,13 +22,32 @@ class SyncLocalState {
   final String fingerprint;
 }
 
+/// 로컬 반영 결과.
+class SyncApplied {
+  const SyncApplied({
+    required this.fingerprint,
+    this.changed = 0,
+    this.needsAnotherPass = false,
+  });
+
+  /// 반영 직후의 지문.
+  final String fingerprint;
+
+  /// 실제로 바뀐 로컬 항목 수(설정 묶음은 1개). 기기별 데이터라 건너뛴
+  /// 레코드는 세지 않는다.
+  final int changed;
+
+  /// 병합 결과와 다르게 남긴 행이 있다(다른 기기에서 지웠지만 이 기기가 아직
+  /// 쓰는 Identity·키). 원격에 다시 올리려면 한 번 더 병합해야 한다.
+  final bool needsAnotherPass;
+}
+
 abstract interface class SyncLocalStore {
   Future<SyncLocalState> read();
 
-  /// [result]를 로컬에 반영하고 반영 직후의 지문을 돌려준다. 로컬 지문이
-  /// [expectedFingerprint]와 다르면 아무것도 바꾸지 않고
-  /// [SyncLocalChangedException]을 던진다.
-  Future<String> apply(
+  /// [result]를 로컬에 반영한다. 로컬 지문이 [expectedFingerprint]와 다르면
+  /// 아무것도 바꾸지 않고 [SyncLocalChangedException]을 던진다.
+  Future<SyncApplied> apply(
     SyncMergeResult result, {
     required String expectedFingerprint,
   });
@@ -62,19 +81,34 @@ class AppSyncLocalStore implements SyncLocalStore {
   }
 
   @override
-  Future<String> apply(
+  Future<SyncApplied> apply(
     SyncMergeResult result, {
     required String expectedFingerprint,
   }) async {
     final secretRefsToDelete = <String>[];
+    var keptReferenced = false;
+    var changed = 0;
     final applied = await _db.transaction(() async {
       if (await _fingerprint() != expectedFingerprint) {
         throw const SyncLocalChangedException();
       }
+      // 참조되는 쪽(키 → Identity → 호스트) 순서로 넣고, 지울 때는 반대로
+      // 지워 참조 중인 행을 판단할 때 이번 변경이 모두 반영돼 있게 한다.
       for (final section in _sections) {
         final changes = result.localChanges[section.name];
-        if (changes == null || changes.isEmpty) continue;
-        await section.apply(changes, secretRefsToDelete: secretRefsToDelete);
+        if (changes != null) {
+          changed += await section.applyUpserts(changes.upserts);
+        }
+      }
+      for (final section in _sections.reversed) {
+        final changes = result.localChanges[section.name];
+        if (changes == null) continue;
+        final outcome = await section.applyDeletes(
+          changes,
+          secretRefsToDelete: secretRefsToDelete,
+        );
+        changed += outcome.deleted;
+        if (outcome.kept > 0) keptReferenced = true;
       }
       // 위 삭제가 트리거로 남긴 기록을 병합된 기록(원래 삭제 시각)으로 바꾼다.
       await _db.delete(_db.syncTombstones).go();
@@ -94,9 +128,15 @@ class AppSyncLocalStore implements SyncLocalStore {
       await _secureStore.deleteSecret(ref);
     }
     final settings = result.settingsFromRemote;
-    if (settings == null) return applied;
-    _applySettings(settings);
-    return _fingerprint();
+    if (settings != null) {
+      _applySettings(settings);
+      changed++;
+    }
+    return SyncApplied(
+      fingerprint: settings == null ? applied : await _fingerprint(),
+      changed: changed,
+      needsAnotherPass: keptReferenced,
+    );
   }
 
   /// 동기화를 쓰지 않아도 삭제 기록이 쌓이지 않게 보관 기간이 지난 것을 지운다.

@@ -87,10 +87,14 @@ class HostKeyStore {
       )..where((t) => t.hostname.equals(hostname) & t.port.equals(port))).go();
 
   /// 핀된 키와 일치하는 연결이 성공했을 때 호출한다.
+  ///
+  /// 마지막 접속 시각은 기기별 값이라 동기화하지 않는다. drift의 변경 알림을
+  /// 내지 않는 SQL로 써서, 접속할 때마다 동기화가 예약되지 않게 한다.
   Future<void> touch({required String hostname, required int port}) =>
-      (_db.update(_db.hostKeys)
-            ..where((t) => t.hostname.equals(hostname) & t.port.equals(port)))
-          .write(HostKeysCompanion(lastSeenAt: Value(DateTime.now())));
+      _db.customStatement(
+        'UPDATE host_keys SET last_seen_at = ? WHERE hostname = ? AND port = ?',
+        [DateTime.now().millisecondsSinceEpoch ~/ 1000, hostname, port],
+      );
 
   /// OpenSSH `known_hosts` 텍스트를 가져온다. 첫 호스트 이름만 쓰고(별칭 무시),
   /// 해시(`|1|`)·마커(`@…`)·형식이 깨진 줄은 건너뛴다.

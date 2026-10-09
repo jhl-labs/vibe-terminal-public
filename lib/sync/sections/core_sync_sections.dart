@@ -9,6 +9,28 @@ import '../../data/models/ssh_key.dart';
 import '../sync_section.dart';
 import '../sync_snapshot.dart';
 
+/// 이 기기의 로컬 셸 호스트 id. 기본 로컬 셸은 id(`local-default-*`)가 기기마다
+/// 같으므로, 거기에 딸린 메모·스니펫도 기기별 데이터로 본다.
+Future<Set<String>> _localShellHostIds(AppDatabase db) async {
+  final rows =
+      await (db.select(db.hosts)..where(
+            (t) => t.connectionType.equals(HostConnectionType.localShell.index),
+          ))
+          .get();
+  return {for (final row in rows) row.id};
+}
+
+/// 다른 기기의 삭제를 이기도록 Identity·키의 변경 시각을 바꾼다.
+Future<void> _touch(
+  AppDatabase db,
+  String table,
+  String id,
+  DateTime deletedAt,
+) => db.customStatement('UPDATE $table SET updated_at = ? WHERE id = ?', [
+  syncKeepSeconds(deletedAt),
+  id,
+]);
+
 class HostsSyncSection extends RowSyncSection<HostRow> {
   HostsSyncSection(super.db, super.secureStore);
 
@@ -136,8 +158,20 @@ class SnippetsSyncSection extends RowSyncSection<SnippetRow> {
   @override
   TableInfo<Table, SnippetRow> get table => db.snippets;
 
+  Set<String> _localShells = const {};
+
   @override
-  Future<List<SnippetRow>> loadRows() => db.select(db.snippets).get();
+  Future<List<SnippetRow>> loadRows() async {
+    _localShells = await _localShellHostIds(db);
+    return db.select(db.snippets).get();
+  }
+
+  @override
+  bool includes(SnippetRow row) => !_localShells.contains(row.hostId);
+
+  @override
+  bool accepts(SyncRecord record) =>
+      !_localShells.contains(record.optionalString('hostId'));
 
   @override
   String idOf(SnippetRow row) => row.id;
@@ -183,8 +217,19 @@ class MemosSyncSection extends RowSyncSection<MemoRow> {
   @override
   TableInfo<Table, MemoRow> get table => db.memos;
 
+  Set<String> _localShells = const {};
+
   @override
-  Future<List<MemoRow>> loadRows() => db.select(db.memos).get();
+  Future<List<MemoRow>> loadRows() async {
+    _localShells = await _localShellHostIds(db);
+    return db.select(db.memos).get();
+  }
+
+  @override
+  bool includes(MemoRow row) => !_localShells.contains(row.hostId);
+
+  @override
+  bool accepts(SyncRecord record) => !_localShells.contains(record.id);
 
   @override
   String idOf(MemoRow row) => row.hostId;
@@ -224,6 +269,15 @@ class SshKeysSyncSection extends RowSyncSection<SshKeyRow> {
 
   @override
   String? secretRefOf(SshKeyRow row) => row.secretRef;
+
+  @override
+  Future<bool> isReferenced(String id) async => (await (db.select(
+    db.identities,
+  )..where((t) => t.keyId.equals(id))).get()).isNotEmpty;
+
+  @override
+  Future<void> keepReferenced(String id, {required DateTime after}) =>
+      _touch(db, name, id, after);
 
   @override
   String? secretRefOfRecord(SyncRecord record) =>
@@ -281,6 +335,15 @@ class IdentitiesSyncSection extends RowSyncSection<IdentityRow> {
 
   @override
   String? secretRefOf(IdentityRow row) => row.secretRef;
+
+  @override
+  Future<bool> isReferenced(String id) async => (await (db.select(
+    db.hosts,
+  )..where((t) => t.identityId.equals(id))).get()).isNotEmpty;
+
+  @override
+  Future<void> keepReferenced(String id, {required DateTime after}) =>
+      _touch(db, name, id, after);
 
   @override
   String? secretRefOfRecord(SyncRecord record) =>

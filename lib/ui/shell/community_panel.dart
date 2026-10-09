@@ -79,13 +79,11 @@ class _CommunityPanelState extends ConsumerState<CommunityPanel> {
     if (!canRefresh) return stillValid ? token : null;
 
     try {
+      // 동기화와 같은 갱신기를 써서 갱신 토큰을 동시에 두 번 쓰지 않는다.
       final authorization = await ref
-          .read(gitHubSyncServiceProvider)
-          .refreshUserAccessToken(settings: settings);
+          .read(gitHubTokenRefresherProvider)
+          .refreshNow(settings);
       if (!mounted) return null;
-      ref
-          .read(appSettingsProvider.notifier)
-          .setGitHubSyncAuthorization(authorization);
       return authorization.accessToken;
     } on GitHubSyncException {
       // 갱신 실패는 아직 유효한 token이라면 그대로 쓰고, 만료됐으면 재로그인.

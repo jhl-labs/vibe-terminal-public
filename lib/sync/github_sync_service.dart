@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 import '../settings/app_settings.dart';
 
 class GitHubRateLimit {
@@ -62,10 +64,18 @@ class GitHubAppAuthorization {
 }
 
 class GitHubSyncException implements Exception {
-  const GitHubSyncException(this.message, {this.statusCode});
+  const GitHubSyncException(
+    this.message, {
+    this.statusCode,
+    this.transient = false,
+  });
 
   final String message;
   final int? statusCode;
+
+  /// 잠시 뒤 다시 하면 될 수 있는 오류(네트워크, 서버 오류, 사용량 제한).
+  /// 설정·권한 오류는 사용자가 고칠 때까지 같은 결과이므로 false다.
+  final bool transient;
 
   @override
   String toString() => message;
@@ -88,14 +98,24 @@ class GitHubSyncService {
 
   final HttpClient _client;
 
+  /// 로그인(토큰·갱신 토큰)이 만료되거나 취소됐을 때의 안내.
+  static const signInExpiredMessage =
+      'GitHub 로그인이 만료되었습니다. 설정의 GitHub 탭에서 다시 로그인하세요.';
+
   /// 네트워크 호출을 감싸 시간 초과를 사용자에게 보여줄 메시지로 바꾼다.
   Future<T> _withTimeout<T>(Future<T> Function() call) async {
     try {
       return await call().timeout(_responseTimeout);
     } on TimeoutException {
-      throw const GitHubSyncException('GitHub 응답 시간이 초과되었습니다.');
+      throw const GitHubSyncException(
+        'GitHub 응답 시간이 초과되었습니다.',
+        transient: true,
+      );
     } on SocketException catch (e) {
-      throw GitHubSyncException('GitHub에 연결할 수 없습니다: ${e.message}');
+      throw GitHubSyncException(
+        'GitHub에 연결할 수 없습니다: ${e.message}',
+        transient: true,
+      );
     }
   }
 
@@ -328,8 +348,9 @@ class GitHubSyncService {
       '저장소 이름을 확인하고, vibe-terminal 앱이 이 저장소에 설치되어 있는지 '
       '확인하세요.',
     );
+    final repoInfo = _decodeResponseObject(repoResponse);
     if (requireWrite) {
-      final decoded = _decodeResponseObject(repoResponse);
+      final decoded = repoInfo;
       final permissions = decoded['permissions'];
       final canPush = permissions is Map && permissions['push'] == true;
       final canAdmin = permissions is Map && permissions['admin'] == true;
@@ -344,6 +365,9 @@ class GitHubSyncService {
 
     final branch = settings.branch.trim();
     if (branch.isEmpty) return;
+    // 새로 만든 빈 저장소에는 기본 브랜치도 아직 없다. 첫 업로드가 기본
+    // 브랜치에 첫 커밋을 만들므로 그대로 진행한다.
+    if (repoInfo['size'] == 0 && repoInfo['default_branch'] == branch) return;
     await _sendWithContext(
       () => _send(
         'GET',
@@ -367,7 +391,10 @@ class GitHubSyncService {
       return await request();
     } on GitHubSyncException catch (e) {
       if (e.statusCode == HttpStatus.notFound) {
-        throw GitHubSyncException(notFoundMessage);
+        throw GitHubSyncException(
+          notFoundMessage,
+          statusCode: HttpStatus.notFound,
+        );
       }
       rethrow;
     }
@@ -400,6 +427,7 @@ class GitHubSyncService {
       throw GitHubSyncException(
         _errorMessage(response.statusCode, text),
         statusCode: response.statusCode,
+        transient: _isTransient(response.statusCode, text, response.headers),
       );
     }
     return _GitHubResponse(response.statusCode, text, response.headers);
@@ -428,6 +456,7 @@ class GitHubSyncService {
       throw GitHubSyncException(
         _errorMessage(response.statusCode, text),
         statusCode: response.statusCode,
+        transient: _isTransient(response.statusCode, text, response.headers),
       );
     }
     return _GitHubResponse(response.statusCode, text, response.headers);
@@ -470,6 +499,7 @@ class GitHubSyncService {
 
   String _oauthErrorMessage(Map<String, Object?> json) {
     final error = json['error'] as String? ?? 'unknown_error';
+    if (error == 'bad_refresh_token') return signInExpiredMessage;
     final description = json['error_description'] as String?;
     return description == null || description.isEmpty
         ? 'GitHub OAuth: $error'
@@ -492,13 +522,24 @@ class GitHubSyncService {
     return base.replace(path: '$basePath$path');
   }
 
-  Uri _apiBase(String serverUrl) {
+  Uri _apiBase(String serverUrl) => apiBaseFor(serverUrl);
+
+  /// 서버 주소에 맞는 REST API 주소.
+  /// - github.com → `api.github.com`
+  /// - GHE.com(데이터 레지던시, `<회사>.ghe.com`) → `api.<회사>.ghe.com`
+  /// - GitHub Enterprise Server → `<서버>/api/v3`
+  @visibleForTesting
+  static Uri apiBaseFor(String serverUrl) {
     final raw = serverUrl.trim().isEmpty
         ? 'https://github.com'
         : serverUrl.trim();
     final uri = Uri.parse(raw.contains('://') ? raw : 'https://$raw');
-    if (uri.host.toLowerCase() == 'github.com') {
+    final host = uri.host.toLowerCase();
+    if (host == 'github.com') {
       return Uri.https('api.github.com', '');
+    }
+    if (host.endsWith('.ghe.com') && !host.startsWith('api.')) {
+      return Uri.https('api.$host', '');
     }
     if (uri.path.endsWith('/api/v3')) return uri;
     final path = uri.path.endsWith('/')
@@ -518,6 +559,15 @@ class GitHubSyncService {
     return uri.replace(path: path);
   }
 
+  /// 서버 오류와 사용량 제한(429, 또는 한도를 넘긴 403)은 기다리면 풀린다.
+  bool _isTransient(int statusCode, String body, HttpHeaders headers) {
+    if (statusCode >= 500 || statusCode == 429) return true;
+    return statusCode == HttpStatus.forbidden &&
+        (headers.value('x-ratelimit-remaining') == '0' ||
+            headers.value('retry-after') != null ||
+            body.toLowerCase().contains('rate limit'));
+  }
+
   String _errorMessage(int statusCode, String body) {
     String? message;
     try {
@@ -528,9 +578,7 @@ class GitHubSyncService {
     } catch (_) {
       // Fall back to the raw body below.
     }
-    if (statusCode == HttpStatus.unauthorized) {
-      return 'GitHub 로그인이 만료되었거나 취소되었습니다. 다시 로그인하세요.';
-    }
+    if (statusCode == HttpStatus.unauthorized) return signInExpiredMessage;
     // 앱 사용자 token은 앱이 설치된 저장소에만 쓸 수 있다.
     if (statusCode == HttpStatus.forbidden &&
         (message?.contains('not accessible by integration') ?? false)) {
