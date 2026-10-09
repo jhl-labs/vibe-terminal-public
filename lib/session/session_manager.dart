@@ -51,8 +51,10 @@ import '../terminal/terminal_session_handle.dart';
 import 'local_session_state_tracker.dart';
 import 'remote_session_cleanup_store.dart';
 import 'session.dart';
+import '../settings/app_settings.dart';
 import '../settings/terminal_preferences.dart';
 import 'session_activity.dart';
+import 'connection_guards.dart';
 import 'session_attention.dart';
 import 'session_diagnostics.dart';
 import 'session_group.dart';
@@ -76,6 +78,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     _agentWorktreeInitialization = ref
         .read(agentWorktreeStoreProvider)
         .markPreviousRunStranded();
+    ref.listen(appSettingsProvider, (_, next) => _applyTerminalDefaults(next));
     ref.onDispose(() {
       _persistTimer?.cancel();
       for (final timer in _reconnectTimers.values) {
@@ -126,6 +129,18 @@ class SessionManager extends Notifier<List<SessionInfo>> {
 
   /// pingActiveSessions 재진입 방지 플래그.
   bool _pinging = false;
+
+  /// keepalive 응답 대기 시간. 부하가 높은 서버는 수 초씩 늦게 답하기도 하므로
+  /// 짧게 잡으면 살아 있는 연결을 끊고 재연결 폭주를 만든다.
+  static const _pingTimeout = Duration(seconds: 15);
+
+  /// 연속 무응답이 이 횟수에 이를 때만 끊김으로 본다.
+  final _pingMisses = KeepaliveMissTracker(threshold: 2);
+
+  /// 같은 호스트로 동시에 진행하는 자동 재연결 수 상한. 서버가 흔들릴 때 세션
+  /// 수십 개가 한꺼번에 접속하면 sshd의 MaxStartups를 넘겨 서로를 막는다.
+  static const _maxConcurrentReconnectsPerHost = 4;
+  final Map<String, ConnectGate> _reconnectGates = {};
 
   /// 자동 재연결 백오프(초). 인덱스 = 시도 횟수. 마지막 값을 상한으로 사용.
   static const _reconnectBackoff = [1, 2, 4, 8, 16, 30];
@@ -272,12 +287,14 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     TerminalPreferences? terminalPreferences,
     TerminalPreferences? terminalDefaults,
   }) {
-    final defaults =
-        terminalDefaults ??
-        host.terminalPreferences.resolved(ref.read(appSettingsProvider));
-    final preferences = (terminalPreferences ?? defaults).resolved(
-      defaults.applyTo(ref.read(appSettingsProvider)),
-    );
+    final global = ref.read(appSettingsProvider);
+    final defaults = host.terminalPreferences.resolved(global);
+    // 복원 세션은 저장 당시 기본값([terminalDefaults])을 함께 받는다. 그 뒤
+    // 바뀐 전역·호스트 기본값을, 세션에서 따로 바꾸지 않은 항목에 반영한다.
+    final saved = terminalDefaults?.resolved(global) ?? defaults;
+    final preferences = (terminalPreferences ?? saved)
+        .resolved(saved.applyTo(global))
+        .rebase(from: saved, to: defaults);
     return SessionInfo(
       id: id,
       host: host,
@@ -568,24 +585,9 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     if (source == null) return id;
 
     final tracker = _sessionStates[id];
-    final sshHandle = _sshHandles[id];
-    final persistentName = sshHandle?.persistentSessionName;
-    final workingDirectory = persistentName != null
-        ? await readRemoteWorkingDirectory(
-            persistentName,
-            (command) => runManagedSshCommand(
-              sshHandle!.client,
-              command,
-              timeout: const Duration(seconds: 3),
-            ),
-          )
-        : source.host.isLocalShell
+    final workingDirectory = source.host.isLocalShell
         ? await _currentLocalWorkingDirectory(id, source)
-        : _cleanWorkingDirectory(
-            tracker != null
-                ? tracker.workingDirectory
-                : source.restoredContext?.workingDirectory,
-          );
+        : await _currentRemoteWorkingDirectory(id, source);
     if (_sessionById(id) == null) return id;
     final storedHost =
         await ref.read(hostRepositoryProvider).getById(source.host.id) ??
@@ -2205,8 +2207,10 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     return cleaned == null || cleaned.isEmpty ? null : cleaned;
   }
 
-  /// 세션의 현재 작업 디렉터리. 로컬 셸은 OS에서, 원격은 셸 통합(OSC 7)이나
-  /// 키 입력 추적으로 파악한 값이며 모르면 호스트 설정 폴더로 돌아간다.
+  /// 세션의 현재 작업 디렉터리. 로컬 셸은 OS에서, 원격은 tmux pane 경로나
+  /// 셸 통합(OSC 7)·키 입력 추적으로 파악한 값이며 모르면 호스트 설정 폴더로
+  /// 돌아간다. 원격 추적값 `~`는 위치를 따라가지 못한 경우가 많으므로 호출자가
+  /// 실제 위치로 믿기 전에 확인해야 한다.
   Future<String?> currentWorkingDirectoryOf(String sessionId) async {
     final source = _sessionById(sessionId);
     if (source == null) return null;
@@ -2214,10 +2218,41 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       return await _currentLocalWorkingDirectory(sessionId, source) ??
           _cleanWorkingDirectory(source.host.workingDirectory);
     }
+    return await _currentRemoteWorkingDirectory(sessionId, source) ??
+        _cleanWorkingDirectory(source.host.workingDirectory);
+  }
+
+  /// 원격 셸의 현재 작업 디렉터리를 결정한다.
+  ///
+  /// 작업 이어가기(tmux) 세션은 별도 exec 채널로 활성 pane의 실제 경로를 읽고
+  /// 추적기도 그 값으로 맞춘다. 그 밖의 SSH 세션은 셸 프로세스를 직접 볼 수
+  /// 없어 셸 통합(OSC 7)이나 키 입력 추적값을 쓴다(자동완성·히스토리로 `cd`하면
+  /// 모름).
+  Future<String?> _currentRemoteWorkingDirectory(
+    String id,
+    SessionInfo source,
+  ) async {
+    final tracker = _sessionStates[id];
+    final sshHandle = _sshHandles[id];
+    final persistentName = sshHandle?.persistentSessionName;
+    if (sshHandle != null && persistentName != null) {
+      final actual = await readRemoteWorkingDirectory(
+        persistentName,
+        (command) => runManagedSshCommand(
+          sshHandle.client,
+          command,
+          timeout: const Duration(seconds: 3),
+        ),
+      );
+      if (actual != null) {
+        tracker?.syncWorkingDirectory(actual);
+        return actual;
+      }
+    }
     return _cleanWorkingDirectory(
-      _sessionStates[sessionId]?.workingDirectory ??
-          source.restoredContext?.workingDirectory ??
-          source.host.workingDirectory,
+      tracker != null
+          ? tracker.workingDirectory
+          : source.restoredContext?.workingDirectory,
     );
   }
 
@@ -2254,6 +2289,9 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     _restoreStarted = true;
     await _agentWorktreeInitialization;
 
+    // 저장된 세션 값은 저장 당시 기본값 기준이다. 설정을 읽기 전에 만들면
+    // 기본값 차이를 세션에서 바꾼 값으로 잘못 판단한다([_newSessionInfo]).
+    await ref.read(appSettingsProvider.notifier).loaded;
     final snapshot = await ref.read(sessionRestoreStoreProvider).load();
     if (snapshot == null || state.isNotEmpty) return;
     ref.read(sessionGroupProvider.notifier).restoreFromSnapshot(snapshot);
@@ -2469,6 +2507,14 @@ class SessionManager extends Notifier<List<SessionInfo>> {
             id: localId,
             create: _newLocalSessions.contains(localId),
           );
+    // 연결하는 사이 관리자가 해제될 수 있다(앱 종료, 복원 직후 정리). 그때는
+    // 붙일 세션 목록이 없으므로 상태를 건드리지 않는다.
+    if (!ref.mounted) {
+      if (result case Ok(:final value)) {
+        await _releaseOrphanedLocal(value, localId);
+      }
+      return;
+    }
     switch (result) {
       case Ok(:final value):
         if (localId != null) _newLocalSessions.remove(localId);
@@ -2479,6 +2525,10 @@ class SessionManager extends Notifier<List<SessionInfo>> {
           _localShellPids.remove(id);
         }
         final handle = await _withSessionLogging(id, host, value);
+        if (!ref.mounted) {
+          await _releaseOrphanedLocal(handle, localId);
+          return;
+        }
         engine.attach(
           handle,
           onClosed: () => _handleLocalSessionClosed(id, localId, value),
@@ -2487,9 +2537,12 @@ class SessionManager extends Notifier<List<SessionInfo>> {
           try {
             await value.ready.timeout(const Duration(seconds: 30));
           } catch (error) {
-            _markError(id, UnknownFailure('로컬 화면 복구 실패: $error'));
+            if (ref.mounted) {
+              _markError(id, UnknownFailure('로컬 화면 복구 실패: $error'));
+            }
             return;
           }
+          if (!ref.mounted) return;
         }
         _markStatus(id, SessionStatus.connected);
         _persistOpenSessions();
@@ -2500,6 +2553,19 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       case Err(:final failure):
         _markError(id, failure);
         _persistOpenSessions();
+    }
+  }
+
+  /// 붙이지 못한 로컬 핸들을 정리한다. 이 세션만 소유한 셸은 닫고, 앱과 별도
+  /// 수명인 데몬 세션은 다음 복원이 다시 붙도록 로그 기록만 끝낸다.
+  Future<void> _releaseOrphanedLocal(
+    TerminalSessionHandle handle,
+    String? localId,
+  ) async {
+    if (localId == null) {
+      await handle.close();
+    } else if (handle is LoggingTerminalSessionHandle) {
+      await handle.writer.finish('disconnected');
     }
   }
 
@@ -2561,7 +2627,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   /// 실제 소켓 종료(onDone)로만 도달하는 경로라 테스트에서 이 이벤트를
   /// 시뮬레이션할 수 있도록 노출한다.
   @visibleForTesting
-  void handleSessionDropped(String id) {
+  void handleSessionDropped(String id, {String? reason}) {
     if (_userClosed.contains(id)) return;
     SessionInfo? session;
     for (final s in state) {
@@ -2577,7 +2643,9 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     }
     ref
         .read(sessionDiagnosticsProvider.notifier)
-        .record(id, SessionEventType.dropped);
+        .record(id, SessionEventType.dropped, detail: reason);
+    debugPrint('[session] $id 연결 끊김${reason == null ? '' : ': $reason'}');
+    _pingMisses.forget(id);
     final staleHandle = _sshHandles.remove(id);
     if (staleHandle != null) unawaited(staleHandle.close());
     _markStatus(id, SessionStatus.disconnected);
@@ -2614,7 +2682,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       closeSession(id);
       return;
     }
-    handleSessionDropped(id);
+    handleSessionDropped(id, reason: '원격 채널 종료: ${handle.endDescription}');
   }
 
   void _recordRemoteSessionLaunch(String id, SshSessionHandle handle) {
@@ -2657,13 +2725,12 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   /// (15초)는 별도로 도는데, 백그라운드에서 Dart 타이머가 굶겨질 수 있어
   /// 이 박자가 보증 레이어 역할을 한다.
   Future<void> pingActiveSessions() async {
-    // 죽은 세션이 여럿이면 순차 5초 타임아웃 합이 20초 박자 간격을 넘어설 수
-    // 있다. 재진입을 막아 이전 호출이 끝나기 전에 다음 박자가 겹쳐 같은
-    // 세션을 두 번 drop 처리하는 것을 방지한다.
+    // 이전 박자의 ping이 아직 응답을 기다리는 중이면 겹쳐 보내지 않는다.
     if (_pinging) return;
     _pinging = true;
     try {
       final diag = ref.read(sessionDiagnosticsProvider.notifier);
+      final targets = <(String, SSHClient)>[];
       for (final session in state) {
         final id = session.id;
         if (_userClosed.contains(id)) continue;
@@ -2671,16 +2738,38 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         if (session.status != SessionStatus.connected) continue;
         final client = _sshHandles[id]?.client;
         if (client == null) continue;
-        try {
-          await client.ping().timeout(const Duration(seconds: 5));
-          diag.record(id, SessionEventType.pingSent);
-        } catch (e) {
-          diag.record(id, SessionEventType.pingFailed, detail: '$e');
-          handleSessionDropped(id);
-        }
+        targets.add((id, client));
       }
+      // 세션마다 순서대로 기다리면 한 연결의 지연이 나머지의 판정까지 미룬다.
+      await Future.wait([
+        for (final (id, client) in targets) _pingSession(id, client, diag),
+      ]);
     } finally {
       _pinging = false;
+    }
+  }
+
+  Future<void> _pingSession(
+    String id,
+    SSHClient client,
+    SessionDiagnostics diag,
+  ) async {
+    try {
+      await client.ping().timeout(_pingTimeout);
+      _pingMisses.recordSuccess(id);
+      diag.record(id, SessionEventType.pingSent);
+    } on TimeoutException catch (e) {
+      final dropped = _pingMisses.recordMiss(id);
+      final count = dropped ? _pingMisses.threshold : _pingMisses.missesFor(id);
+      final progress = '$count/${_pingMisses.threshold}';
+      diag.record(id, SessionEventType.pingFailed, detail: '$e ($progress)');
+      debugPrint('[keepalive] $id 응답 없음 ($progress)');
+      if (dropped) handleSessionDropped(id, reason: 'keepalive 응답 없음');
+    } catch (e) {
+      // 전송이 이미 닫혔다는 오류는 기다릴 필요 없이 끊긴 것이다.
+      _pingMisses.forget(id);
+      diag.record(id, SessionEventType.pingFailed, detail: '$e');
+      handleSessionDropped(id, reason: 'keepalive 실패: $e');
     }
   }
 
@@ -2736,23 +2825,60 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         .read(sessionDiagnosticsProvider.notifier)
         .record(id, SessionEventType.reconnectAttempt);
 
-    final routeResult = await _openSshRoute(session.host);
-    final _SshRoute route;
-    switch (routeResult) {
-      case Ok(:final value):
-        route = value;
-      case Err(:final failure):
-        debugPrint('[reconnect] $id SSH 경로 준비 실패: ${failure.message}');
-        _markStatus(id, SessionStatus.disconnected);
-        _scheduleReconnect(id);
+    final gate = _reconnectGates.putIfAbsent(
+      '${session.host.hostname}:${session.host.port}',
+      () => ConnectGate(_maxConcurrentReconnectsPerHost),
+    );
+    await gate.acquire();
+    final Result<SshSessionHandle> result;
+    try {
+      if (_userClosed.contains(id) || !state.any((item) => item.id == id)) {
         return;
-    }
-    if (_userClosed.contains(id) || !state.any((item) => item.id == id)) {
-      return;
+      }
+      final routeResult = await _openSshRoute(session.host);
+      final _SshRoute route;
+      switch (routeResult) {
+        case Ok(:final value):
+          route = value;
+        case Err(:final failure):
+          _recordReconnectFailure(id, 'SSH 경로 준비 실패: ${failure.message}');
+          _markStatus(id, SessionStatus.disconnected);
+          _scheduleReconnect(id);
+          return;
+      }
+      if (_userClosed.contains(id) || !state.any((item) => item.id == id)) {
+        return;
+      }
+
+        result = await _connectForReconnect(id, session, route);
+    } finally {
+      gate.release();
     }
 
+    // 재연결 도중 사용자가 닫았거나 세션이 사라졌으면 정리하고 중단.
+    if (_userClosed.contains(id) || !state.any((s) => s.id == id)) {
+      if (result case Ok(:final value)) {
+        await value.close();
+      }
+      return;
+    }
+    await _applyReconnectResult(id, session, result);
+  }
+
+  void _recordReconnectFailure(String id, String message) {
+    ref
+        .read(sessionDiagnosticsProvider.notifier)
+        .record(id, SessionEventType.reconnectFailed, detail: message);
+    debugPrint('[reconnect] $id $message');
+  }
+
+  Future<Result<SshSessionHandle>> _connectForReconnect(
+    String id,
+    SessionInfo session,
+    _SshRoute route,
+  ) {
     final ssh = ref.read(sshServiceProvider);
-    final result = await ssh.connect(
+    return ssh.connect(
       host: session.host,
       cols: session.engine.terminal.viewWidth,
       rows: session.engine.terminal.viewHeight,
@@ -2764,15 +2890,13 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       targetSocket: route.targetSocket,
       remoteSessionId: session.remoteSessionId,
     );
+  }
 
-    // 재연결 도중 사용자가 닫았거나 세션이 사라졌으면 정리하고 중단.
-    if (_userClosed.contains(id) || !state.any((s) => s.id == id)) {
-      if (result case Ok(:final value)) {
-        await value.close();
-      }
-      return;
-    }
-
+  Future<void> _applyReconnectResult(
+    String id,
+    SessionInfo session,
+    Result<SshSessionHandle> result,
+  ) async {
     switch (result) {
       case Ok(:final value):
         _sshHandles[id] = value;
@@ -2804,8 +2928,9 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         if (value.isPersistent && !value.resumedPersistentSession) {
           _runStartupScript(session.host, session.engine);
         }
-      case Err():
+      case Err(:final failure):
         // 다시 끊김 상태로 두고 백오프 재시도.
+        _recordReconnectFailure(id, failure.message);
         _markStatus(id, SessionStatus.disconnected);
         _scheduleReconnect(id);
     }
@@ -2851,6 +2976,50 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         else
           s,
     ];
+  }
+
+  /// 세션을 연 뒤 저장된 호스트 기본값. 세션의 [SessionInfo.host]는 열 때의
+  /// 사본이라 이후 바뀐 호스트 기본값을 담고 있지 않다.
+  final Map<String, TerminalPreferences> _hostTerminalPreferences = {};
+
+  /// 호스트 기본값이 바뀌었다. 이 호스트의 열린 세션에서 기본값을 따르던
+  /// 항목을 새 값으로 바꾼다.
+  void updateHostTerminalPreferences(
+    String hostId,
+    TerminalPreferences preferences,
+  ) {
+    _hostTerminalPreferences[hostId] = preferences;
+    _applyTerminalDefaults(ref.read(appSettingsProvider));
+  }
+
+  /// 전역·호스트 기본값을 열린 세션에 반영한다([TerminalPreferences.rebase]).
+  void _applyTerminalDefaults(AppSettings global) {
+    final next = [
+      for (final session in state) _withTerminalDefaults(session, global),
+    ];
+    var changed = false;
+    for (var i = 0; i < next.length; i++) {
+      if (!identical(next[i], state[i])) changed = true;
+    }
+    if (!changed) return;
+    state = next;
+    _schedulePersistOpenSessions();
+  }
+
+  /// 기본값이 그대로면 [session]을 그대로 돌려준다.
+  SessionInfo _withTerminalDefaults(SessionInfo session, AppSettings global) {
+    final defaults =
+        (_hostTerminalPreferences[session.host.id] ??
+                session.host.terminalPreferences)
+            .resolved(global);
+    if (defaults == session.terminalDefaults) return session;
+    return session.copyWith(
+      terminalPreferences: session.terminalPreferences.rebase(
+        from: session.terminalDefaults,
+        to: defaults,
+      ),
+      terminalDefaults: defaults,
+    );
   }
 
   void setTerminalPreferences(

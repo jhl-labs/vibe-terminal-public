@@ -150,6 +150,18 @@ class SessionLogs extends Table {
   Set<Column> get primaryKey => {id};
 }
 
+/// 동기화 대상 레코드의 삭제 기록. 삭제 트리거가 채우고, 동기화가 다른 기기의
+/// 기록과 합친 뒤 보관 기간이 지나면 정리한다.
+@DataClassName('SyncTombstoneRow')
+class SyncTombstones extends Table {
+  TextColumn get entity => text()();
+  TextColumn get recordId => text()();
+  DateTimeColumn get deletedAt => dateTime()();
+
+  @override
+  Set<Column> get primaryKey => {entity, recordId};
+}
+
 @DriftDatabase(
   tables: [
     Hosts,
@@ -160,17 +172,31 @@ class SessionLogs extends Table {
     SessionLogs,
     SshKeys,
     Identities,
+    SyncTombstones,
   ],
 )
 class AppDatabase extends _$AppDatabase {
   AppDatabase([QueryExecutor? executor]) : super(executor ?? _open());
 
   @override
-  int get schemaVersion => 16;
+  int get schemaVersion => 17;
+
+  /// 삭제를 다른 기기에 전하기 위해 삭제 기록을 남기는 테이블과 id 컬럼.
+  /// 키는 동기화 섹션 이름(`SyncSectionNames`)과 같다.
+  static const syncTrackedTables = {
+    'hosts': 'id',
+    'snippets': 'id',
+    'memos': 'host_id',
+    'ssh_keys': 'id',
+    'identities': 'id',
+    'host_keys': 'id',
+  };
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
     onCreate: (m) => m.createAll(),
+    // 트리거는 스키마 버전과 무관하게 항상 있어야 하므로 열 때마다 확인한다.
+    beforeOpen: (_) => _createSyncTombstoneTriggers(),
     onUpgrade: (m, from, to) async {
       if (from < 2) {
         await _createTableIfMissing(m, snippets);
@@ -223,8 +249,40 @@ class AppDatabase extends _$AppDatabase {
       if (from < 16) {
         await _addColumnIfMissing(m, hosts, hosts.terminalPreferences);
       }
+      if (from < 17) {
+        await _createTableIfMissing(m, syncTombstones);
+      }
     },
   );
+
+  /// 저장소마다 삭제 기록 코드를 넣으면 빠뜨리기 쉽다(호스트 삭제가 Identity를
+  /// 함께 지우는 경우 등). 삭제 트리거는 모든 삭제 경로를 잡는다.
+  ///
+  /// 같은 id로 다시 쓰면 삭제 기록을 지운다. 호스트 키·메모처럼 id가 내용에서
+  /// 정해지는 행은 지운 직후 같은 초 안에 다시 생길 수 있고, 시각이 같으면
+  /// 병합에서 삭제가 이기기 때문이다.
+  Future<void> _createSyncTombstoneTriggers() async {
+    for (final entry in syncTrackedTables.entries) {
+      for (final event in const ['INSERT', 'UPDATE']) {
+        await customStatement(
+          'CREATE TRIGGER IF NOT EXISTS '
+          'sync_tombstone_clear_${event.toLowerCase()}_${entry.key} '
+          'AFTER $event ON ${entry.key} BEGIN '
+          "DELETE FROM sync_tombstones WHERE entity = '${entry.key}' "
+          'AND record_id = NEW.${entry.value}; '
+          'END',
+        );
+      }
+      await customStatement(
+        'CREATE TRIGGER IF NOT EXISTS sync_tombstone_${entry.key} '
+        'AFTER DELETE ON ${entry.key} BEGIN '
+        'INSERT OR REPLACE INTO sync_tombstones (entity, record_id, deleted_at) '
+        "VALUES ('${entry.key}', OLD.${entry.value}, "
+        "CAST(strftime('%s', 'now') AS INTEGER)); "
+        'END',
+      );
+    }
+  }
 
   /// `hosts`에 이미 있는 컬럼을 다시 추가하지 않는다.
   ///

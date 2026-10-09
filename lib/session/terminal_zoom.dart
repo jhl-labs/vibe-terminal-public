@@ -27,7 +27,7 @@ class TerminalZoomController extends Notifier<Map<String, double>> {
   void zoomOut(String sessionId) =>
       setFontSize(sessionId, fontSizeFor(sessionId) - AppSettings.fontSizeStep);
 
-  /// 세션 생성 시 확정했던 기본 크기로 되돌린다.
+  /// 세션의 현재 기본 크기(전역·호스트 기본값)로 되돌린다.
   void reset(String sessionId) {
     final session = ref
         .read(sessionManagerProvider)

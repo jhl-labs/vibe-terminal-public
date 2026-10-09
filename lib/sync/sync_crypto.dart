@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:crypto/crypto.dart' show sha256;
 import 'package:cryptography/cryptography.dart';
 
 class EncryptedSyncBlob {
@@ -74,13 +75,24 @@ class SyncCryptoService {
   final AesGcm _cipher;
   final Random _random;
 
+  /// [reuse]를 주면 그 봉투의 salt와 반복 횟수를 다시 쓴다. 유도한 키를
+  /// 캐시에서 재사용해 동기화마다 PBKDF2를 다시 돌리지 않기 위해서다.
+  /// nonce는 항상 새로 만든다.
   Future<EncryptedSyncBlob> encryptJson(
     Map<String, Object?> json,
-    String encryptionKey,
-  ) async {
-    final salt = _randomBytes(16);
+    String encryptionKey, {
+    EncryptedSyncBlob? reuse,
+  }) async {
+    final reusable =
+        reuse != null &&
+        reuse.version == _version &&
+        reuse.kdf == _kdfName &&
+        reuse.iterations > 0 &&
+        reuse.iterations <= maxAcceptedIterations;
+    final salt = reusable ? base64Decode(reuse.salt) : _randomBytes(16);
+    final rounds = reusable ? reuse.iterations : iterations;
     final nonce = _randomBytes(12);
-    final secretKey = await _deriveKey(encryptionKey, salt, iterations);
+    final secretKey = await _deriveKey(encryptionKey, salt, rounds);
     final plainText = utf8.encode(const JsonEncoder().convert(json));
     final box = await _cipher.encrypt(
       plainText,
@@ -91,7 +103,7 @@ class SyncCryptoService {
       version: _version,
       algorithm: _algorithm,
       kdf: _kdfName,
-      iterations: iterations,
+      iterations: rounds,
       salt: base64Encode(salt),
       nonce: base64Encode(box.nonce),
       mac: base64Encode(box.mac.bytes),
@@ -132,21 +144,42 @@ class SyncCryptoService {
     return Map<String, Object?>.from(decoded);
   }
 
+  /// 최근에 유도한 키. 키 유도가 의도적으로 느리므로 같은 입력은 재사용한다.
+  final _derivedKeys = <String, Future<SecretKey>>{};
+  static const _maxDerivedKeys = 4;
+
   Future<SecretKey> _deriveKey(
     String encryptionKey,
     List<int> salt,
     int iterations,
   ) {
-    final kdf = Pbkdf2(
-      macAlgorithm: Hmac.sha256(),
-      iterations: iterations,
-      bits: 256,
-    );
-    return kdf.deriveKey(
-      secretKey: SecretKey(utf8.encode(encryptionKey)),
-      nonce: salt,
-    );
+    final cacheKey = [
+      _sha256Hex(encryptionKey),
+      base64Encode(salt),
+      iterations,
+    ].join(':');
+    final cached = _derivedKeys.remove(cacheKey);
+    final derived =
+        cached ??
+        Pbkdf2(
+          macAlgorithm: Hmac.sha256(),
+          iterations: iterations,
+          bits: 256,
+        ).deriveKey(
+          secretKey: SecretKey(utf8.encode(encryptionKey)),
+          nonce: salt,
+        );
+    _derivedKeys[cacheKey] = derived;
+    while (_derivedKeys.length > _maxDerivedKeys) {
+      _derivedKeys.remove(_derivedKeys.keys.first);
+    }
+    // 실패한 유도는 캐시에 남기지 않는다.
+    derived.then<void>((_) {}, onError: (_) => _derivedKeys.remove(cacheKey));
+    return derived;
   }
+
+  static String _sha256Hex(String value) =>
+      sha256.convert(utf8.encode(value)).toString();
 
   List<int> _randomBytes(int length) =>
       List<int>.generate(length, (_) => _random.nextInt(256));

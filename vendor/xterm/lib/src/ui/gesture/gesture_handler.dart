@@ -4,6 +4,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:xterm/src/core/buffer/cell_offset.dart';
 import 'package:xterm/src/core/buffer/line.dart';
+import 'package:xterm/src/core/buffer/range_line.dart';
 import 'package:xterm/src/core/input/keys.dart';
 import 'package:xterm/src/core/mouse/button.dart';
 import 'package:xterm/src/core/mouse/button_state.dart';
@@ -74,6 +75,21 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
 
   Offset? _lastDragLocalPosition;
 
+  /// Vibe Terminal patch: unit a mouse drag extends by. A drag that starts on
+  /// the second click selects whole words, on the third whole lines.
+  _DragUnit _dragUnit = _DragUnit.character;
+
+  // The word/line under the drag start; the selection always covers it.
+  BufferRangeLine? _dragUnitAnchor;
+
+  // Mouse clicks in the current quick sequence, counted from raw pointer
+  // events: the tap recognizer loses the arena (and never reports the
+  // double tap) when the second press starts dragging right away.
+  int _clickCount = 0;
+  Offset? _lastClickUpPosition;
+  // Running while the next press still continues the sequence.
+  Timer? _clickSequenceTimer;
+
   late final _autoScroller = SelectionAutoScroller(
     getScrollController: () => terminalView.scrollController,
     onScrolled: _applyDragSelection,
@@ -103,6 +119,8 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
 
   @override
   void dispose() {
+    _clickSequenceTimer?.cancel();
+    widget.terminalController.releaseViewport(this);
     _autoScroller.dispose();
     _stopStitching();
     super.dispose();
@@ -111,6 +129,8 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
   @override
   Widget build(BuildContext context) {
     return Listener(
+      onPointerDown: _countClick,
+      onPointerUp: _recordClickUp,
       onPointerCancel: (_) => _endTouchSelection(),
       onPointerSignal: _onPointerSignal,
       child: TerminalGestureDetector(
@@ -130,6 +150,7 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
         onDragEnd: (_) => _endDrag(),
         onDragCancel: _endDrag,
         onDoubleTapDown: onDoubleTapDown,
+        onTripleTapDown: onTripleTapDown,
         child: widget.child,
       ),
     );
@@ -216,6 +237,10 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
     renderTerminal.selectWord(details.localPosition);
   }
 
+  void onTripleTapDown(TapDownDetails details) {
+    renderTerminal.selectLine(details.localPosition);
+  }
+
   void onLongPressStart(LongPressStartDetails details) {
     _touchSelecting = true;
     widget.onTouchSelectionChanged?.call(true);
@@ -241,15 +266,51 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
     widget.onTouchSelectionChanged?.call(false);
   }
 
+  void _countClick(PointerDownEvent event) {
+    if (event.kind != PointerDeviceKind.mouse) return;
+    final lastPosition = _lastClickUpPosition;
+    final continues = (_clickSequenceTimer?.isActive ?? false) &&
+        lastPosition != null &&
+        (event.position - lastPosition).distance <= kDoubleTapSlop;
+    _clickSequenceTimer?.cancel();
+    _clickCount = continues ? (_clickCount % 3) + 1 : 1;
+  }
+
+  void _recordClickUp(PointerUpEvent event) {
+    if (event.kind != PointerDeviceKind.mouse) return;
+    _lastClickUpPosition = event.position;
+    _clickSequenceTimer?.cancel();
+    _clickSequenceTimer = Timer(kDoubleTapTimeout, () {});
+  }
+
   void onDragStart(DragStartDetails details) {
-    _dragAnchor = renderTerminal.getCellOffset(details.localPosition);
+    final cell = renderTerminal.getCellOffset(details.localPosition);
+    _dragAnchor = cell;
     _lastDragLocalPosition = details.localPosition;
     _autoScroller.begin();
+    // Output arriving mid-drag must not move the text under the pointer.
+    widget.terminalController.holdViewport(this);
 
     _dragIsMouse = details.kind == PointerDeviceKind.mouse;
-    _dragIsMouse
-        ? renderTerminal.selectCharacters(details.localPosition)
-        : renderTerminal.selectWord(details.localPosition);
+    _dragUnit = !_dragIsMouse
+        ? _DragUnit.character
+        : switch (_clickCount) {
+            2 => _DragUnit.word,
+            3 => _DragUnit.line,
+            _ => _DragUnit.character,
+          };
+    switch (_dragUnit) {
+      case _DragUnit.word:
+        _dragUnitAnchor = renderTerminal.wordRangeAt(cell);
+        renderTerminal.selectRange(_dragUnitAnchor!);
+      case _DragUnit.line:
+        _dragUnitAnchor = renderTerminal.lineRangeAt(cell);
+        renderTerminal.selectRange(_dragUnitAnchor!);
+      case _DragUnit.character:
+        _dragIsMouse
+            ? renderTerminal.selectCharacters(details.localPosition)
+            : renderTerminal.selectWord(details.localPosition);
+    }
   }
 
   void onDragUpdate(DragUpdateDetails details) {
@@ -271,6 +332,17 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
     final anchor = _dragAnchor;
     final position = _lastDragLocalPosition;
     if (anchor == null || position == null || !mounted) return;
+    final unitAnchor = _dragUnitAnchor;
+    if (unitAnchor != null) {
+      final cell = renderTerminal.getCellOffset(position);
+      renderTerminal.selectRange(
+        unitAnchor,
+        _dragUnit == _DragUnit.line
+            ? renderTerminal.lineRangeAt(cell)
+            : renderTerminal.wordRangeAt(cell),
+      );
+      return;
+    }
     final stitcher = _stitcher;
     if (stitcher != null && stitcher.hasScrolled) {
       _applyStitchedSelection(stitcher, position);
@@ -300,7 +372,10 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
     }
     _stopStitching();
     _autoScroller.end();
+    widget.terminalController.releaseViewport(this);
     _dragAnchor = null;
+    _dragUnitAnchor = null;
+    _dragUnit = _DragUnit.character;
     _lastDragLocalPosition = null;
     _dragIsMouse = false;
   }
@@ -320,6 +395,7 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
   bool get _canStitch =>
       (_dragIsMouse || _touchSelecting) &&
       _dragAnchor != null &&
+      _dragUnit == _DragUnit.character &&
       _isTuiScrolling &&
       _viewPinnedToBottom;
 
@@ -595,3 +671,6 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
     }
   }
 }
+
+/// Vibe Terminal patch: what a selection drag extends by.
+enum _DragUnit { character, word, line }

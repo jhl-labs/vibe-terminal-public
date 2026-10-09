@@ -5,7 +5,9 @@ import 'dart:ui';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:xterm/src/core/buffer/cell_offset.dart';
+import 'package:xterm/src/core/buffer/line.dart';
 import 'package:xterm/src/core/buffer/range.dart';
+import 'package:xterm/src/core/buffer/range_line.dart';
 import 'package:xterm/src/core/buffer/segment.dart';
 import 'package:xterm/src/core/mouse/button.dart';
 import 'package:xterm/src/core/mouse/button_state.dart';
@@ -183,8 +185,49 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
 
   var _stickToBottom = true;
 
+  // Vibe Terminal patch: the line at the top of the viewport and how far into
+  // it the viewport starts. When the viewport is not following the bottom,
+  // layout re-derives the offset from this line, so output that trims the
+  // scrollback (the buffer is full) does not slide the visible text.
+  BufferLine? _topLine;
+  double _topLineDelta = 0;
+  bool _wasHoldingViewport = false;
+
+  /// Whether the viewport is held still for the user (drag selection). Apps
+  /// that own scrolling (mouse wheel reports, alternate screen) redraw in
+  /// place, so holding their live screen would only show a stale picture.
+  bool get _holdsViewport =>
+      _controller.viewportHeld &&
+      !_terminal.isUsingAltBuffer &&
+      !_terminal.mouseMode.reportScroll;
+
+  void _captureTopLine() {
+    final lines = _terminal.buffer.lines;
+    final lineHeight = _painter.cellSize.height;
+    if (lines.length == 0 || lineHeight <= 0) {
+      _topLine = null;
+      return;
+    }
+    final row = (_scrollOffset / lineHeight).floor().clamp(0, lines.length - 1);
+    _topLine = lines[row];
+    _topLineDelta = _scrollOffset - row * lineHeight;
+  }
+
+  void _restoreTopLine() {
+    final line = _topLine;
+    if (line == null || !line.attached) return;
+    final lines = _terminal.buffer.lines;
+    final row = line.index;
+    // The line may belong to the other (main/alt) buffer.
+    if (row >= lines.length || !identical(lines[row], line)) return;
+    final target = (row * _painter.cellSize.height + _topLineDelta)
+        .clamp(0.0, _maxScrollExtent);
+    if (target != _scrollOffset) _offset.correctBy(target - _scrollOffset);
+  }
+
   void _onScroll() {
     _stickToBottom = _scrollOffset >= _maxScrollExtent;
+    _captureTopLine();
     markNeedsLayout();
     _notifyEditableRect();
   }
@@ -252,9 +295,20 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
 
     _updateScrollOffset();
 
-    if (_stickToBottom) {
-      _offset.correctBy(_maxScrollExtent - _scrollOffset);
+    final holding = _holdsViewport;
+    if (_wasHoldingViewport && !holding) {
+      // Output that arrived during the hold left the viewport above the
+      // bottom; keep it there instead of jumping away from the selection.
+      _stickToBottom = _scrollOffset >= _maxScrollExtent;
     }
+    _wasHoldingViewport = holding;
+
+    if (_stickToBottom && !holding) {
+      _offset.correctBy(_maxScrollExtent - _scrollOffset);
+    } else {
+      _restoreTopLine();
+    }
+    _captureTopLine();
   }
 
   /// Total height of the terminal in pixels. Includes scrollback buffer.
@@ -296,7 +350,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   /// Selects entire words in the terminal that contains [from] and [to].
   void selectWord(Offset from, [Offset? to]) {
     final fromOffset = getCellOffset(from);
-    final fromBoundary = _terminal.buffer.getWordBoundary(fromOffset);
+    final fromBoundary = _wordBoundaryAt(fromOffset);
     if (fromBoundary == null) return;
     if (to == null) {
       _controller.setSelection(
@@ -306,7 +360,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
       );
     } else {
       final toOffset = getCellOffset(to);
-      final toBoundary = _terminal.buffer.getWordBoundary(toOffset);
+      final toBoundary = _wordBoundaryAt(toOffset);
       if (toBoundary == null) return;
       final range = fromBoundary.merge(toBoundary);
       _controller.setSelection(
@@ -315,6 +369,55 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
         mode: SelectionMode.line,
       );
     }
+  }
+
+  // Vibe Terminal patch: lets the controller pick a smarter unit (URL, path).
+  BufferRangeLine? _wordBoundaryAt(CellOffset cell) {
+    final buffer = _terminal.buffer;
+    return _controller.wordSelector?.call(buffer, cell) ??
+        buffer.getWordBoundary(cell);
+  }
+
+  /// Vibe Terminal patch: the range a word-wise drag covers at [cell]: the
+  /// (smart) word there, or the cell itself between words.
+  BufferRangeLine wordRangeAt(CellOffset cell) {
+    return _wordBoundaryAt(cell) ??
+        BufferRangeLine(cell, CellOffset(cell.x + 1, cell.y));
+  }
+
+  /// Vibe Terminal patch: the logical line at [cell], including the rows it
+  /// soft-wraps onto.
+  BufferRangeLine lineRangeAt(CellOffset cell) {
+    final lines = _terminal.buffer.lines;
+    var first = cell.y;
+    while (first > 0 && lines[first].isWrapped) {
+      first--;
+    }
+    var last = cell.y;
+    while (last + 1 < lines.length && lines[last + 1].isWrapped) {
+      last++;
+    }
+    return BufferRangeLine(
+      CellOffset(0, first),
+      CellOffset(_terminal.viewWidth, last),
+    );
+  }
+
+  /// Vibe Terminal patch: selects the whole logical line under [offset]
+  /// (triple click).
+  void selectLine(Offset offset) {
+    selectRange(lineRangeAt(getCellOffset(offset)));
+  }
+
+  /// Vibe Terminal patch: selects [anchor] merged with [current]. A drag that
+  /// started with a double/triple click keeps whole words/lines on both ends.
+  void selectRange(BufferRangeLine anchor, [BufferRangeLine? current]) {
+    final range = current == null ? anchor : anchor.merge(current);
+    _controller.setSelection(
+      _terminal.buffer.createAnchorFromOffset(range.begin),
+      _terminal.buffer.createAnchorFromOffset(range.end),
+      mode: SelectionMode.line,
+    );
   }
 
   /// Selects characters in the terminal that starts from [from] to [to]. At

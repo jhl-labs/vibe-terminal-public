@@ -54,6 +54,43 @@ class TerminalPreferences {
   TerminalPreferences resolved(AppSettings defaults) =>
       TerminalPreferences.fromSettings(applyTo(defaults));
 
+  /// 기본값이 [from]에서 [to]로 바뀌었을 때 열린 세션의 값을 따라 바꾼다.
+  /// [from]과 같은 항목(기본값을 따르던 항목)만 [to]로 바꾸고, 세션에서 직접
+  /// 바꾼 항목은 유지한다. 스크롤백은 엔진 생성 때 정해지므로 유지한다.
+  TerminalPreferences rebase({
+    required TerminalPreferences from,
+    required TerminalPreferences to,
+  }) {
+    T follow<T>(T own, T before, T after) => own == before ? after : own;
+    return TerminalPreferences(
+      theme: follow(theme, from.theme, to.theme),
+      fontFamily: follow(fontFamily, from.fontFamily, to.fontFamily),
+      fontSize: follow(fontSize, from.fontSize, to.fontSize),
+      lineHeight: follow(lineHeight, from.lineHeight, to.lineHeight),
+      scrollbackLines: scrollbackLines,
+      copyOnSelection: follow(
+        copyOnSelection,
+        from.copyOnSelection,
+        to.copyOnSelection,
+      ),
+      rightClickPaste: follow(
+        rightClickPaste,
+        from.rightClickPaste,
+        to.rightClickPaste,
+      ),
+      confirmMultilinePaste: follow(
+        confirmMultilinePaste,
+        from.confirmMultilinePaste,
+        to.confirmMultilinePaste,
+      ),
+      ctrlCBehavior: follow(
+        ctrlCBehavior,
+        from.ctrlCBehavior,
+        to.ctrlCBehavior,
+      ),
+    );
+  }
+
   TerminalPreferences copyWith({
     Object? theme = _keepTerminalPreference,
     Object? fontFamily = _keepTerminalPreference,

@@ -450,6 +450,42 @@ class AgentSessionInspector {
   );
   static const _primaryAgents = {'claude', 'codex', 'gemini', 'sepilot'};
 
+  /// 배너가 스크롤로 사라진 뒤에도 화면 하단에 남는 제품 고유 UI.
+  ///
+  /// tmux 안에서는 제목(OSC 0/2)과 hook이 바깥으로 전달되지 않아 화면이 유일한
+  /// 근거가 된다. 문서·명령 출력 속 같은 문구를 오인하지 않도록 [_liveUiRows]
+  /// 안의 줄 시작에서만 찾는다.
+  static final List<(RegExp, String)> _liveUiPatterns = [
+    // Codex 입력창 placeholder. 입력 중에는 사라진다.
+    (RegExp(r'^›\s+ask codex to do anything\b'), 'codex'),
+    // Codex 상태 줄: `gpt-6.1-sol high · ~/repo · ...`. 입력 중에도 남는다.
+    (
+      RegExp(
+        r'^(?:gpt-|codex-|o\d)[\w.-]*(?:\s+(?:minimal|low|medium|high|xhigh))?'
+        r'\s+·\s+(?:[~/]|\d+% context left)',
+      ),
+      'codex',
+    ),
+    (
+      RegExp(
+        r'^•\s+working\s+\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\s+•\s+esc to interrupt',
+      ),
+      'codex',
+    ),
+    // Codex 승인 대화상자의 마지막 선택지.
+    (RegExp(r'^3\.\s+no, and tell codex what to do differently'), 'codex'),
+    // OpenCode 응답 꼬리표(`▣  Build · GLM-5.2`)와 권한 요청 선택지.
+    (RegExp(r'^▣\s+\S+\s+·\s+\S'), 'opencode'),
+    (RegExp(r'^(?:┃\s*)?allow once\s+allow always\s+reject\b'), 'opencode'),
+    // Claude Code 승인 대화상자 하단 안내.
+    (RegExp(r'^esc to cancel · tab to amend\b'), 'claude'),
+    // Claude 선택지 커서(`❯ 2. Yes, …`). Codex는 `›`를 쓴다.
+    (RegExp(r'^❯\s+\d\.\s+(?:yes|no)\b'), 'claude'),
+    // Claude Code 스피너·완료 줄: `✶ Photosynthesizing… (4m 48s`, `✻ Worked for 3m`.
+    (RegExp(r'^[✻✶✳✽✢]\s+(?:\S+…\s*\(|\S+ for \d+[hms])'), 'claude'),
+  ];
+  static const _liveUiRows = 8;
+
   static String? _liveHint(List<String> lines) {
     final boundary = lines.lastIndexWhere(
       (line) => _shellPrompt.hasMatch(line.trim()),
@@ -467,6 +503,12 @@ class AgentSessionInspector {
             !line.startsWith('>') &&
             !line.startsWith('›')) {
           return hint;
+        }
+      }
+      if (row >= active.length - _liveUiRows) {
+        final liveLine = raw.trim().toLowerCase();
+        for (final (pattern, hint) in _liveUiPatterns) {
+          if (pattern.hasMatch(liveLine)) return hint;
         }
       }
       final banner = _liveBrandedBanner.firstMatch(line);

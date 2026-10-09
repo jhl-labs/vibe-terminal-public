@@ -350,6 +350,8 @@ class LocalAgentControlServer {
           status(session.id) != wanted &&
           deadline.elapsedMilliseconds < timeout) {
         await Future<void>.delayed(const Duration(milliseconds: 100));
+        // 대기 중 중지되면 연결 정보도 지워진다. 연결 변경이 아니라 중지로 알린다.
+        if (!running) break;
         _resolve(parameters);
       }
       if (!running) throw StateError('외부 제어가 중지되었습니다.');

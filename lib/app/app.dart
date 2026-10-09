@@ -7,6 +7,7 @@ import 'theme.dart';
 import 'update_checker.dart';
 import 'update_notifier.dart';
 import '../state/providers.dart';
+import '../sync/sync_coordinator.dart';
 import '../ui/shell/app_shell.dart';
 
 class VibeTerminalApp extends StatelessWidget {
@@ -46,6 +47,7 @@ class _AppRootState extends ConsumerState<_AppRoot>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_restoreSessionsOnStartup());
       unawaited(_checkForUpdatesOnStartup());
+      unawaited(ref.read(syncCoordinatorProvider.notifier).start());
     });
   }
 
@@ -55,8 +57,18 @@ class _AppRootState extends ConsumerState<_AppRoot>
     super.dispose();
   }
 
+  /// 마지막 resumed 이후 hidden/paused를 거쳤는지. 데스크톱은 창 포커스만
+  /// 바뀌어도 inactive ↔ resumed가 반복되므로 실제 백그라운드 복귀와 구분한다.
+  /// 복귀 경로는 paused → hidden → inactive → resumed 순서라 직전 상태만으로는
+  /// 알 수 없다.
+  bool _wasBackgrounded = false;
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused) {
+      _wasBackgrounded = true;
+    }
     final resumed = state == AppLifecycleState.resumed;
     ref.read(appForegroundProvider.notifier).set(resumed);
     if (!resumed) {
@@ -65,10 +77,14 @@ class _AppRootState extends ConsumerState<_AppRoot>
             .read(sessionManagerProvider.notifier)
             .persistOpenSessionsForRestore(),
       );
+      ref.read(syncCoordinatorProvider.notifier).flushPending();
     }
     // 포그라운드 복귀 시, 백그라운드에서 끊긴 세션을 백오프(최대 30초, Doze로
-    // 지연될 수 있음)를 기다리지 않고 즉시 재연결한다.
-    if (resumed) {
+    // 지연될 수 있음)를 기다리지 않고 즉시 재연결한다. 창 포커스 전환
+    // (inactive → resumed)마다 하면 백오프가 계속 초기화돼, 서버가 흔들릴 때
+    // 모든 세션이 동시에 재접속하는 폭주가 된다.
+    if (resumed && _wasBackgrounded) {
+      _wasBackgrounded = false;
       ref.read(sessionManagerProvider.notifier).reconnectDisconnectedNow();
     }
   }

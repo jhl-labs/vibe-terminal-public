@@ -1665,7 +1665,7 @@ class _AppShellState extends ConsumerState<AppShell> {
       child: Column(
         children: [
           Expanded(child: centerBody),
-          if (compact &&
+          if ((compact || usesSoftKeyboard) &&
               active != null &&
               active.status == SessionStatus.connected)
             SafeArea(top: false, child: ExtraKeysBar(session: active)),
@@ -1975,7 +1975,7 @@ class _AppShellState extends ConsumerState<AppShell> {
                 ),
               ),
             ),
-            body: centerArea,
+            body: SafeArea(top: false, child: centerArea),
           ),
         ),
       );
@@ -1985,43 +1985,46 @@ class _AppShellState extends ConsumerState<AppShell> {
     return _withBackNavigation(
       withAppShortcuts(
         Scaffold(
-          body: ColoredBox(
-            color: VibeColors.bg,
-            child: Row(
-              children: [
-                _ResizableLeftPanel(
-                  onNewSession: () => _newSession(context, ref),
-                  onDuplicateSession: (session) =>
-                      _duplicateSession(context, ref, session),
-                  onLaunchAgent: (session, spec) =>
-                      _launchAgentSession(context, ref, session, spec),
-                  onReviewAgentChanges: (session) =>
-                      _reviewAgentChanges(context, ref, session),
-                  onOpenAgentWorktrees: () => _openAgentWorktrees(context, ref),
-                  onOpenSettings: () => showVibeTerminalSettings(context),
-                  onBulk: () => _showSessionBulk(context),
-                  onPreviousSession: _cycleSessionHandler(-1),
-                  onNextSession: _cycleSessionHandler(1),
-                ),
-                const _PaneDivider(),
-                Expanded(child: centerArea),
-                if (availableTools.isNotEmpty) ...[
-                  const _PaneDivider(),
-                  _ToolStrip(
-                    panelState: rightPanel,
-                    availableTools: availableTools,
-                      onToggleTool: (tool) =>
-                        ref.read(rightPanelProvider.notifier).toggle(tool),
+          body: SafeArea(
+            child: ColoredBox(
+              color: VibeColors.bg,
+              child: Row(
+                children: [
+                  _ResizableLeftPanel(
+                    onNewSession: () => _newSession(context, ref),
+                    onDuplicateSession: (session) =>
+                        _duplicateSession(context, ref, session),
+                    onLaunchAgent: (session, spec) =>
+                        _launchAgentSession(context, ref, session, spec),
+                    onReviewAgentChanges: (session) =>
+                        _reviewAgentChanges(context, ref, session),
+                    onOpenAgentWorktrees: () =>
+                        _openAgentWorktrees(context, ref),
+                    onOpenSettings: () => showVibeTerminalSettings(context),
+                    onBulk: () => _showSessionBulk(context),
+                    onPreviousSession: _cycleSessionHandler(-1),
+                    onNextSession: _cycleSessionHandler(1),
                   ),
-                  if (rightPanel.open) ...[
+                  const _PaneDivider(),
+                  Expanded(child: centerArea),
+                  if (availableTools.isNotEmpty) ...[
                     const _PaneDivider(),
-                    _ResizableRightPanel(
-                      onOpenSettings: () => showVibeTerminalSettings(context),
-                      paneLayoutPanel: _buildPaneLayoutPanel(context),
+                    _ToolStrip(
+                      panelState: rightPanel,
+                      availableTools: availableTools,
+                          onToggleTool: (tool) =>
+                          ref.read(rightPanelProvider.notifier).toggle(tool),
                     ),
+                    if (rightPanel.open) ...[
+                      const _PaneDivider(),
+                      _ResizableRightPanel(
+                        onOpenSettings: () => showVibeTerminalSettings(context),
+                        paneLayoutPanel: _buildPaneLayoutPanel(context),
+                      ),
+                    ],
                   ],
                 ],
-              ],
+              ),
             ),
           ),
         ),

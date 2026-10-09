@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../settings/app_settings.dart';
-import 'sync_crypto.dart';
 
 class GitHubRateLimit {
   const GitHubRateLimit({
@@ -22,16 +21,12 @@ class GitHubRateLimit {
       '$remaining / $limit remaining · reset ${resetAt.toLocal()}';
 }
 
-class GitHubSyncUploadResult {
-  const GitHubSyncUploadResult({
-    required this.path,
-    required this.commitSha,
-    this.rateLimit,
-  });
+/// 저장소의 동기화 파일. [sha]는 다음 업로드의 낙관적 잠금 값이다.
+class GitHubSyncFile {
+  const GitHubSyncFile({required this.sha, required this.content});
 
-  final String path;
-  final String commitSha;
-  final GitHubRateLimit? rateLimit;
+  final String sha;
+  final String content;
 }
 
 class GitHubDeviceCode {
@@ -74,6 +69,12 @@ class GitHubSyncException implements Exception {
 
   @override
   String toString() => message;
+}
+
+/// 내려받은 뒤 다른 기기가 먼저 올렸다. 다시 내려받아 합쳐야 한다.
+class GitHubSyncConflictException extends GitHubSyncException {
+  const GitHubSyncConflictException()
+    : super('다른 기기가 먼저 동기화했습니다.', statusCode: HttpStatus.conflict);
 }
 
 class GitHubSyncService {
@@ -220,45 +221,90 @@ class GitHubSyncService {
     return rateLimit;
   }
 
-  Future<GitHubSyncUploadResult> uploadEncryptedSnapshot({
-    required GitHubSyncSettings settings,
-    required EncryptedSyncBlob blob,
-  }) async {
+  /// 동기화 파일을 내려받는다. 파일이 아직 없으면 null.
+  Future<GitHubSyncFile?> fetchSyncFile(GitHubSyncSettings settings) async {
     _requireConfiguredTarget(settings);
-    await _validateRepositoryTarget(settings, requireWrite: true);
-    final path = settings.path.trim();
-    final existingSha = await _existingContentSha(settings, path);
-    final uri = _apiUri(
-      settings.effectiveServerUrl,
-      '/repos/${_encodePath(settings.owner)}/${_encodePath(settings.repo)}'
-      '/contents/${_encodeContentPath(path)}',
-    );
-    final body = <String, Object?>{
-      'message': 'Sync Vibe Terminal data',
-      'content': base64Encode(
-        utf8.encode(const JsonEncoder.withIndent('  ').convert(blob.toJson())),
-      ),
-      'branch': settings.branch.trim(),
-      'sha': ?existingSha,
-    };
+    final uri = _contentsUri(settings, query: {'ref': settings.branch.trim()});
     final response = await _send(
-      'PUT',
+      'GET',
       uri,
       settings.token,
-      body: jsonEncode(body),
+      allowNotFound: true,
     );
-    final decoded = _decodeResponseObject(response);
-    final commit = decoded['commit'];
-    final commitSha = commit is Map ? commit['sha'] as String? : null;
-    if (commitSha == null || commitSha.isEmpty) {
-      throw const GitHubSyncException('GitHub 업로드 결과에 commit SHA가 없습니다.');
+    if (response.statusCode == HttpStatus.notFound) {
+      // 파일이 없는 것인지, 저장소·브랜치에 닿지 못한 것인지 구분한다.
+      await _validateRepositoryTarget(settings, requireWrite: false);
+      return null;
     }
-    return GitHubSyncUploadResult(
-      path: path,
-      commitSha: commitSha,
-      rateLimit: _rateLimitFromHeaders(response.headers),
+    final decoded = _decodeResponseObject(response);
+    final sha = decoded['sha'] as String?;
+    if (sha == null || sha.isEmpty) {
+      throw const GitHubSyncException('GitHub 동기화 파일 응답에 sha가 없습니다.');
+    }
+    final encoded = decoded['content'] as String? ?? '';
+    // 1MB를 넘는 파일은 contents API가 본문을 비워 돌려주므로 원문으로 받는다.
+    if (decoded['encoding'] != 'base64' || encoded.isEmpty) {
+      final raw = await _send(
+        'GET',
+        uri,
+        settings.token,
+        accept: 'application/vnd.github.raw+json',
+      );
+      return GitHubSyncFile(sha: sha, content: raw.body);
+    }
+    final content = utf8.decode(
+      base64Decode(encoded.replaceAll(RegExp(r'\s'), '')),
     );
+    return GitHubSyncFile(sha: sha, content: content);
   }
+
+  /// 동기화 파일을 올리고 새 sha를 돌려준다. [sha]는 내려받을 때의 값이며,
+  /// 그새 다른 기기가 올렸으면 [GitHubSyncConflictException]을 던진다.
+  Future<String> putSyncFile({
+    required GitHubSyncSettings settings,
+    required String content,
+    String? sha,
+  }) async {
+    _requireConfiguredTarget(settings);
+    final body = <String, Object?>{
+      'message': 'Sync Vibe Terminal data',
+      'content': base64Encode(utf8.encode(content)),
+      'branch': settings.branch.trim(),
+      'sha': ?sha,
+    };
+    final _GitHubResponse response;
+    try {
+      response = await _send(
+        'PUT',
+        _contentsUri(settings),
+        settings.token,
+        body: jsonEncode(body),
+      );
+    } on GitHubSyncException catch (e) {
+      // sha가 맞지 않으면 409, 있는 파일에 sha를 빠뜨리면 422가 온다.
+      if (e.statusCode == HttpStatus.conflict ||
+          (e.statusCode == HttpStatus.unprocessableEntity &&
+              e.message.contains('sha'))) {
+        throw const GitHubSyncConflictException();
+      }
+      rethrow;
+    }
+    final decoded = _decodeResponseObject(response);
+    final file = decoded['content'];
+    final newSha = file is Map ? file['sha'] as String? : null;
+    if (newSha == null || newSha.isEmpty) {
+      throw const GitHubSyncException('GitHub 업로드 결과에 sha가 없습니다.');
+    }
+    return newSha;
+  }
+
+  Uri _contentsUri(GitHubSyncSettings settings, {Map<String, String>? query}) =>
+      _apiUri(
+        settings.effectiveServerUrl,
+        '/repos/${_encodePath(settings.owner)}/${_encodePath(settings.repo)}'
+        '/contents/${_encodeContentPath(settings.path.trim())}',
+        query: query,
+      );
 
   Future<void> _validateRepositoryTarget(
     GitHubSyncSettings settings, {
@@ -279,7 +325,8 @@ class GitHubSyncService {
         settings.token,
       ),
       'GitHub 저장소를 찾지 못했거나 접근 권한이 없습니다: $owner/$repo. '
-      'private repo는 token에 repo 또는 repository Contents 읽기 권한이 있어야 합니다.',
+      '저장소 이름을 확인하고, vibe-terminal 앱이 이 저장소에 설치되어 있는지 '
+      '확인하세요.',
     );
     if (requireWrite) {
       final decoded = _decodeResponseObject(repoResponse);
@@ -289,7 +336,8 @@ class GitHubSyncService {
       final canMaintain = permissions is Map && permissions['maintain'] == true;
       if (permissions is Map && !canPush && !canAdmin && !canMaintain) {
         throw const GitHubSyncException(
-          'GitHub 저장소 쓰기 권한이 없습니다. GitHub App 또는 token에 repository Contents write 권한을 부여하세요.',
+          'GitHub 저장소 쓰기 권한이 없습니다. 앱 설치 화면에서 이 저장소의 '
+          'Contents 쓰기 권한을 허용하세요.',
         );
       }
     }
@@ -325,37 +373,17 @@ class GitHubSyncService {
     }
   }
 
-  Future<String?> _existingContentSha(
-    GitHubSyncSettings settings,
-    String path,
-  ) async {
-    final uri = _apiUri(
-      settings.effectiveServerUrl,
-      '/repos/${_encodePath(settings.owner)}/${_encodePath(settings.repo)}'
-      '/contents/${_encodeContentPath(path)}',
-      query: {'ref': settings.branch.trim()},
-    );
-    final response = await _send(
-      'GET',
-      uri,
-      settings.token,
-      allowNotFound: true,
-    );
-    if (response.statusCode == HttpStatus.notFound) return null;
-    final decoded = _decodeResponseObject(response);
-    return decoded['sha'] as String?;
-  }
-
   Future<_GitHubResponse> _send(
     String method,
     Uri uri,
     String token, {
     String? body,
     bool allowNotFound = false,
+    String accept = 'application/vnd.github+json',
   }) async {
     final request = await _withTimeout(() => _client.openUrl(method, uri));
     request.headers
-      ..set(HttpHeaders.acceptHeader, 'application/vnd.github+json')
+      ..set(HttpHeaders.acceptHeader, accept)
       ..set(HttpHeaders.authorizationHeader, 'Bearer $token')
       ..set(HttpHeaders.userAgentHeader, 'VibeTerminalSync')
       ..set('X-GitHub-Api-Version', '2022-11-28');
@@ -448,21 +476,6 @@ class GitHubSyncService {
         : 'GitHub OAuth: $description';
   }
 
-  GitHubRateLimit? _rateLimitFromHeaders(HttpHeaders headers) {
-    final limit = int.tryParse(headers.value('x-ratelimit-limit') ?? '');
-    final remaining = int.tryParse(
-      headers.value('x-ratelimit-remaining') ?? '',
-    );
-    final reset = int.tryParse(headers.value('x-ratelimit-reset') ?? '');
-    if (limit == null || remaining == null || reset == null) return null;
-    return GitHubRateLimit(
-      resource: headers.value('x-ratelimit-resource') ?? 'core',
-      limit: limit,
-      remaining: remaining,
-      resetAt: DateTime.fromMillisecondsSinceEpoch(reset * 1000, isUtc: true),
-    );
-  }
-
   Uri _apiUri(String serverUrl, String path, {Map<String, String>? query}) {
     final base = _apiBase(serverUrl);
     final basePath = base.path.endsWith('/')
@@ -506,15 +519,25 @@ class GitHubSyncService {
   }
 
   String _errorMessage(int statusCode, String body) {
+    String? message;
     try {
       final decoded = jsonDecode(body);
       if (decoded is Map && decoded['message'] is String) {
-        return 'GitHub API $statusCode: ${decoded['message']}';
+        message = decoded['message'] as String;
       }
     } catch (_) {
       // Fall back to the raw body below.
     }
-    return 'GitHub API $statusCode: $body';
+    if (statusCode == HttpStatus.unauthorized) {
+      return 'GitHub 로그인이 만료되었거나 취소되었습니다. 다시 로그인하세요.';
+    }
+    // 앱 사용자 token은 앱이 설치된 저장소에만 쓸 수 있다.
+    if (statusCode == HttpStatus.forbidden &&
+        (message?.contains('not accessible by integration') ?? false)) {
+      return 'vibe-terminal 앱이 이 저장소에 설치되지 않았거나 권한이 부족합니다. '
+          '앱 설치 단계에서 이 저장소를 추가하세요.';
+    }
+    return 'GitHub API $statusCode: ${message ?? body}';
   }
 
   void _requireToken(GitHubSyncSettings settings) {

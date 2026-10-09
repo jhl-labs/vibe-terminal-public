@@ -49,6 +49,8 @@ class AgentAttentionClassifier {
     ),
     RegExp(r'(?:\[[yn]/[yn]\]|\([yn]/[yn]\))\s*$', caseSensitive: false),
     RegExp(r'yes,? and don.t ask again', caseSensitive: false),
+    // Codex가 사용자에게 질문을 남기면 `? 2 questions` 아래에 답변 안내를 띄운다.
+    RegExp(r'shift\+←\s+to answer', caseSensitive: false),
     RegExp(
       r'(?:usage limit|rate limit).{0,80}(?:reached|exceeded|reset|try again)',
       caseSensitive: false,

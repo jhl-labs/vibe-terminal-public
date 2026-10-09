@@ -76,7 +76,11 @@ class SnippetRepository {
 
   Future<void> _setSortOrder(String id, int sortOrder) async {
     await (_db.update(_db.snippets)..where((t) => t.id.equals(id))).write(
-      SnippetsCompanion(sortOrder: Value(sortOrder)),
+      // 순서도 다른 기기와 맞추는 값이므로 변경 시각을 남긴다.
+      SnippetsCompanion(
+        sortOrder: Value(sortOrder),
+        updatedAt: Value(DateTime.now()),
+      ),
     );
   }
 

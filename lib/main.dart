@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'app/app.dart';
 import 'app/app_version.dart';
+import 'app/bundled_font_licenses.dart';
 import 'app/error_reporter.dart';
 import 'app/process_exit_recorder.dart';
 import 'app/telemetry_bootstrap.dart';
@@ -16,6 +17,7 @@ void main() {
   // 전역 리포터로 들어온다.
   installGlobalErrorHandling(() async {
     WidgetsFlutterBinding.ensureInitialized();
+    registerBundledFontLicenses();
     // 빌드의 실제 버전을 읽어 UI 표시에 쓴다(좌측 상단/설정/About).
     await loadAppVersion();
     final container = ProviderContainer();

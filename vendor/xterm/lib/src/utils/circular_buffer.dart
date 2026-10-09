@@ -238,8 +238,17 @@ class IndexAwareCircularBuffer<T extends IndexedItem> {
   /// instead just adjusts the start index and length.
   void trimStart(int count) {
     if (count > _length) count = _length;
+    // Vibe Terminal patch: release the trimmed slots and advance the absolute
+    // start. The original left the trimmed items in the backing array, still
+    // attached, and kept [_absoluteStartIndex], so every remaining item
+    // reported an index [count] too high and a later [replaceWith] could
+    // bring the trimmed items back.
+    for (var i = 0; i < count; i++) {
+      _dropChild(i);
+    }
     _startIndex += count;
     _startIndex %= _array.length;
+    _absoluteStartIndex += count;
     _length -= count;
   }
 
@@ -249,13 +258,15 @@ class IndexAwareCircularBuffer<T extends IndexedItem> {
       _dropChild(i);
     }
 
+    // Vibe Terminal patch: reset the start before adopting. The original
+    // adopted at cyclic indexes based on the old start and reset it afterwards,
+    // so once the scrollback was full (or trimmed) every reflow rotated the
+    // buffer: the viewport showed older lines and stale slots resurfaced.
+    _startIndex = 0;
+
     var copyStart = 0;
     if (replacement.length > maxLength) {
       copyStart = replacement.length - maxLength;
-    }
-
-    for (var i = 0; i < copyStart; i++) {
-      _dropChild(i);
     }
 
     final copyLength = replacement.length - copyStart;
@@ -263,7 +274,6 @@ class IndexAwareCircularBuffer<T extends IndexedItem> {
       _adoptChild(i, replacement[copyStart + i]);
     }
 
-    _startIndex = 0;
     _length = copyLength;
   }
 

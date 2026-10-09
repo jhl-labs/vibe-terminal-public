@@ -85,6 +85,9 @@ class _AgentLaunchDialogState extends ConsumerState<_AgentLaunchDialog> {
   late List<AgentLaunchProfile> _profiles;
   String? _selectedProfileId;
 
+  /// 시작 버튼의 검증 중인지. 시작에만 필요한 입력(저장소 폴더)을 구분한다.
+  bool _validatingLaunch = false;
+
   @override
   void initState() {
     super.initState();
@@ -108,8 +111,15 @@ class _AgentLaunchDialogState extends ConsumerState<_AgentLaunchDialog> {
         '${twoDigits(now.hour)}${twoDigits(now.minute)}';
     _branchController = TextEditingController(text: 'vibe/agent-$stamp');
     _directoryController = TextEditingController(
-      text: widget.initialWorkingDirectory ?? '',
+      text: _locationUnknown ? '' : widget.initialWorkingDirectory!.trim(),
     );
+  }
+
+  /// 세션의 현재 위치를 모르는지. 원격 추적값 `~`는 접속 직후이거나 자동완성
+  /// 등으로 `cd`를 따라가지 못한 경우가 대부분이라 실제 위치로 믿지 않는다.
+  bool get _locationUnknown {
+    final directory = widget.initialWorkingDirectory?.trim() ?? '';
+    return directory.isEmpty || directory == '~';
   }
 
   @override
@@ -124,7 +134,10 @@ class _AgentLaunchDialogState extends ConsumerState<_AgentLaunchDialog> {
   }
 
   void _submit() {
-    if (!_formKey.currentState!.validate()) return;
+    _validatingLaunch = true;
+    final valid = _formKey.currentState!.validate();
+    _validatingLaunch = false;
+    if (!valid) return;
     final model = _modelController.text.trim();
     if (model.isNotEmpty) widget.onModelUsed(model);
     ref
@@ -397,11 +410,20 @@ class _AgentLaunchDialogState extends ConsumerState<_AgentLaunchDialog> {
                 TextFormField(
                   key: const ValueKey('agent-repository-directory'),
                   controller: _directoryController,
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     labelText: '저장소 폴더',
                     hintText: '/home/me/project',
-                    helperText: '세션이 파악한 현재 위치입니다. 다르면 Git 저장소 안의 경로로 고치세요.',
+                    helperText: _locationUnknown
+                        ? '세션의 현재 위치를 확인하지 못했습니다. '
+                              'Git 저장소의 절대 경로를 입력하세요.'
+                        : '세션이 파악한 현재 위치입니다. 다르면 Git 저장소 안의 경로로 고치세요.',
+                    helperMaxLines: 2,
                   ),
+                  // 프로필에는 저장소 폴더가 들어가지 않으므로 시작할 때만 검사한다.
+                  validator: (value) =>
+                      _validatingLaunch && (value ?? '').trim().isEmpty
+                      ? 'worktree를 만들 Git 저장소 폴더를 입력하세요.'
+                      : null,
                 ),
                 const SizedBox(height: 8),
                 TextFormField(

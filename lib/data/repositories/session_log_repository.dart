@@ -80,8 +80,36 @@ class SessionLogRepository {
   final SessionLogRetention retention;
   final DateTime Function() _now;
   Future<void>? _recoverPreviousRunFuture;
+  final _pendingStarts = <Future<void>>{};
+  final _openWriters = <SessionLogWriter>{};
 
   Future<SessionLogWriter> start({
+    required String sessionId,
+    required Host host,
+  }) {
+    final started = _start(sessionId: sessionId, host: host);
+    final tracked = started.then<void>((_) {}, onError: (_) {});
+    _pendingStarts.add(tracked);
+    unawaited(tracked.whenComplete(() => _pendingStarts.remove(tracked)));
+    return started;
+  }
+
+  /// 시작 중인 기록과 열린 writer에 이미 예약된 쓰기·종료 처리가 끝날 때까지
+  /// 기다린다. 새 쓰기를 막거나 writer를 닫지는 않는다.
+  ///
+  /// 세션을 닫은 직후 DB를 닫거나 로그 폴더를 지우면, 아직 진행 중인 파일
+  /// append나 종료 기록이 닫힌 자원을 건드린다. 정리하는 쪽이 이 메서드를
+  /// 먼저 기다리면 고정 시간 대기 없이 순서를 보장한다.
+  Future<void> waitForPendingWork() async {
+    while (_pendingStarts.isNotEmpty) {
+      await Future.wait(_pendingStarts.toList());
+    }
+    await Future.wait([
+      for (final writer in _openWriters.toList()) writer._settled(),
+    ]);
+  }
+
+  Future<SessionLogWriter> _start({
     required String sessionId,
     required Host host,
   }) async {
@@ -107,7 +135,9 @@ class SessionLogRepository {
           ),
         );
 
-    return SessionLogWriter._(repository: this, id: id, file: file);
+    final writer = SessionLogWriter._(repository: this, id: id, file: file);
+    _openWriters.add(writer);
+    return writer;
   }
 
   Future<List<SessionLog>> getAll() async {
@@ -416,6 +446,7 @@ class SessionLogWriter {
   Timer? _inputFlushTimer;
   Future<void>? _finishFuture;
   Future<void> _pendingWrite = Future.value();
+  Future<void>? _pendingCountUpdate;
   final _inputBuffer = StringBuffer();
   String _currentOutputLine = '';
   bool _redactingInput = false;
@@ -477,9 +508,17 @@ class SessionLogWriter {
   Future<void> finish(String reason) {
     final existing = _finishFuture;
     if (existing != null) return existing;
-    _finishFuture = _finish(reason);
+    _finishFuture = _finish(
+      reason,
+    ).whenComplete(() => _repository._openWriters.remove(this));
     return _finishFuture!;
   }
+
+  /// 오류는 쓰기를 예약한 쪽(finish 호출자)이 받는다. 여기서는 끝났는지만 본다.
+  Future<void> _settled() => Future.wait([
+    _finishFuture ?? _pendingWrite,
+    ?_pendingCountUpdate,
+  ]).then<void>((_) {}, onError: (_) {});
 
   Future<void> _finish(String reason) async {
     _flushTimer?.cancel();
@@ -489,6 +528,9 @@ class SessionLogWriter {
     _flushInputBuffer();
     _closed = true;
     await _pendingWrite;
+    // 예약 갱신이 종료 기록보다 늦게 끝나면 최종 개수를 이전 값으로 덮는다.
+    final countUpdate = _pendingCountUpdate;
+    if (countUpdate != null) await countUpdate;
     await _repository._complete(
       _id,
       reason: reason,
@@ -501,13 +543,13 @@ class SessionLogWriter {
     _flushTimer ??= Timer(const Duration(seconds: 2), () {
       _flushTimer = null;
       if (_closed) return;
-      unawaited(
-        _repository._updateCounts(
-          _id,
-          byteCount: _byteCount,
-          lineCount: _lineCount,
-        ),
+      final update = _repository._updateCounts(
+        _id,
+        byteCount: _byteCount,
+        lineCount: _lineCount,
       );
+      // 중간 개수 갱신은 best-effort다. 실패해도 종료 기록이 최종 값을 쓴다.
+      _pendingCountUpdate = update.then<void>((_) {}, onError: (_) {});
     });
   }
 

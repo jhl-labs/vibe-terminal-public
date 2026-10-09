@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart' show PointerDeviceKind;
+import 'package:flutter/gestures.dart' show DragStartDetails, PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart' show PointerSignalEvent;
 import 'package:flutter/rendering.dart' show BoxHitTestResult;
@@ -19,6 +19,7 @@ import '../../session/terminal_zoom.dart';
 import '../../settings/app_settings.dart';
 import '../../settings/shortcut_bindings.dart';
 import '../../state/providers.dart';
+import '../../terminal/smart_word_selection.dart';
 import '../adaptive/breakpoints.dart';
 import 'action_bar_catalog.dart';
 import 'terminal_native_ime.dart';
@@ -71,7 +72,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     _emptyImeEditingValue,
   );
   final _editableTextKey = GlobalKey<EditableTextState>();
-  final _terminalController = TerminalController();
+  // 더블클릭·롱프레스는 URL·파일 경로를 통째로 고른다.
+  final _terminalController = TerminalController()
+    ..wordSelector = selectSmartWord;
   final _terminalScrollController = ScrollController();
   final _terminalViewKey = GlobalKey<TerminalViewState>();
   late final _TerminalShortcutManager _terminalShortcutManager;
@@ -147,6 +150,35 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   // 셀로 들어야 드래그 중 스크롤(자동/휠)돼도 anchor가 따라 밀리지 않는다.
   CellOffset? _selectionDragAnchor;
   bool _draggingBeginHandle = false;
+  bool _handleDragging = false;
+
+  // 핸들을 잡은 지점에서 선택 끝 글자 중심까지의 거리(전역 px). 핸들은 글자
+  // 아래 모서리에 걸려 있어 손가락 위치를 그대로 쓰면 잡는 순간 선택 끝이
+  // 아래 행으로 튄다.
+  Offset _handleGrabOffset = Offset.zero;
+
+  // 드래그 선택 중 새 출력이 뷰포트를 바닥으로 끌어가거나 스크롤백 밀림으로
+  // 글자를 움직이지 않게 잡는 소유자 토큰(핸들·선택 모드 드래그).
+  final _selectionDragHold = Object();
+
+  // compact 화면에서 선택이 남아 있는 동안 뷰포트를 잡는 토큰. 손을 뗀 뒤
+  // 툴바로 복사할 때까지 고른 글자가 화면 밖으로 밀려나지 않게 한다.
+  final _selectionPresenceHold = Object();
+
+  // 터치로 선택하는 동안 손가락에 가려진 글자를 보여 줄 돋보기의 초점
+  // (터미널 로컬 px). null이면 숨긴다.
+  final _magnifierFocus = ValueNotifier<Offset?>(null);
+  bool _magnifyHandleDrag = false;
+
+  // xterm 롱프레스 드래그 선택 중인지.
+  bool _touchSelecting = false;
+
+  // 터미널을 마지막으로 누른 포인터 종류. 마우스면 선택 핸들을 숨긴다.
+  PointerDeviceKind? _lastPointerKind;
+
+  // 포인터를 누르고 있거나 선택을 드래그하는 동안 true. 툴바를 숨겨 끌고 있는
+  // 글자를 가리지 않게 한다.
+  final _selectionGestureActive = ValueNotifier<bool>(false);
 
   // 드래그 선택(핸들·선택 모드) 중 포인터가 뷰포트 밖으로 나가면 그쪽으로
   // 스크롤하고, 스크롤될 때마다 마지막 포인터 위치로 선택을 다시 계산한다.
@@ -157,15 +189,64 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   );
   Offset? _lastSelectionDragGlobal;
 
-  void _beginSelectionDrag() {
+  void _beginSelectionDrag(bool begin, DragStartDetails details) {
     _selectionDragAnchor = null;
+    _handleGrabOffset = _grabOffsetForHandle(begin, details.globalPosition);
+    _magnifyHandleDrag = details.kind == PointerDeviceKind.touch;
+    _handleDragging = true;
+    _terminalController.holdViewport(_selectionDragHold);
     _selectionAutoScroller.begin();
+    _syncSelectionGesture();
   }
 
   void _endSelectionDrag() {
     _selectionAutoScroller.end();
+    _terminalController.releaseViewport(_selectionDragHold);
     _selectionDragAnchor = null;
     _lastSelectionDragGlobal = null;
+    _handleGrabOffset = Offset.zero;
+    _handleDragging = false;
+    _magnifyHandleDrag = false;
+    _magnifierFocus.value = null;
+    _syncSelectionGesture();
+  }
+
+  /// 잡은 핸들이 움직이는 선택 끝 글자의 중심 - 잡은 지점.
+  Offset _grabOffsetForHandle(bool begin, Offset grabGlobal) {
+    final selection = _terminalController.selection;
+    final render = _terminalViewKey.currentState?.renderTerminal;
+    if (selection == null || render == null) return Offset.zero;
+    final cell = render.cellSize;
+    // 시작은 첫 글자, 끝은 끝(배타) 바로 앞 글자의 중심.
+    final textCenter = begin
+        ? render.getOffset(selection.begin) +
+              Offset(cell.width / 2, cell.height / 2)
+        : render.getOffset(selection.end) +
+              Offset(-cell.width / 2, cell.height / 2);
+    return render.localToGlobal(textCenter) - grabGlobal;
+  }
+
+  void _syncSelectionGesture() {
+    _selectionGestureActive.value =
+        _activePointers.isNotEmpty ||
+        _handleDragging ||
+        _selectionModeAnchor != null;
+  }
+
+  void _showMagnifierAt(Offset global) {
+    final render = _terminalViewKey.currentState?.renderTerminal;
+    if (render == null) return;
+    _magnifierFocus.value = render.globalToLocal(global);
+  }
+
+  void _handleTouchSelectionChanged(bool selecting) {
+    _touchSelecting = selecting;
+    final start = _pointerDownGlobal;
+    if (selecting && start != null) {
+      _showMagnifierAt(start);
+    } else if (!selecting) {
+      _magnifierFocus.value = null;
+    }
   }
 
   void _reapplyDragSelection() {
@@ -221,14 +302,19 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     });
   }
 
-  void _selectionModePanStart(Offset globalPos) {
+  void _selectionModePanStart(DragStartDetails details) {
     final render = _terminalViewKey.currentState?.renderTerminal;
     if (render == null) return;
+    final globalPos = details.globalPosition;
     final local = render.globalToLocal(globalPos);
     _selectionModeAnchor = render.getCellOffset(local);
     _lastSelectionDragGlobal = globalPos;
+    _magnifyHandleDrag = details.kind == PointerDeviceKind.touch;
+    _terminalController.holdViewport(_selectionDragHold);
     _selectionAutoScroller.begin();
     render.selectCharacters(local);
+    if (_magnifyHandleDrag) _magnifierFocus.value = local;
+    _syncSelectionGesture();
   }
 
   void _selectionModePanUpdate(Offset globalPos, {bool fromScroll = false}) {
@@ -239,6 +325,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     final current = render.globalToLocal(globalPos);
     render.selectCharactersFromCell(anchor, current);
     if (fromScroll) return;
+    if (_magnifyHandleDrag) _magnifierFocus.value = current;
     _updateSelectionAutoScroll(
       local: current,
       viewport: render.size,
@@ -248,7 +335,12 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
 
   void _selectionModePanEnd() {
     _selectionAutoScroller.end();
+    _terminalController.releaseViewport(_selectionDragHold);
     _lastSelectionDragGlobal = null;
+    _magnifyHandleDrag = false;
+    _magnifierFocus.value = null;
+    _selectionModeAnchor = null;
+    _syncSelectionGesture();
     if (!_selectionMode) return;
     _disableSelectionMode();
   }
@@ -295,11 +387,12 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     _draggingBeginHandle = draggingBegin;
     _lastSelectionDragGlobal = globalPos;
     final anchor = _selectionDragAnchor!;
-    final dragLocal = render.globalToLocal(globalPos);
+    final dragLocal = render.globalToLocal(globalPos + _handleGrabOffset);
     // selectCharactersFromCell은 anchor 셀과 드래그 지점을 읽기 순서로 정렬해
     // 고정한 anchor 쪽 끝은 그대로 두고 드래그하는 핸들만 움직인다.
     render.selectCharactersFromCell(anchor, dragLocal);
     if (fromScroll) return;
+    if (_magnifyHandleDrag) _magnifierFocus.value = dragLocal;
     _updateSelectionAutoScroll(
       local: dragLocal,
       viewport: render.size,
@@ -417,6 +510,8 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     _terminalScrollController.dispose();
     _terminalShortcutManager.dispose();
     _selectionAutoScroller.dispose();
+    _magnifierFocus.dispose();
+    _selectionGestureActive.dispose();
     _inputFocusNode.dispose();
     _inputController.dispose();
     super.dispose();
@@ -428,6 +523,11 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   }
 
   void _handleTerminalSelectionChanged() {
+    if (mounted && context.isCompact && _terminalController.selection != null) {
+      _terminalController.holdViewport(_selectionPresenceHold);
+    } else {
+      _terminalController.releaseViewport(_selectionPresenceHold);
+    }
     if (!widget.session.terminalPreferences
         .applyTo(ref.read(appSettingsProvider))
         .copyOnSelection) {
@@ -464,6 +564,15 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     if (text == null) return false;
     await Clipboard.setData(ClipboardData(text: text));
     return true;
+  }
+
+  /// 툴바 복사. 모바일에서는 복사를 끝으로 선택을 닫고 결과를 알린다.
+  /// 선택이 남아 있으면 뷰포트도 계속 잡혀 있어 새 출력을 따라가지 않는다.
+  Future<void> _copySelectionFromToolbar() async {
+    final copied = await _copySelectionToClipboard();
+    if (!mounted || !context.isCompact) return;
+    _terminalController.clearSelection();
+    if (copied) _showTerminalSnack('복사했습니다');
   }
 
   /// 이미지 업로드 경로를 터미널에 입력하고, 텍스트 붙여넣기와 동일하게 후처리한다.
@@ -782,8 +891,10 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
       _requestFocus(explicitKeyboard: true);
     }
     _longPressMenuPending = false;
+    _lastPointerKind = event.kind;
     _activePointers[event.pointer] = event.position;
     _syncPinchBase();
+    _syncSelectionGesture();
     if (_activePointers.length >= 2) {
       _longPressMenuPending = false;
       _terminalLongPressTimer?.cancel();
@@ -799,6 +910,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   void _handlePointerMove(PointerMoveEvent event) {
     if (!_activePointers.containsKey(event.pointer)) return;
     _activePointers[event.pointer] = event.position;
+    if (_touchSelecting) _showMagnifierAt(event.position);
     final start = _pointerDownGlobal;
     if (start != null &&
         (event.position - start).distance > _terminalLongPressSlop) {
@@ -823,6 +935,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     final wasPinching = _activePointers.length >= 2;
     _activePointers.remove(event.pointer);
     _syncPinchBase();
+    _syncSelectionGesture();
     final menuPosition = _pointerDownGlobal;
     final showMenu = _longPressMenuPending && event is PointerUpEvent;
     _longPressMenuPending = false;
@@ -853,10 +966,12 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     final text = widget.session.engine.terminal.buffer.getText(
       BufferRangeLine(cell, cell),
     );
-    final hasSelection = _terminalController.selection != null;
+    // 선택이 있으면 선택 툴바가 복사·전체 선택을 이미 보여 준다. 같은 항목의
+    // 메뉴를 한 번 더 띄우면 툴바를 가리고 탭을 한 번 더 요구한다.
+    if (_terminalController.selection != null) return;
     final compact = context.isCompact;
     final isBlankCell = text.trim().isEmpty;
-    if (!hasSelection && !_selectionMode && !isBlankCell && !compact) {
+    if (!_selectionMode && !isBlankCell && !compact) {
       return;
     }
 
@@ -873,23 +988,17 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
       context: context,
       position: position,
       items: [
-        if (hasSelection) ...const [
-          PopupMenuItem(value: 'copySelection', child: Text('복사')),
-          PopupMenuItem(value: 'selectAll', child: Text('전체 선택')),
-        ],
-        if (!hasSelection) ...[
-          const PopupMenuItem(value: 'paste', child: Text('붙여넣기')),
-          if (compact)
-            PopupMenuItem(
-              value: _selectionMode ? 'selectionModeOff' : 'selectionModeOn',
-              child: Text(_selectionMode ? '선택 종료' : '선택'),
-            ),
-          // 화면(스크롤백 포함) 전체 텍스트를 정적 스냅샷 시트로 보고 선택·복사한다.
-          // claude/codex처럼 라이브로 재그리는 세션은 인라인 드래그 선택이
-          // 불안정하고, 스크롤백으로 밀려난 긴 응답을 마우스 스크롤로 되짚기
-          // 어렵다. 데스크톱·모바일 모두에서 안정적인 읽기·복사 경로를 제공한다.
-          const PopupMenuItem(value: 'copyScreen', child: Text('화면 복사')),
-        ],
+        const PopupMenuItem(value: 'paste', child: Text('붙여넣기')),
+        if (compact)
+          PopupMenuItem(
+            value: _selectionMode ? 'selectionModeOff' : 'selectionModeOn',
+            child: Text(_selectionMode ? '선택 종료' : '선택'),
+          ),
+        // 화면(스크롤백 포함) 전체 텍스트를 정적 스냅샷 시트로 보고 선택·복사한다.
+        // claude/codex처럼 라이브로 재그리는 세션은 인라인 드래그 선택이
+        // 불안정하고, 스크롤백으로 밀려난 긴 응답을 마우스 스크롤로 되짚기
+        // 어렵다. 데스크톱·모바일 모두에서 안정적인 읽기·복사 경로를 제공한다.
+        const PopupMenuItem(value: 'copyScreen', child: Text('화면 복사')),
       ],
     );
     if (!mounted || !context.mounted) return;
@@ -905,12 +1014,6 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
         break;
       case 'copyScreen':
         _openCopySheet();
-        break;
-      case 'copySelection':
-        await _copySelectionToClipboard();
-        break;
-      case 'selectAll':
-        _selectAll();
         break;
     }
   }
@@ -2407,6 +2510,8 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
                             theme: settings.resolvedTerminalTheme,
                             padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
                             alwaysShowCursor: true,
+                            onTouchSelectionChanged:
+                                _handleTouchSelectionChanged,
                             onSecondaryTapDown: settings.rightClickPaste
                                 ? (_, _) =>
                                       unawaited(_pasteClipboardText(context))
@@ -2437,8 +2542,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
                         Positioned.fill(
                           child: GestureDetector(
                             behavior: HitTestBehavior.opaque,
-                            onPanStart: (d) =>
-                                _selectionModePanStart(d.globalPosition),
+                            onPanStart: _selectionModePanStart,
                             onPanUpdate: (d) =>
                                 _selectionModePanUpdate(d.globalPosition),
                             onPanEnd: (_) => _selectionModePanEnd(),
@@ -2459,11 +2563,14 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
                               _terminalController,
                               _terminalScrollController,
                               _terminalChangeBridge,
+                              _selectionGestureActive,
                             ]),
                             builder: (context, _) {
                               final geo = _selectionGeometry();
                               return TerminalSelectionOverlay(
                                 geometry: geo,
+                                showHandles:
+                                    _lastPointerKind != PointerDeviceKind.mouse,
                                 onPointerSignal:
                                     _forwardPointerSignalToTerminal,
                                 onHandleDragStart: _beginSelectionDrag,
@@ -2472,7 +2579,10 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
                                     _dragSelectionEnd(g, draggingBegin: true),
                                 onHandleDragEnd: (g) =>
                                     _dragSelectionEnd(g, draggingBegin: false),
-                                toolbar: geo == null
+                                // 끌고 있는 동안에는 툴바가 고르는 글자를
+                                // 가리지 않게 숨기고, 손을 떼면 다시 띄운다.
+                                toolbar:
+                                    geo == null || _selectionGestureActive.value
                                     ? const SizedBox.shrink()
                                     : SelectionToolbar(
                                         anchor: Offset(
@@ -2483,7 +2593,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
                                               : geo.end.dy,
                                         ),
                                         onCopy: () => unawaited(
-                                          _copySelectionToClipboard(),
+                                          _copySelectionFromToolbar(),
                                         ),
                                         onSelectAll: _selectAll,
                                       ),
@@ -2491,6 +2601,12 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
                             },
                           ),
                         ),
+                      ),
+                      ValueListenableBuilder<Offset?>(
+                        valueListenable: _magnifierFocus,
+                        builder: (context, focus, _) => focus == null
+                            ? const SizedBox.shrink()
+                            : _SelectionMagnifier(focus: focus),
                       ),
                     ],
                   ),
@@ -2500,6 +2616,52 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
           ],
         );
     }
+  }
+}
+
+/// 터치로 선택할 때 손가락에 가려진 글자를 손가락 위에 확대해 보여 준다.
+/// [focus]는 터미널 로컬 좌표로 확대할 지점이다.
+class _SelectionMagnifier extends StatelessWidget {
+  const _SelectionMagnifier({required this.focus});
+
+  final Offset focus;
+
+  static const _size = Size(140, 56);
+  static const _scale = 1.6;
+  // 손가락 끝에 가리지 않도록 초점에서 띄우는 거리.
+  static const _gap = 36.0;
+
+  @override
+  Widget build(BuildContext context) {
+    // 위쪽에 자리가 없으면(화면 첫 줄 근처) 손가락 아래에 띄운다.
+    final above = focus.dy - _gap - _size.height >= 0;
+    final top = above ? focus.dy - _gap - _size.height : focus.dy + _gap;
+    final center = Offset(focus.dx, top + _size.height / 2);
+    return Positioned(
+      key: const ValueKey('sel-magnifier'),
+      left: focus.dx - _size.width / 2,
+      top: top,
+      child: IgnorePointer(
+        child: RawMagnifier(
+          size: _size,
+          magnificationScale: _scale,
+          focalPointOffset: focus - center,
+          decoration: MagnifierDecoration(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+              side: const BorderSide(color: VibeColors.accent),
+            ),
+            shadows: const [
+              BoxShadow(
+                color: Color(0x66000000),
+                blurRadius: 8,
+                offset: Offset(0, 2),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 

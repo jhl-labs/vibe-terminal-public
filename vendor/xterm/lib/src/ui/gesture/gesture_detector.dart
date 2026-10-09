@@ -23,6 +23,7 @@ class TerminalGestureDetector extends StatefulWidget {
     this.onDragEnd,
     this.onDragCancel,
     this.onDoubleTapDown,
+    this.onTripleTapDown,
   });
 
   final Widget? child;
@@ -38,6 +39,9 @@ class TerminalGestureDetector extends StatefulWidget {
   final GestureTapUpCallback? onSecondaryTapUp;
 
   final GestureTapDownCallback? onDoubleTapDown;
+
+  /// Vibe Terminal patch: third tap of a quick tap sequence.
+  final GestureTapDownCallback? onTripleTapDown;
 
   final GestureTapDownCallback? onTertiaryTapDown;
 
@@ -73,6 +77,9 @@ class _TerminalGestureDetectorState extends State<TerminalGestureDetector> {
   // subsequent tap up / tap hold of the same tap.
   bool _isDoubleTap = false;
 
+  // Taps in the current quick sequence (Vibe Terminal patch: triple tap).
+  int _tapCount = 0;
+
   // The down handler is force-run on success of a single tap and optimistically
   // run before a long press success.
   void _handleTapDown(TapDownDetails details) {
@@ -81,11 +88,17 @@ class _TerminalGestureDetectorState extends State<TerminalGestureDetector> {
     if (_doubleTapTimer != null &&
         _isWithinDoubleTapTolerance(details.globalPosition)) {
       // If there was already a previous tap, the second down hold/tap is a
-      // double tap down.
-      widget.onDoubleTapDown?.call(details);
+      // double tap down; the third is a triple tap down.
+      _tapCount++;
+      if (_tapCount >= 3) {
+        widget.onTripleTapDown?.call(details);
+        _tapCount = 0;
+      } else {
+        widget.onDoubleTapDown?.call(details);
+      }
 
       _doubleTapTimer!.cancel();
-      _doubleTapTimeout();
+      _doubleTapTimer = null;
       _isDoubleTap = true;
     }
   }
@@ -93,15 +106,24 @@ class _TerminalGestureDetectorState extends State<TerminalGestureDetector> {
   void _handleTapUp(TapUpDetails details) {
     if (!_isDoubleTap) {
       widget.onSingleTapUp?.call(details);
-      _lastTapOffset = details.globalPosition;
-      _doubleTapTimer = Timer(kDoubleTapTimeout, _doubleTapTimeout);
+      _tapCount = 1;
     }
     _isDoubleTap = false;
+    if (_tapCount == 0) {
+      _doubleTapTimeout();
+      return;
+    }
+    // Keep the sequence open so the next tap can extend it.
+    _lastTapOffset = details.globalPosition;
+    _doubleTapTimer?.cancel();
+    _doubleTapTimer = Timer(kDoubleTapTimeout, _doubleTapTimeout);
   }
 
   void _doubleTapTimeout() {
+    _doubleTapTimer?.cancel();
     _doubleTapTimer = null;
     _lastTapOffset = null;
+    _tapCount = 0;
   }
 
   bool _isWithinDoubleTapTolerance(Offset secondTapOffset) {

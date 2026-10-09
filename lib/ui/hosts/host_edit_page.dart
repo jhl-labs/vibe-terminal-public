@@ -365,6 +365,9 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
               updatedAt: now,
             ),
           );
+      ref
+          .read(sessionManagerProvider.notifier)
+          .updateHostTerminalPreferences(id, _terminalPreferences);
       // 전용(host-<id>) Identity에서 공유 Identity로 바꿨으면 남은 전용 Identity를
       // 저장소를 통해 정리한다. 저장소는 비밀번호 비밀만 지우므로 키체인 키가
       // 소유한 비밀(레거시 cred-<id>)은 건드리지 않는다.
@@ -1169,7 +1172,7 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
                                   context,
                                   title: '호스트 기본 터미널 설정',
                                   description:
-                                      '이 호스트에서 새로 여는 세션에 적용됩니다. 지정하지 않은 항목은 전역 기본값을 따릅니다. 호스트 저장 시 함께 저장됩니다.',
+                                      '이 호스트의 세션에 적용됩니다(열린 세션에서 따로 바꾼 항목은 유지). 지정하지 않은 항목은 전역 기본값을 따릅니다. 호스트 저장 시 함께 저장됩니다.',
                                   initialValue: _terminalPreferences,
                                   defaults: ref.read(appSettingsProvider),
                                   hostDefaults: true,

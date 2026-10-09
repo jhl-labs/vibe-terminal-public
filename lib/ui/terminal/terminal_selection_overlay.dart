@@ -90,6 +90,7 @@ class TerminalSelectionOverlay extends StatelessWidget {
     this.onHandleDragStart,
     this.onHandleDragStop,
     this.onPointerSignal,
+    this.showHandles = true,
   });
 
   final SelectionGeometry? geometry;
@@ -99,13 +100,20 @@ class TerminalSelectionOverlay extends StatelessWidget {
 
   /// 핸들 드래그 제스처 시작/종료. 부모가 고정 anchor를 한 번만 잡고
   /// 드래그 종료 시 해제하도록 신호를 준다(양끝이 같이 끌려가는 버그 방지).
-  final VoidCallback? onHandleDragStart;
+  /// 시작 신호는 어느 핸들([begin])을 어디서 잡았는지 알려, 부모가 손가락과
+  /// 선택 끝 글자 사이의 거리를 보정할 수 있게 한다.
+  final void Function(bool begin, DragStartDetails details)? onHandleDragStart;
   final VoidCallback? onHandleDragStop;
 
   /// 핸들 위에서 발생한 휠/트랙패드 스크롤을 넘겨받는다. 마우스로 드래그
   /// 선택하면 끝 핸들이 포인터 바로 아래를 따라다니므로, 핸들이 휠을 삼키면
   /// 드래그하면서 스크롤할 수 없다. 부모가 아래 터미널로 전달해야 한다.
   final ValueChanged<PointerSignalEvent>? onPointerSignal;
+
+  /// 드래그 핸들을 그릴지. 마우스로 만든 선택은 다시 끌어 고치면 되므로
+  /// 핸들을 숨긴다. 핸들은 글자 위에 겹쳐 있어 세 번째 클릭이나 이어지는
+  /// 드래그를 가로챈다.
+  final bool showHandles;
 
   static const double _handleRadius = 8;
   static const double _touchPadding = 14;
@@ -127,18 +135,31 @@ class TerminalSelectionOverlay extends StatelessWidget {
 
     return Stack(
       children: [
-        _handle(
-          const ValueKey('sel-handle-begin'),
-          beginAnchor,
-          onHandleDragBegin,
-        ),
-        _handle(const ValueKey('sel-handle-end'), endAnchor, onHandleDragEnd),
+        if (showHandles) ...[
+          _handle(
+            const ValueKey('sel-handle-begin'),
+            beginAnchor,
+            begin: true,
+            onDrag: onHandleDragBegin,
+          ),
+          _handle(
+            const ValueKey('sel-handle-end'),
+            endAnchor,
+            begin: false,
+            onDrag: onHandleDragEnd,
+          ),
+        ],
         toolbar,
       ],
     );
   }
 
-  Widget _handle(Key key, Offset anchor, ValueChanged<Offset> onDrag) {
+  Widget _handle(
+    Key key,
+    Offset anchor, {
+    required bool begin,
+    required ValueChanged<Offset> onDrag,
+  }) {
     return Positioned(
       left: anchor.dx - _handleRadius - _touchPadding,
       top: anchor.dy - _handleRadius - _touchPadding,
@@ -147,7 +168,7 @@ class TerminalSelectionOverlay extends StatelessWidget {
         child: GestureDetector(
           key: key,
           behavior: HitTestBehavior.opaque,
-          onPanStart: (_) => onHandleDragStart?.call(),
+          onPanStart: (d) => onHandleDragStart?.call(begin, d),
           onPanUpdate: (d) => onDrag(d.globalPosition),
           onPanEnd: (_) => onHandleDragStop?.call(),
           onPanCancel: () => onHandleDragStop?.call(),

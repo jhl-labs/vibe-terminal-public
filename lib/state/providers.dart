@@ -46,8 +46,9 @@ import '../settings/app_settings_store.dart';
 import '../ssh/public_key_installer.dart';
 import '../ssh/ssh_service.dart';
 import '../ssh/remote_session_catalog.dart';
-import '../sync/cloud_sync_snapshot.dart';
 import '../sync/github_sync_service.dart';
+import '../sync/sync_snapshot.dart';
+import '../sync/synced_settings.dart';
 import '../telemetry/telemetry.dart';
 import '../telemetry/telemetry_factory.dart';
 
@@ -166,13 +167,6 @@ typedef ExternalUrlLauncher = Future<bool> Function(Uri uri);
 final externalUrlLauncherProvider = Provider<ExternalUrlLauncher>(
   (ref) =>
       (uri) => launchUrl(uri, mode: LaunchMode.externalApplication),
-);
-
-final cloudSyncSnapshotServiceProvider = Provider<CloudSyncSnapshotService>(
-  (ref) => CloudSyncSnapshotService(
-    database: ref.watch(appDatabaseProvider),
-    secureStore: ref.watch(secureStoreProvider),
-  ),
 );
 
 /// AI 채팅 대화 히스토리. 세션별로 분리하되 패널(우측 drawer/스트립) 위젯의
@@ -530,14 +524,15 @@ AppSettings applyTelemetryDefaults(AppSettings settings, Locale? locale) {
 }
 
 class AppSettingsController extends Notifier<AppSettings> {
-  bool _loadStarted = false;
+  Future<void>? _loading;
+
+  /// 저장된 설정을 다 읽으면 끝난다(실패해도 끝난다). 그 전의 상태는 기본값이다.
+  Future<void> get loaded =>
+      _loading?.then((_) {}, onError: (_) {}) ?? Future.value();
 
   @override
   AppSettings build() {
-    if (!_loadStarted) {
-      _loadStarted = true;
-      unawaited(_load());
-    }
+    _loading ??= _load();
     return AppSettings.defaultSettings;
   }
 
@@ -622,6 +617,46 @@ class AppSettingsController extends Notifier<AppSettings> {
   }
 
   void update(AppSettings settings) {
+    _commit(_stampSyncedChange(state, settings));
+  }
+
+  /// 동기화 대상 설정이 바뀌면 변경 시각을 남긴다. 기기 사이에서 어느 쪽
+  /// 설정이 최신인지 이 값으로 정한다.
+  AppSettings _stampSyncedChange(AppSettings previous, AppSettings next) {
+    final changed =
+        canonicalJson(SyncedSettings.extract(previous)) !=
+        canonicalJson(SyncedSettings.extract(next));
+    if (!changed) return next;
+    return next.copyWith(
+      cloudSync: next.cloudSync.copyWith(
+        settingsUpdatedAt: DateTime.now().toUtc(),
+      ),
+    );
+  }
+
+  /// 다른 기기에서 받은 설정을 적용한다. 받은 변경 시각을 그대로 둬야
+  /// 이 기기가 그 값을 새 변경으로 다시 올리지 않는다.
+  void applySyncedSettings(SyncSettingsBlock block) {
+    final next = SyncedSettings.applyTo(state, block.values);
+    _commit(
+      next.copyWith(
+        cloudSync: next.cloudSync.copyWith(settingsUpdatedAt: block.updatedAt),
+      ),
+    );
+  }
+
+  void recordSyncCompleted({required String target, required DateTime at}) {
+    _commit(
+      state.copyWith(
+        cloudSync: state.cloudSync.copyWith(
+          lastSyncedTarget: target,
+          lastSyncedAt: at.toUtc(),
+        ),
+      ),
+    );
+  }
+
+  void _commit(AppSettings settings) {
     final previousToken = state.ai.apiToken;
     final previousCustomHeaders = state.ai.customHeaders;
     final previousGithubToken = state.cloudSync.github.token;

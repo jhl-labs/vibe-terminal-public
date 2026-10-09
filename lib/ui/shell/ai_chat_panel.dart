@@ -16,6 +16,7 @@ import '../../settings/app_settings.dart';
 import '../../state/providers.dart';
 import '../../telemetry/telemetry.dart';
 import 'ai_message_renderer.dart';
+import 'ai_data_consent.dart';
 
 class AiChatPanel extends ConsumerStatefulWidget {
   const AiChatPanel({super.key, this.onOpenSettings});
@@ -54,6 +55,18 @@ class _AiChatPanelState extends ConsumerState<AiChatPanel> {
   /// 터미널 내용이 AI provider로 전송된다는 안내를 닫았는지. 패널 수명 동안만
   /// 기억한다.
   bool _secretNoticeDismissed = false;
+  late final _dataConsent = AiDataConsent(
+    store: ref.read(aiConsentStoreProvider),
+  );
+
+  Future<bool> _ensureDataConsent(AiSettings settings) async {
+    if (!settings.isConfigured) return false;
+    if (!await _dataConsent.request(context, settings) || !mounted) {
+      return false;
+    }
+    return AiDataConsent.destinationKey(ref.read(appSettingsProvider).ai) ==
+        AiDataConsent.destinationKey(settings);
+  }
 
   @override
   void dispose() {
@@ -238,6 +251,7 @@ class _AiChatPanelState extends ConsumerState<AiChatPanel> {
   }) async {
     if (_isSending(sessionId)) return;
     final settings = ref.read(appSettingsProvider).ai;
+    if (!await _ensureDataConsent(settings) || _isSending(sessionId)) return;
     if (!settings.isConfigured) return;
     final chat = ref.read(aiChatMessagesProvider(sessionId).notifier);
     final service = ref.read(aiChatServiceProvider);
@@ -423,6 +437,7 @@ Do not suggest destructive commands unless the log makes the user's intent expli
   }) async {
     if (_isSending(sessionId)) return;
     final settings = ref.read(appSettingsProvider).ai;
+    if (!await _ensureDataConsent(settings) || _isSending(sessionId)) return;
     if (!settings.isConfigured) return;
     final chat = ref.read(aiChatMessagesProvider(sessionId).notifier);
     final service = ref.read(aiChatServiceProvider);
@@ -575,6 +590,8 @@ Read the current terminal context again as the observation after that action. Te
     }
     final sessionId = session.id;
     if (_isSending(sessionId)) return;
+    final settings = ref.read(appSettingsProvider).ai;
+    if (!await _ensureDataConsent(settings) || _isSending(sessionId)) return;
     final userMessage = AiChatMessage(
       role: AiChatRole.user,
       content: text,
@@ -610,6 +627,7 @@ Read the current terminal context again as the observation after that action. Te
     final session = _findSession(ref.read(sessionManagerProvider), sessionId);
     if (session == null) return;
     final settings = ref.read(appSettingsProvider).ai;
+    if (!await _ensureDataConsent(settings) || _isSending(sessionId)) return;
     ref
         .read(telemetryProvider)
         .logEvent(
@@ -898,7 +916,7 @@ Read the current terminal context again as the observation after that action. Te
               icon: Icons.privacy_tip_outlined,
               text:
                   '터미널 화면 내용이 설정된 AI provider로 전송됩니다. '
-                  'API 키·토큰·비밀번호 같은 흔한 비밀값은 전송 전에 가려집니다.',
+                  '자동 마스킹으로 모든 비밀값이 제거되지는 않습니다.',
               actionLabel: '확인',
               onAction: () => setState(() => _secretNoticeDismissed = true),
             ),
@@ -1721,6 +1739,8 @@ class _AiInputBarState extends State<_AiInputBar> {
                         prefixIcon: Icon(Icons.chat_bubble_outline),
                       ),
                       onTap: _requestInputFocus,
+                      // Keep IME focus after sending.
+                      onEditingComplete: () {},
                       onSubmitted: (_) => _sendIfReady(),
                     ),
                   ),

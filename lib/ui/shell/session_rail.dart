@@ -334,7 +334,7 @@ class SessionRail extends ConsumerWidget {
             ? '${session.host.alias} · 호스트 기본값'
             : '${current!.displayName} · 세션 설정',
         description: forHost
-            ? '이 호스트에서 앞으로 여는 세션에 적용됩니다. 이미 열린 세션은 유지됩니다.'
+            ? '이 호스트의 세션에 적용됩니다. 열린 세션에서 따로 바꾼 항목은 유지됩니다.'
             : '이 세션의 폰트·테마와 입력 동작만 변경합니다. 기본값에는 영향을 주지 않습니다.',
         initialValue: forHost ? hostPreferences : current!.terminalPreferences,
         defaults: forHost ? global : hostPreferences.applyTo(global),
@@ -346,15 +346,16 @@ class SessionRail extends ConsumerWidget {
           session.host.id,
           result,
         );
+        if (saved) {
+          ref
+              .read(sessionManagerProvider.notifier)
+              .updateHostTerminalPreferences(session.host.id, result);
+        }
         if (!context.mounted) return;
         ref.invalidate(hostListProvider);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(
-              saved
-                  ? '호스트 기본값을 저장했습니다. 새 세션부터 적용됩니다.'
-                  : '호스트가 삭제되어 저장하지 못했습니다.',
-            ),
+            content: Text(saved ? '호스트 기본값을 저장했습니다.' : '호스트가 삭제되어 저장하지 못했습니다.'),
           ),
         );
       } else {

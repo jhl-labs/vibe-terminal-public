@@ -5,6 +5,7 @@ import 'package:xterm/xterm.dart';
 
 import '../../settings/app_settings.dart';
 import '../../settings/terminal_preferences.dart';
+import 'terminal_font_dropdown.dart';
 
 /// 실제 터미널 렌더러로 색상·글꼴·줄 간격을 보여준다.
 class TerminalPreferencesPreview extends StatefulWidget {
@@ -273,12 +274,10 @@ class TerminalPreferencesEditor extends StatelessWidget {
           '폰트',
           value.fontFamily == null,
           () => onChanged(value.copyWith(fontFamily: null)),
-          _dropdown(
-            '글꼴',
-            effective.terminalFontFamily,
-            AppSettings.fontFamilies,
-            (v) => v,
-            (v) => onChanged(value.copyWith(fontFamily: v)),
+          TerminalFontDropdown(
+            value: effective.terminalFontFamily,
+            label: '글꼴',
+            onChanged: (v) => onChanged(value.copyWith(fontFamily: v)),
           ),
         ),
         _field(

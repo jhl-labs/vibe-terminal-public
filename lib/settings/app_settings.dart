@@ -333,6 +333,10 @@ class GitHubSyncSettings {
   static const githubComServerUrl = 'https://github.com';
   static const githubComAppClientId = 'Iv23liLn58h7iXyuhKzi';
 
+  /// GitHub.com 공용 앱을 저장소에 설치하는 페이지.
+  static const githubComAppInstallUrl =
+      'https://github.com/apps/vibe-terminal/installations/new';
+
   static const defaultSettings = GitHubSyncSettings(
     hostType: GitHubSyncHostType.githubDotCom,
     serverUrl: githubComServerUrl,
@@ -375,6 +379,17 @@ class GitHubSyncSettings {
       path.trim().isNotEmpty;
 
   bool get isConfigured => targetConfigured && token.trim().isNotEmpty;
+
+  bool get isSignedIn => token.trim().isNotEmpty;
+
+  /// 동기화 대상을 구분하는 값. 바뀌면 처음 동기화로 다시 확인한다.
+  String get targetKey => [
+    effectiveServerUrl,
+    owner.trim(),
+    repo.trim(),
+    branch.trim(),
+    path.trim(),
+  ].join('|');
 
   bool get hasGitHubAppClient => effectiveAppClientId.isNotEmpty;
 
@@ -471,12 +486,16 @@ class CloudSyncSettings {
     required this.github,
     required this.googleDriveFolder,
     required this.iCloudFolder,
+    this.settingsUpdatedAt,
+    this.lastSyncedAt,
+    this.lastSyncedTarget = '',
   });
 
   static const githubTokenSecretRef = 'vibe_terminal.sync.github.token';
   static const githubRefreshTokenSecretRef =
       'vibe_terminal.sync.github.refresh_token';
   static const encryptionKeySecretRef = 'vibe_terminal.sync.encryption_key';
+  static const minEncryptionKeyLength = 12;
 
   static const defaultSettings = CloudSyncSettings(
     provider: CloudSyncProviderType.github,
@@ -488,14 +507,35 @@ class CloudSyncSettings {
   );
 
   final CloudSyncProviderType provider;
+
+  /// 자동 동기화. 꺼져 있어도 `지금 동기화`는 쓸 수 있다.
   final bool enabled;
   final String encryptionKey;
   final GitHubSyncSettings github;
   final String googleDriveFolder;
   final String iCloudFolder;
 
-  bool get encryptionConfigured => encryptionKey.trim().length >= 12;
+  /// 동기화 대상 설정을 이 기기에서 마지막으로 바꾼(또는 받아 온) 시각.
+  /// null이면 아직 바꾼 적이 없어 다른 기기의 설정을 따른다.
+  final DateTime? settingsUpdatedAt;
 
+  /// 마지막으로 동기화를 끝낸 시각.
+  final DateTime? lastSyncedAt;
+
+  /// 마지막으로 동기화한 대상([GitHubSyncSettings.targetKey]). 대상이 바뀌면
+  /// 다시 처음 동기화로 본다.
+  final String lastSyncedTarget;
+
+  bool get encryptionConfigured =>
+      encryptionKey.trim().length >= minEncryptionKeyLength;
+
+  /// 지금 동기화할 수 있다(자동 동기화 여부와 무관).
+  bool get canSync =>
+      encryptionConfigured &&
+      provider == CloudSyncProviderType.github &&
+      github.isConfigured;
+
+  /// 자동 동기화가 켜져 있고 동기화할 수 있다.
   bool get isConfigured {
     if (!enabled || !encryptionConfigured) return false;
     return switch (provider) {
@@ -505,6 +545,9 @@ class CloudSyncSettings {
     };
   }
 
+  /// 현재 대상과 아직 한 번도 동기화하지 않았다.
+  bool get isFirstSync => lastSyncedTarget != github.targetKey;
+
   CloudSyncSettings copyWith({
     CloudSyncProviderType? provider,
     bool? enabled,
@@ -512,6 +555,9 @@ class CloudSyncSettings {
     GitHubSyncSettings? github,
     String? googleDriveFolder,
     String? iCloudFolder,
+    Object? settingsUpdatedAt = _unset,
+    Object? lastSyncedAt = _unset,
+    String? lastSyncedTarget,
   }) => CloudSyncSettings(
     provider: provider ?? this.provider,
     enabled: enabled ?? this.enabled,
@@ -519,6 +565,13 @@ class CloudSyncSettings {
     github: github ?? this.github,
     googleDriveFolder: googleDriveFolder ?? this.googleDriveFolder,
     iCloudFolder: iCloudFolder ?? this.iCloudFolder,
+    settingsUpdatedAt: identical(settingsUpdatedAt, _unset)
+        ? this.settingsUpdatedAt
+        : settingsUpdatedAt as DateTime?,
+    lastSyncedAt: identical(lastSyncedAt, _unset)
+        ? this.lastSyncedAt
+        : lastSyncedAt as DateTime?,
+    lastSyncedTarget: lastSyncedTarget ?? this.lastSyncedTarget,
   );
 
   Map<String, Object?> toJson() => {
@@ -527,6 +580,9 @@ class CloudSyncSettings {
     'github': github.toJson(),
     'googleDriveFolder': googleDriveFolder,
     'iCloudFolder': iCloudFolder,
+    'settingsUpdatedAt': settingsUpdatedAt?.toUtc().toIso8601String(),
+    'lastSyncedAt': lastSyncedAt?.toUtc().toIso8601String(),
+    'lastSyncedTarget': lastSyncedTarget,
   };
 
   factory CloudSyncSettings.fromJson(Map<String, Object?>? json) {
@@ -537,6 +593,11 @@ class CloudSyncSettings {
         if (value.name == name) return value;
       }
       return fallback;
+    }
+
+    DateTime? dateTime(Object? value) {
+      if (value is! String || value.isEmpty) return null;
+      return DateTime.tryParse(value)?.toUtc();
     }
 
     final defaults = CloudSyncSettings.defaultSettings;
@@ -553,6 +614,9 @@ class CloudSyncSettings {
       github: GitHubSyncSettings.fromJson(githubJson),
       googleDriveFolder: json['googleDriveFolder'] as String?,
       iCloudFolder: json['iCloudFolder'] as String?,
+      settingsUpdatedAt: dateTime(json['settingsUpdatedAt']),
+      lastSyncedAt: dateTime(json['lastSyncedAt']),
+      lastSyncedTarget: json['lastSyncedTarget'] as String?,
     );
   }
 }

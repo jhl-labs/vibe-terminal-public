@@ -47,6 +47,7 @@ class TerminalView extends StatefulWidget {
     this.deleteDetection = false,
     this.shortcuts,
     this.onKeyEvent,
+    this.onTouchSelectionChanged,
     this.readOnly = false,
     this.hardwareKeyboardOnly = false,
     this.simulateScroll = true,
@@ -132,6 +133,10 @@ class TerminalView extends StatefulWidget {
   /// Keyboard event handler of the terminal. This has higher priority than
   /// [shortcuts] and input handler of the terminal.
   final FocusOnKeyEventCallback? onKeyEvent;
+
+  /// Vibe Terminal patch: called with true when a touch long-press starts a
+  /// selection drag and with false when it ends, e.g. to show a magnifier.
+  final ValueChanged<bool>? onTouchSelectionChanged;
 
   /// True if no input should send to the terminal.
   final bool readOnly;
@@ -350,7 +355,10 @@ class TerminalViewState extends State<TerminalView> {
     child = TerminalGestureHandler(
       terminalView: this,
       terminalController: _controller,
-      onTouchSelectionChanged: (selecting) => _touchSelecting = selecting,
+      onTouchSelectionChanged: (selecting) {
+        _touchSelecting = selecting;
+        widget.onTouchSelectionChanged?.call(selecting);
+      },
       onTapUp: _onTapUp,
       onTapDown: _onTapDown,
       onSecondaryTapDown:

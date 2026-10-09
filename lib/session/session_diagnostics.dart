@@ -8,6 +8,7 @@ enum SessionEventType {
   remoteChannelClosed('원격 채널 종료'),
   reconnectScheduled('재연결 예약'),
   reconnectAttempt('재연결 시도'),
+  reconnectFailed('재연결 실패'),
   reconnected('재연결 성공'),
   remoteSessionCreated('원격 작업 시작'),
   remoteSessionResumed('원격 작업 복원'),

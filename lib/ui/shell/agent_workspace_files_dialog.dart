@@ -1,7 +1,7 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../agent/agent_workspace_files.dart';
+import '../common/workspace_image_preview.dart';
 
 typedef WorkspaceFilesLoader =
     Future<List<AgentWorkspaceFileEntry>> Function(String directory);
@@ -470,15 +470,8 @@ class AgentWorkspaceFilesPanelState extends State<AgentWorkspaceFilesPanel> {
                                   const SizedBox(height: 8),
                                   Expanded(
                                     child: _file!.imageBase64 != null
-                                        ? InteractiveViewer(
-                                            child: Image.memory(
-                                              base64Decode(_file!.imageBase64!),
-                                              cacheWidth: 1600,
-                                              errorBuilder: (_, _, _) =>
-                                                  const Text(
-                                                    '이미지를 해석하지 못했습니다.',
-                                                  ),
-                                            ),
+                                        ? WorkspaceImagePreview(
+                                            imageBase64: _file!.imageBase64!,
                                           )
                                         : TextField(
                                             controller: _editor,

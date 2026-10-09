@@ -250,6 +250,12 @@ class BufferLine with IndexedItem {
         newBuffer.setRange(0, _data.length, _data);
         _data = newBuffer;
       }
+
+      // Vibe Terminal patch: shrinking keeps the old cells in the backing
+      // buffer, and writes after it only touch cells below the shorter length.
+      // Clear the cells this growth exposes so an earlier, longer line does not
+      // reappear after the new content.
+      _data.fillRange(_length * _cellSize, length * _cellSize, 0);
     }
 
     _length = length;

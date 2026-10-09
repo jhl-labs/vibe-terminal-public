@@ -1,7 +1,7 @@
 name: vibe_terminal
 description: A cross-platform SSH terminal app.
 publish_to: none
-version: 0.19.4+49
+version: 0.20.0+50
 environment:
   sdk: ^3.12.2
 dependencies:
@@ -33,6 +33,31 @@ dev_dependencies:
   flutter_lints: ^6.0.0
 flutter:
   uses-material-design: true
+  assets:
+    - assets/fonts/cascadia/OFL.txt
+    - assets/fonts/d2coding/OFL.txt
+    - assets/fonts/jetbrains_mono/OFL.txt
+  fonts:
+    - family: Cascadia Mono
+      fonts:
+        - asset: assets/fonts/cascadia/CascadiaMono-Regular.ttf
+        - asset: assets/fonts/cascadia/CascadiaMono-Bold.ttf
+          weight: 700
+    - family: Cascadia Code
+      fonts:
+        - asset: assets/fonts/cascadia/CascadiaCode-Regular.ttf
+        - asset: assets/fonts/cascadia/CascadiaCode-Bold.ttf
+          weight: 700
+    - family: JetBrains Mono
+      fonts:
+        - asset: assets/fonts/jetbrains_mono/JetBrainsMono-Regular.ttf
+        - asset: assets/fonts/jetbrains_mono/JetBrainsMono-Bold.ttf
+          weight: 700
+    - family: D2Coding
+      fonts:
+        - asset: assets/fonts/d2coding/D2Coding-Regular.ttf
+        - asset: assets/fonts/d2coding/D2Coding-Bold.ttf
+          weight: 700
 dependency_overrides:
   flutter_pty:
     path: ./vendor/flutter_pty

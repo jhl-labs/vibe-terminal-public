@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:meta/meta.dart';
 import 'package:xterm/src/base/disposable.dart';
+import 'package:xterm/src/core/buffer/buffer.dart';
 import 'package:xterm/src/core/buffer/cell_offset.dart';
 import 'package:xterm/src/core/buffer/line.dart';
 import 'package:xterm/src/core/buffer/range.dart';
@@ -102,6 +103,32 @@ class TerminalController with ChangeNotifier {
     _selectionTextOverride = text;
     notifyListeners();
   }
+
+  /// Vibe Terminal patch: owners that currently hold the viewport still.
+  final _viewportHolders = <Object>{};
+
+  /// Whether some owner asked to keep the viewport still, e.g. while the user
+  /// drags a selection. New output then neither pulls the viewport to the
+  /// bottom nor shifts the visible lines when scrollback overflows.
+  bool get viewportHeld => _viewportHolders.isNotEmpty;
+
+  /// Asks the viewport to stay still until [releaseViewport] with the same
+  /// [owner]. Holding twice with one owner is a no-op.
+  void holdViewport(Object owner) {
+    final wasHeld = viewportHeld;
+    _viewportHolders.add(owner);
+    if (!wasHeld) notifyListeners();
+  }
+
+  void releaseViewport(Object owner) {
+    if (!_viewportHolders.remove(owner) || viewportHeld) return;
+    notifyListeners();
+  }
+
+  /// Vibe Terminal patch: resolves the range a double-click or long-press
+  /// selects at a cell, such as a whole URL or file path. Returning null
+  /// falls back to the buffer's word boundary.
+  BufferRangeLine? Function(Buffer buffer, CellOffset cell)? wordSelector;
 
   /// Clears the current selection.
   void clearSelection() {
