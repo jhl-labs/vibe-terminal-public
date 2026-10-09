@@ -20,7 +20,7 @@ dependencies:
   file_picker: 11.0.3
   flutter_pty: 0.4.2
   share_plus: ^12.0.2
-  url_launcher: ^6.3.2
+  url_launcher: ^6.3.3
   flutter_markdown_plus: ^1.0.12
   super_clipboard: ^0.9.0
   flutter_local_notifications: ^22.3.1
