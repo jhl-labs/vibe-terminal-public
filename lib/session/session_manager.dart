@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:xterm/xterm.dart';
 
+import '../app/error_reporter.dart' show appErrorReporter;
 import '../agent/agent_launcher.dart';
 import '../agent/agent_semantic_event.dart';
 import '../agent/agent_native_session.dart';
@@ -59,8 +60,37 @@ import 'session_attention.dart';
 import 'session_diagnostics.dart';
 import 'session_group.dart';
 import 'session_restore_store.dart';
+import '../ssh/remote_server_info.dart';
 
 enum RemoteSessionActivationKind { switchedToExistingTab, openedNewTab }
+
+/// 탭을 닫을 때 서버의 작업 이어가기(tmux) 세션을 어떻게 볼지.
+enum SessionCloseIntent {
+  /// 사용자가 "탭만 닫기"로 작업을 서버에 남기고 내려놓았다.
+  detachRemoteWork,
+
+  /// 사용자가 "작업 종료"로 서버 작업까지 끝냈다(끊긴 상태면 종료를 예약).
+  terminateRemoteWork,
+
+  /// 사용자의 선택이 아니다: 재시도로 곧 다시 열거나, 원격 프로세스가 스스로
+  /// 끝났거나, 준비에 실패한 탭을 치운다. 아무것도 기록하지 않는다.
+  discardTab,
+}
+
+/// "작업 종료"의 결과.
+enum RemoteWorkTermination {
+  /// 서버의 작업을 끝냈다.
+  terminated,
+
+  /// 다른 기기가 아직 이 작업을 보고 있어 서버의 작업은 남기고 탭만 닫았다.
+  keptForOtherDevice,
+
+  /// 지금은 끝내지 못해(끊김, 명령 실패) 다음 연결 때 정리하도록 예약했다.
+  queued,
+
+  /// 예약 저장까지 실패했다. 서버에 작업이 남으며 보관함에서 직접 끝내야 한다.
+  failed,
+}
 
 class RemoteSessionActivation {
   const RemoteSessionActivation({required this.sessionId, required this.kind});
@@ -155,11 +185,30 @@ class SessionManager extends Notifier<List<SessionInfo>> {
 
   Timer? _persistTimer;
 
+  /// 출력만 바뀐 경우 복원 스냅샷 저장을 이만큼 모아서 한다. 저장은 세션 화면을
+  /// 읽어 직렬화하므로(세션 30개, CPU 1코어에서 약 50ms) 출력마다 곧바로
+  /// 예약하면 세션이 많을 때 타이핑을 막는다. 화면 텍스트는 데몬 없이 연 로컬
+  /// 셸의 복원에만 쓰이고, 앱이 내려갈 때는 즉시 저장하므로 늦어도 괜찮다.
+  static const _outputPersistDelay = Duration(seconds: 15);
+
+  /// 복원용 화면 텍스트 캐시. 마지막 저장 뒤 출력이 없던 세션은 화면을 다시
+  /// 읽지 않는다.
+  final Map<String, String?> _restoreTextCache = {};
+  final Set<String> _restoreTextDirty = {};
+
   /// 세션별 연속 재연결 시도 횟수(성공 시 0으로 리셋).
   final Map<String, int> _reconnectAttempts = {};
 
-  /// 사용자가 명시적으로 닫은 세션 id(자동 재연결 금지).
-  final Set<String> _userClosed = {};
+  /// 명시적으로 닫힌 세션 id와 그 의도. 여기 있는 세션은 자동 재연결하지
+  /// 않고, 연결 준비 중에 닫혔다면 의도에 따라 tmux 작업을 끝낼지 정한다.
+  /// 세션 id는 uuid라 다시 쓰이지 않으므로 앱 실행 동안 지우지 않는다.
+  final Map<String, SessionCloseIntent> _closedWith = {};
+
+  /// 이번 실행에서 새 원격 작업 id를 만들었지만 아직 서버에 붙지 못한 세션 id.
+  /// 재시도 때 "있어야 할 작업"인지 가른다. 첫 연결부터 실패한 새 탭은 서버에
+  /// 작업이 없으므로 재시도가 재생성으로 표시되면 안 된다. 복원·보관함처럼 id를 받아 연 탭은 여기 없으므로 기본대로 "있어야 할
+  /// 작업"이다(앱 재시작 뒤에도 그렇다).
+  final Set<String> _freshRemoteWork = {};
 
   /// 세션별 SSH 핸들. SFTP 등 같은 연결 위의 추가 채널에 클라이언트를 제공한다.
   final Map<String, SshSessionHandle> _sshHandles = {};
@@ -206,7 +255,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
             readScreen: () =>
                 engine.recentPlainText(maxLines: engine.terminal.viewHeight),
           );
-      _schedulePersistOpenSessions();
+      _restoreTextDirty.add(id);
+      _schedulePersistAfterOutput();
     };
     // Claude Code 등은 제목에 자기 이름·대화 요약을 쓴다. 화면 문구가 스크롤로
     // 사라져도 Agent 세션임을 알 수 있고, 셸이 제목을 되찾으면 종료로 본다.
@@ -313,6 +363,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
 
   /// 새 세션을 열고 연결을 시도한다. 생성한 sessionId를 반환한다.
   /// [insertionIndex]를 지정하면 연결 시작부터 해당 목록 위치에 표시한다.
+  /// [insertAfterId]를 지정하면 그 세션 바로 다음에 표시한다. 위치는 추가하는
+  /// 시점에 다시 찾으므로 그 사이 탭이 열리거나 닫혀도 어긋나지 않는다.
   Future<String> openSession(
     Host host, {
     required Future<bool> Function(String, String, String, HostKeyVerdict)
@@ -327,6 +379,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     AgentWorkspaceContext? agentWorkspace,
     String? appId,
     int? insertionIndex,
+    String? insertAfterId,
+    bool? expectRemoteSession,
   }) async {
     // 세션 복제처럼 이전 Host 객체를 재사용해도 최신 호스트 기본값을 적용한다.
     final storedHost = await ref.read(hostRepositoryProvider).getById(host.id);
@@ -351,12 +405,20 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       resolvedLocalId = 'local-${await _newRemoteSessionId()}';
       _newLocalSessions.add(resolvedLocalId);
     }
+    final givenRemoteSessionId = remoteSessionId?.trim().isNotEmpty == true
+        ? remoteSessionId!.trim()
+        : null;
     final resolvedRemoteSessionId = host.keepsRemoteSession
-        ? (remoteSessionId?.trim().isNotEmpty == true
-              ? remoteSessionId!.trim()
-              : await _newRemoteSessionId())
+        ? (givenRemoteSessionId ?? await _newRemoteSessionId())
         : null;
     final id = _genId();
+    // 새 id를 만든 탭은 아직 서버에 작업이 없다. 재시도가 그 탭을 새 탭으로
+    // 이어받을 때(expectRemoteSession: false)도 같은 상태를 승계해야 두 번째
+    // 재시도가 "있어야 할 작업"으로 오분류되어 재생성 표식을 붙이지 않는다.
+    if (resolvedRemoteSessionId != null &&
+        (givenRemoteSessionId == null || expectRemoteSession == false)) {
+      _freshRemoteWork.add(id);
+    }
     final session = _newSessionInfo(
       id,
       host,
@@ -370,7 +432,13 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     final engine = session.engine;
     _configureSessionTracking(id, host, engine);
     final next = [...state];
-    next.insert((insertionIndex ?? next.length).clamp(0, next.length), session);
+    final anchorIndex = insertAfterId == null
+        ? -1
+        : next.indexWhere((s) => s.id == insertAfterId);
+    final index = anchorIndex >= 0
+        ? anchorIndex + 1
+        : (insertionIndex ?? next.length);
+    next.insert(index.clamp(0, next.length), session);
     state = next;
     ref
         .read(telemetryProvider)
@@ -393,7 +461,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         _persistOpenSessions();
         return id;
     }
-    if (_userClosed.contains(id) || !state.any((session) => session.id == id)) {
+    if (_closedWith.containsKey(id) || !state.any((session) => session.id == id)) {
       return id;
     }
 
@@ -410,17 +478,19 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       jumpHosts: route.jumpHosts,
       targetSocket: route.targetSocket,
       remoteSessionId: session.remoteSessionId,
+      // 호출자가 id를 준 경우(복원·보관함)는 서버에 있어야 할
+      // 작업이다. 없으면 재생성으로 표시된다. 재시도는 그 탭이 작업에 붙은
+      // 적이 있는지로 직접 정한다.
+      expectRemoteSession: expectRemoteSession ?? givenRemoteSessionId != null,
     );
 
     // 연결을 준비하는 사이 사용자가 탭을 닫거나 manager가 해제될 수 있다.
-    // 명시적 닫기라면 그 사이 만들어진 tmux 작업도 끝내고, 앱 수명 종료라면
-    // 전송만 닫아 다음 실행에서 이어갈 수 있게 둔다.
-    if (_userClosed.contains(id) || !state.any((item) => item.id == id)) {
+    // "작업 종료"였다면 그 사이 만들어진 tmux 작업도 끝내고, "탭만 닫기"나
+    // 앱 수명 종료라면 전송만 닫아 서버 작업을 그대로 둔다(다른 기기가 쓰고
+    // 있을 수 있다).
+    if (_closedWith.containsKey(id) || !state.any((item) => item.id == id)) {
       if (result case Ok(:final value)) {
-        if (_userClosed.contains(id)) {
-          await value.terminatePersistentSession();
-        }
-        await value.close();
+        await _discardHandleOfClosedTab(id, host.id, session, value);
       }
       return id;
     }
@@ -568,6 +638,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   }
 
   /// 실행 중인 세션의 현재 상태를 기준으로 새 세션을 만든다.
+  /// 새 탭은 목록 끝이 아니라 원본 세션 바로 아래에 놓는다.
   ///
   /// 로컬 셸은 추적 중인 셸 종류와 작업 디렉터리를 시작 옵션으로 넘기고,
   /// SSH는 연결과 시작 스크립트 실행이 끝난 뒤 현재 원격 디렉터리로 이동한다.
@@ -606,6 +677,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       title: source.title,
       groupId: source.groupId,
       agentWorkspace: agentWorkspace,
+      insertAfterId: id,
     );
 
     if (!host.isLocalShell && workingDirectory != null) {
@@ -1691,14 +1763,22 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       lastError: null,
     );
     await store.upsert(entry);
+    // 준비에 실패하면 탭을 닫는다. 이번에 새로 만든 서버 작업이면 같이 끝내
+    // 이름만 붙은 빈 셸이 보관함에 남지 않게 한다.
+    final createdRemoteWork = reusableShell == null &&
+        _sshHandles[sessionId]?.isPersistent == true &&
+        _sshHandles[sessionId]?.resumedPersistentSession == false;
+    Future<void> abandon() => createdRemoteWork
+        ? terminateAndCloseSession(sessionId)
+        : Future.sync(() => closeSession(sessionId));
     try {
       entry = await inspectAgentWorktree(workspaceId);
     } catch (_) {
-      closeSession(sessionId);
+      await abandon();
       rethrow;
     }
     if (entry.lifecycle == AgentWorktreeLifecycle.missing) {
-      closeSession(sessionId);
+      await abandon();
       throw StateError('worktree 경로가 더 이상 존재하지 않습니다.');
     }
 
@@ -1719,7 +1799,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     }
 
     if (entry.nativeSessionId == null && !allowNewConversation) {
-      closeSession(sessionId);
+      await abandon();
       throw StateError('저장된 대화 ID가 없습니다. 새 대화로 작업공간을 여는 동작을 선택해 주세요.');
     }
     final shell = _agentShellFlavor(session.host);
@@ -2408,11 +2488,14 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     // 호스트 조회 중 사용자가 정렬하거나 닫았을 수 있으므로 현재 위치를 쓴다.
     final insertionIndex = state.indexWhere((s) => s.id == id);
     if (insertionIndex < 0) return id;
+    // 닫으면 기록이 지워지므로 먼저 본다.
+    final fresh = _freshRemoteWork.contains(id);
     closeSession(id);
     final retriedId = await openSession(
       host,
       onHostKey: onHostKey,
       onKeyboardInteractive: onKeyboardInteractive,
+      expectRemoteSession: !fresh,
       title: title,
       groupId: session.groupId,
       remoteSessionId: remoteSessionId,
@@ -2574,7 +2657,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     String? localId,
     TerminalSessionHandle handle,
   ) {
-    if (_userClosed.contains(id)) return;
+    if (_closedWith.containsKey(id)) return;
     // 종료된 pid는 다른 프로세스가 재사용할 수 있으므로 더는 묻지 않는다.
     _localShellPids.remove(id);
     if (handle is PersistentLocalProcessSessionHandle &&
@@ -2628,7 +2711,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   /// 시뮬레이션할 수 있도록 노출한다.
   @visibleForTesting
   void handleSessionDropped(String id, {String? reason}) {
-    if (_userClosed.contains(id)) return;
+    if (_closedWith.containsKey(id)) return;
     SessionInfo? session;
     for (final s in state) {
       if (s.id == id) session = s;
@@ -2653,7 +2736,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   }
 
   void _handleSshSessionClosed(String id, SshSessionHandle handle) {
-    if (_userClosed.contains(id) || !identical(_sshHandles[id], handle)) return;
+    if (_closedWith.containsKey(id) || !identical(_sshHandles[id], handle)) return;
     ref
         .read(sessionDiagnosticsProvider.notifier)
         .record(
@@ -2687,6 +2770,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
 
   void _recordRemoteSessionLaunch(String id, SshSessionHandle handle) {
     if (!handle.isPersistent) return;
+    // 서버에 붙었으니 이제부터는 "있어야 할 작업"이다.
+    _freshRemoteWork.remove(id);
     ref
         .read(sessionDiagnosticsProvider.notifier)
         .record(
@@ -2708,7 +2793,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   void reconnectDisconnectedNow() {
     for (final session in state) {
       final id = session.id;
-      if (_userClosed.contains(id)) continue;
+      if (_closedWith.containsKey(id)) continue;
       if (session.host.isLocalShell) continue;
       if (session.status != SessionStatus.disconnected) continue;
       _reconnectTimers.remove(id)?.cancel();
@@ -2733,7 +2818,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       final targets = <(String, SSHClient)>[];
       for (final session in state) {
         final id = session.id;
-        if (_userClosed.contains(id)) continue;
+        if (_closedWith.containsKey(id)) continue;
         if (session.host.isLocalShell) continue;
         if (session.status != SessionStatus.connected) continue;
         final client = _sshHandles[id]?.client;
@@ -2776,7 +2861,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   /// 지수 백오프로 다음 재연결을 예약한다. [_maxReconnectAttempts]를 넘기면
   /// 더 예약하지 않고 멈춘다.
   void _scheduleReconnect(String id) {
-    if (_userClosed.contains(id)) return;
+    if (_closedWith.containsKey(id)) return;
     final attempt = _reconnectAttempts[id] ?? 0;
     if (attempt >= _maxReconnectAttempts) {
       _reconnectTimers.remove(id)?.cancel();
@@ -2806,7 +2891,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   /// 키(trustedKnown)와 일치할 때만 자동 승인하고, 그 외엔 거부한다.
   Future<void> _reconnect(String id) async {
     _reconnectTimers.remove(id);
-    if (_userClosed.contains(id)) return;
+    if (_closedWith.containsKey(id)) return;
 
     SessionInfo? session;
     for (final s in state) {
@@ -2832,7 +2917,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     await gate.acquire();
     final Result<SshSessionHandle> result;
     try {
-      if (_userClosed.contains(id) || !state.any((item) => item.id == id)) {
+      if (_closedWith.containsKey(id) || !state.any((item) => item.id == id)) {
         return;
       }
       final routeResult = await _openSshRoute(session.host);
@@ -2846,7 +2931,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
           _scheduleReconnect(id);
           return;
       }
-      if (_userClosed.contains(id) || !state.any((item) => item.id == id)) {
+      if (_closedWith.containsKey(id) || !state.any((item) => item.id == id)) {
         return;
       }
 
@@ -2856,13 +2941,54 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     }
 
     // 재연결 도중 사용자가 닫았거나 세션이 사라졌으면 정리하고 중단.
-    if (_userClosed.contains(id) || !state.any((s) => s.id == id)) {
+    if (_closedWith.containsKey(id) || !state.any((s) => s.id == id)) {
       if (result case Ok(:final value)) {
-        await value.close();
+        await _discardHandleOfClosedTab(id, session.host.id, session, value);
       }
       return;
     }
     await _applyReconnectResult(id, session, result);
+  }
+
+  /// 연결이 끝났을 때 탭이 이미 닫혀 있던 경우의 뒷정리. "작업 종료"였다면
+  /// 그 사이 만들어지거나 다시 붙은 tmux 작업도 끝내고, 그 밖의 의도라면
+  /// 전송만 닫아 서버 작업을 그대로 둔다(다른 기기가 쓰고 있을 수 있다).
+  /// 더 시도할 필요가 없는 종료 결과. 다른 기기가 보고 있으면 끝내지 않은
+  /// 것도 결정된 결과다(나중에 다시 끝내면 그 기기의 화면이 닫힌다).
+  static RemoteWorkTermination? _settledTermination(
+    RemoteSessionTerminationOutcome outcome,
+  ) => switch (outcome) {
+    RemoteSessionTerminationOutcome.terminated ||
+    RemoteSessionTerminationOutcome.alreadyAbsent =>
+      RemoteWorkTermination.terminated,
+    RemoteSessionTerminationOutcome.attachedElsewhere =>
+      RemoteWorkTermination.keptForOtherDevice,
+    RemoteSessionTerminationOutcome.notManaged ||
+    RemoteSessionTerminationOutcome.identityMismatch ||
+    RemoteSessionTerminationOutcome.failed => null,
+  };
+
+  Future<void> _discardHandleOfClosedTab(
+    String id,
+    String hostId,
+    SessionInfo session,
+    SshSessionHandle handle,
+  ) async {
+    final remoteSessionId = session.remoteSessionId;
+    if (_closedWith[id] == SessionCloseIntent.terminateRemoteWork &&
+        remoteSessionId != null) {
+      // 다이얼로그 시점에 이미 예약돼 있다. 여기서 끝냈으면 예약을 지워
+      // 다음 연결 때 헛된 kill을 보내지 않는다. 실패는 예약이 처리한다.
+      final outcome = await handle.terminatePersistentSession();
+      if (_settledTermination(outcome) != null) {
+        await _removeQueuedRemoteSessionTermination(hostId, remoteSessionId);
+      }
+    }
+    try {
+      await handle.close();
+    } catch (_) {
+      // 전송이 이미 끊겼을 수 있다. 탭은 이미 닫혔다.
+    }
   }
 
   void _recordReconnectFailure(String id, String message) {
@@ -2889,6 +3015,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       jumpHosts: route.jumpHosts,
       targetSocket: route.targetSocket,
       remoteSessionId: session.remoteSessionId,
+      expectRemoteSession: true,
     );
   }
 
@@ -3119,21 +3246,37 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   }
 
   /// 세션을 닫고 자원을 정리한다. active 세션이 닫히면 active-id를 수정한다.
-  /// 작업 이어가기가 켜진 세션의 원격 작업을 끝내려면 먼저
-  /// [terminatePersistentSession]을 호출해야 한다.
-  void closeSession(String id) {
+  ///
+  /// [intent]는 서버의 작업 이어가기 세션을 어떻게 볼지다. 사용자가 고른
+  /// "탭만 닫기"는 [SessionCloseIntent.detachRemoteWork], "작업 종료"는
+  /// [terminateAndCloseSession]을 쓴다. 기본값은 아무것도 기록하지 않는
+  /// [SessionCloseIntent.discardTab]이라, 내부 정리 경로(재시도, 원격
+  /// 프로세스 종료, 작업공간 준비 실패)가 실수로 "사용자가 내려놓음"을
+  /// 남기지 않는다.
+  void closeSession(
+    String id, {
+    SessionCloseIntent intent = SessionCloseIntent.discardTab,
+  }) {
     _nativeSessionReferences.remove(id);
     final closing = _sessionById(id);
     final workspaceId = closing?.agentWorkspace?.workspaceId;
     if (workspaceId != null) {
       unawaited(_markAgentWorktreeStranded(workspaceId, id));
     }
-    // 자동 재연결 중단: 사용자가 명시적으로 닫은 세션이다.
-    _userClosed.add(id);
+    // 종료는 terminatePersistentSession이 먼저 기록했을 수 있다. 더 강한
+    // 의도를 덮어쓰지 않는다.
+    final recorded = _closedWith[id];
+    final effective = recorded == SessionCloseIntent.terminateRemoteWork
+        ? recorded!
+        : intent;
+    _closedWith[id] = effective;
+    _freshRemoteWork.remove(id);
     _reconnectTimers.remove(id)?.cancel();
     _reconnectAttempts.remove(id);
     _sshHandles.remove(id);
     _sessionStates.remove(id);
+    _restoreTextCache.remove(id);
+    _restoreTextDirty.remove(id);
     _localShellPids.remove(id);
     _sessionLogIds.remove(id);
     ref.read(sessionActivityProvider.notifier).remove(id);
@@ -3156,34 +3299,59 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     _persistOpenSessions();
   }
 
+  /// "작업 종료": 서버의 원격 작업을 끝내고 탭을 닫는다. 결과는
+  /// [RemoteWorkTermination]으로 돌려주며, 호출자는 예약·실패를 사용자에게
+  /// 다르게 알려야 한다.
+  Future<RemoteWorkTermination> terminateAndCloseSession(String id) async {
+    final outcome = await terminatePersistentSession(id);
+    closeSession(id, intent: SessionCloseIntent.terminateRemoteWork);
+    return outcome;
+  }
+
   /// 현재 SSH 연결을 사용해 앱 전용 원격 작업을 종료한다.
   ///
-  /// 연결이 끊긴 상태에서는 서버에 종료 명령을 보낼 수 없으므로 false를
-  /// 반환한다. 호출자는 사용자에게 원격 작업이 남을 수 있음을 알려야 한다.
-  Future<bool> terminatePersistentSession(String id) async {
+  /// 연결이 끊겼거나 종료 명령이 실패하면 다음 연결 때 정리하도록 예약한다
+  /// ([RemoteWorkTermination.queued]). 예약 저장까지 실패하면
+  /// [RemoteWorkTermination.failed]다. 탭까지 닫으려면
+  /// [terminateAndCloseSession]을 쓴다.
+  Future<RemoteWorkTermination> terminatePersistentSession(String id) async {
     final session = _sessionById(id);
-    if (session == null || !session.host.keepsRemoteSession) return true;
+    if (session == null || !session.host.keepsRemoteSession) {
+      return RemoteWorkTermination.terminated;
+    }
 
-    _userClosed.add(id);
+    // 종료 명령을 보내는 사이 자동 재연결이 끼어들지 않게 먼저 기록한다.
+    _closedWith[id] = SessionCloseIntent.terminateRemoteWork;
     _reconnectTimers.remove(id)?.cancel();
     _reconnectAttempts.remove(id);
     final remoteSessionId = session.remoteSessionId;
-    if (remoteSessionId == null) return false;
+    // 작업 이어가기 호스트는 항상 id를 받으므로 도달하지 않는다. 끝낼 원격
+    // 작업이 없으니 종료된 것과 같다.
+    if (remoteSessionId == null) return RemoteWorkTermination.terminated;
     final handle = _sshHandles[id];
-    if (handle == null || session.status != SessionStatus.connected) {
-      await _queueRemoteSessionTermination(session.host.id, remoteSessionId);
-      return false;
+    if (handle != null && session.status == SessionStatus.connected) {
+      final outcome = await handle.terminatePersistentSession();
+      final settled = _settledTermination(outcome);
+      if (settled != null) {
+        await _removeQueuedRemoteSessionTermination(
+          session.host.id,
+          remoteSessionId,
+        );
+        return settled;
+      }
+      ref
+          .read(sessionDiagnosticsProvider.notifier)
+          .record(
+            id,
+            SessionEventType.remoteChannelClosed,
+            detail: '연결 중 종료 명령 실패, 다음 연결 때 다시 시도',
+          );
     }
-    final terminated = await handle.terminatePersistentSession();
-    if (terminated) {
-      await _removeQueuedRemoteSessionTermination(
-        session.host.id,
-        remoteSessionId,
-      );
-    } else {
-      await _queueRemoteSessionTermination(session.host.id, remoteSessionId);
-    }
-    return terminated;
+    final queued = await _queueRemoteSessionTermination(
+      session.host.id,
+      remoteSessionId,
+    );
+    return queued ? RemoteWorkTermination.queued : RemoteWorkTermination.failed;
   }
 
   Future<Result<List<RemotePersistentSession>>> listRemotePersistentSessions(
@@ -3200,13 +3368,31 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     return ref.read(remoteSessionCatalogProvider).list(handle.client);
   }
 
+  Future<RemoteServerInfo?> remoteServerInfo(String id) async {
+    final handle = _sshHandles[id];
+    if (handle == null || _sessionById(id)?.status != SessionStatus.connected) {
+      return null;
+    }
+    try {
+      final result = await handle.client
+          .runWithResult(RemoteServerInfo.command)
+          .timeout(const Duration(seconds: 5));
+      if (result.exitCode != 0) return null;
+      return RemoteServerInfo.parse(
+        utf8.decode(result.stdout, allowMalformed: true),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   String? currentPersistentSessionName(String id) =>
       _sshHandles[id]?.persistentSessionName;
 
   Future<String> currentRemoteSessionOwnerId() =>
       ref.read(remoteSessionIdentityStoreProvider).readOrCreate();
 
-  Future<bool> terminateListedRemoteSession(
+  Future<RemoteSessionTerminationOutcome> terminateListedRemoteSession(
     String connectionSessionId,
     RemotePersistentSession remoteSession,
   ) async {
@@ -3216,22 +3402,19 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         handle == null ||
         connection.status != SessionStatus.connected ||
         handle.persistentSessionName == remoteSession.name) {
-      return false;
+      return RemoteSessionTerminationOutcome.failed;
     }
 
     final outcome = await ref
         .read(remoteSessionCatalogProvider)
         .terminate(handle.client, persistentSessionName: remoteSession.name);
-    final completed =
-        outcome == RemoteSessionTerminationOutcome.terminated ||
-        outcome == RemoteSessionTerminationOutcome.alreadyAbsent;
-    if (completed) {
+    if (_settledTermination(outcome) != null) {
       await _removeQueuedRemoteSessionTermination(
         connection.host.id,
         remoteSession.remoteSessionId,
       );
     }
-    return completed;
+    return outcome;
   }
 
   /// 보관함의 원격 작업을 앱의 터미널 탭으로 활성화한다.
@@ -3316,12 +3499,10 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     String hostAlias,
     RemotePersistentSession remoteSession,
   ) {
-    final id = remoteSession.remoteSessionId;
-    final shortId = id.length > 10 ? id.substring(id.length - 10) : id;
-    return '$hostAlias · $shortId';
+    return remoteSession.title ?? '$hostAlias · ${remoteSession.displayName}';
   }
 
-  Future<void> _queueRemoteSessionTermination(
+  Future<bool> _queueRemoteSessionTermination(
     String hostId,
     String remoteSessionId,
   ) async {
@@ -3335,9 +3516,17 @@ class SessionManager extends Notifier<List<SessionInfo>> {
               queuedAt: DateTime.now(),
             ),
           );
-    } catch (error) {
-      // 보조 정리 큐를 기록하지 못해도 사용자가 탭을 닫는 흐름은 막지 않는다.
-      debugPrint('[remote-session-cleanup] 종료 요청 저장 실패: $error');
+      return true;
+    } catch (error, stackTrace) {
+      // 탭을 닫는 흐름은 막지 않지만, 서버에 작업이 남는다는 사실은 호출자가
+      // 사용자에게 알려야 하므로 실패를 돌려주고 기록한다.
+      appErrorReporter.report(
+        error,
+        stackTrace,
+        source: 'remote-session-cleanup',
+        context: '종료 요청 저장 실패, 서버 작업이 남을 수 있음',
+      );
+      return false;
     }
   }
 
@@ -3349,8 +3538,14 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       await ref
           .read(remoteSessionCleanupStoreProvider)
           .remove(hostId: hostId, remoteSessionId: remoteSessionId);
-    } catch (error) {
-      debugPrint('[remote-session-cleanup] 종료 요청 삭제 실패: $error');
+    } catch (error, stackTrace) {
+      // 다음 연결 때 헛된 kill 한 번으로 끝나지만, 왜 남았는지는 기록한다.
+      appErrorReporter.report(
+        error,
+        stackTrace,
+        source: 'remote-session-cleanup',
+        context: '처리한 종료 요청 삭제 실패',
+      );
     }
   }
 
@@ -3400,6 +3595,17 @@ class SessionManager extends Notifier<List<SessionInfo>> {
             hostId: entry.hostId,
             remoteSessionId: entry.remoteSessionId,
           );
+        case RemoteSessionTerminationOutcome.attachedElsewhere:
+          // 그사이 다른 기기가 이 작업을 열었다. 나중에 끝내면 그 기기의
+          // 화면이 닫히므로 예약을 버린다.
+          debugPrint(
+            '[remote-session-cleanup] $connectionSessionId 다른 기기가 사용 중이라 '
+            '종료하지 않음: ${entry.remoteSessionId}',
+          );
+          await store.remove(
+            hostId: entry.hostId,
+            remoteSessionId: entry.remoteSessionId,
+          );
         case RemoteSessionTerminationOutcome.failed:
           // 일시 실패는 다음 연결에서 다시 시도한다.
           break;
@@ -3420,6 +3626,9 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   Future<void> persistOpenSessionsForRestore() {
     _persistTimer?.cancel();
     _persistTimer = null;
+    // 앱이 내려가거나 끝날 때는 출력 알림을 거치지 않은 쓰기까지 담도록 모든
+    // 화면을 다시 읽는다.
+    _restoreTextCache.clear();
     return _saveOpenSessionsSnapshot();
   }
 
@@ -3429,6 +3638,13 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       const Duration(milliseconds: 500),
       _persistOpenSessions,
     );
+  }
+
+  /// 출력으로 화면만 바뀐 경우. 이미 예약된 저장이 있으면 그대로 두고(더 이른
+  /// 구조 변경 저장 포함), 없으면 [_outputPersistDelay] 뒤에 한 번 저장한다.
+  /// 디바운스가 아니라서 출력이 쉬지 않고 이어져도 저장이 밀리지 않는다.
+  void _schedulePersistAfterOutput() {
+    _persistTimer ??= Timer(_outputPersistDelay, _persistOpenSessions);
   }
 
   void _persistOpenSessions() {
@@ -3444,7 +3660,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       activeGroupId: ref.read(sessionGroupProvider).activeGroupId,
       sessions: [
         for (final session in state)
-          if (!_userClosed.contains(session.id) &&
+          if (!_closedWith.containsKey(session.id) &&
               session.status != SessionStatus.error &&
               session.appId == null)
             RestoredSessionEntry(
@@ -3602,6 +3818,14 @@ class SessionManager extends Notifier<List<SessionInfo>> {
 
   String? _terminalTextForRestore(SessionInfo session) {
     if (session.host.keepsRemoteSession) return null;
+    final id = session.id;
+    if (!_restoreTextDirty.remove(id) && _restoreTextCache.containsKey(id)) {
+      return _restoreTextCache[id];
+    }
+    return _restoreTextCache[id] = _readTerminalTextForRestore(session);
+  }
+
+  String? _readTerminalTextForRestore(SessionInfo session) {
     const maxLines = 300;
     const maxChars = 20000;
     final text = session.engine.recentPlainText(maxLines: maxLines).trimRight();

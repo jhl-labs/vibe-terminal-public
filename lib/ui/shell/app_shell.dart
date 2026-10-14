@@ -3,7 +3,7 @@ import '../../ai/secret_masker.dart';
 import 'agent_issues_dialog.dart';
 import 'session_pane_deck.dart';
 import 'session_close_dialog.dart';
-import 'panes/pane_activity_frame.dart';
+import 'panes/session_pane_activity_frame.dart';
 import 'panes/pane_preset_icon.dart';
 import 'session_bulk_dialog.dart';
 import 'local_background_sessions_dialog.dart';
@@ -18,7 +18,6 @@ import '../../session/session_attention.dart';
 import '../../session/session_activity.dart';
 
 import 'package:flutter/gestures.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
@@ -37,6 +36,7 @@ import '../../session/session_notification_mute.dart';
 import '../../settings/app_settings.dart';
 import '../../settings/shortcut_bindings.dart';
 import '../../ssh/ssh_service.dart';
+import '../../session/session_manager.dart' show SessionCloseIntent;
 import '../../state/providers.dart';
 import '../../telemetry/telemetry.dart' show TelemetryEvent, TelemetryMessage;
 import '../adaptive/breakpoints.dart';
@@ -169,7 +169,10 @@ class _AppShellState extends ConsumerState<AppShell> {
   void _showSessionBulk(BuildContext context) => showSessionBulkDialog(
     context,
     registry: ref.read(sessionPortRegistryProvider),
-    close: ref.read(sessionManagerProvider.notifier).closeSession,
+    // 사용자가 고른 일괄 닫기다. 작업 이어가기 세션은 서버에 남기고 내려놓는다.
+    close: (id) => ref
+        .read(sessionManagerProvider.notifier)
+        .closeSession(id, intent: SessionCloseIntent.detachRemoteWork),
   );
 
   /// 좌측 레일의 이전/다음 세션 버튼. 현재 그룹에 세션이 2개 이상일 때만 활성.
@@ -1380,42 +1383,16 @@ class _AppShellState extends ConsumerState<AppShell> {
       settings.terminalFontSize * settings.terminalLineHeight * 10 + 70,
     );
     cell.dispose();
-    // 레일의 스피너·Agent 상태와 같은 근거로 칸 테두리를 움직인다.
-    // attention 은 출력 중 메시지(화면 미리보기)가 자주 바뀐다. 칸 테두리는
-    // 상태만 쓰므로 상태 맵만 골라 구독해, 메시지 갱신마다 모든 터미널 칸이
-    // 다시 빌드되는 것을 막는다.
-    // busy 맵도 같은 이유로 값 기준으로 구독한다. notifier가 매번 새 Map을
-    // 만들어도 내용이 같으면 중앙(세션 칸 전부)을 다시 빌드하지 않는다.
-    final busy = ref
-        .watch(
-          sessionActivityProvider.select(
-            (map) => _BusyStates({
-              for (final entry in map.entries)
-                if (entry.value) entry.key: true,
-            }),
-          ),
-        )
-        .states;
-    final attentionStates = ref.watch(
-      sessionAttentionProvider.select(
-        (map) => _AttentionStates({
-          for (final entry in map.entries) entry.key: entry.value.state,
-        }),
-      ),
-    );
-    final activity = {
-      for (final s in sessions)
-        s.id: paneActivityFor(
-          busy: busy[s.id] ?? false,
-          attention: attentionStates.states[s.id],
-        ),
-    };
     return SessionPaneDeck(
       key: _paneDeckKey,
       groupId: activeGroupId,
       sessions: sessions,
       minimumPaneSize: minimum,
-      activity: activity,
+      frameBuilder: (sessionId, focused, child) => SessionPaneActivityFrame(
+        sessionId: sessionId,
+        focused: focused,
+        child: child,
+      ),
       onCloseSession: (session) =>
           unawaited(requestCloseSession(context, ref, session)),
       canUndo: ref
@@ -1930,10 +1907,6 @@ class _AppShellState extends ConsumerState<AppShell> {
                     _closeMobileDrawer();
                     await _launchAgentSession(context, ref, session, spec);
                   },
-                  onReviewAgentChanges: (session) async {
-                    _closeMobileDrawer();
-                    await _reviewAgentChanges(context, ref, session);
-                  },
                   onOpenAgentWorktrees: () {
                     _closeMobileDrawer();
                     _openAgentWorktrees(context, ref);
@@ -1996,8 +1969,6 @@ class _AppShellState extends ConsumerState<AppShell> {
                         _duplicateSession(context, ref, session),
                     onLaunchAgent: (session, spec) =>
                         _launchAgentSession(context, ref, session, spec),
-                    onReviewAgentChanges: (session) =>
-                        _reviewAgentChanges(context, ref, session),
                     onOpenAgentWorktrees: () =>
                         _openAgentWorktrees(context, ref),
                     onOpenSettings: () => showVibeTerminalSettings(context),
@@ -2088,7 +2059,6 @@ class _ResizableLeftPanel extends ConsumerStatefulWidget {
     required this.onNewSession,
     required this.onDuplicateSession,
     required this.onLaunchAgent,
-    required this.onReviewAgentChanges,
     required this.onOpenAgentWorktrees,
     required this.onOpenSettings,
     this.onBulk,
@@ -2100,7 +2070,6 @@ class _ResizableLeftPanel extends ConsumerStatefulWidget {
   final Future<void> Function(SessionInfo session) onDuplicateSession;
   final Future<void> Function(SessionInfo session, AgentLaunchSpec spec)
   onLaunchAgent;
-  final Future<void> Function(SessionInfo session) onReviewAgentChanges;
   final VoidCallback onOpenAgentWorktrees;
   final VoidCallback onOpenSettings;
   final VoidCallback? onBulk, onPreviousSession, onNextSession;
@@ -2169,7 +2138,6 @@ class _ResizableLeftPanelState extends ConsumerState<_ResizableLeftPanel> {
               onNewSession: widget.onNewSession,
               onDuplicateSession: widget.onDuplicateSession,
               onLaunchAgent: widget.onLaunchAgent,
-              onReviewAgentChanges: widget.onReviewAgentChanges,
               onOpenAgentWorktrees: widget.onOpenAgentWorktrees,
               onOpenSettings: widget.onOpenSettings,
               onCollapse: () =>
@@ -2710,36 +2678,4 @@ class _EmptyConsole extends StatelessWidget {
       ),
     );
   }
-}
-
-/// [sessionAttentionProvider]에서 세션별 상태만 뽑은 값. `select` 는 `==` 로
-/// 변경을 판정하므로 맵 내용 비교를 제공한다.
-class _BusyStates {
-  const _BusyStates(this.states);
-
-  final Map<String, bool> states;
-
-  @override
-  bool operator ==(Object other) =>
-      other is _BusyStates && mapEquals(states, other.states);
-
-  @override
-  int get hashCode => Object.hashAll([
-    for (final entry in states.entries) Object.hash(entry.key, entry.value),
-  ]);
-}
-
-class _AttentionStates {
-  const _AttentionStates(this.states);
-
-  final Map<String, SessionAttentionState> states;
-
-  @override
-  bool operator ==(Object other) =>
-      other is _AttentionStates && mapEquals(states, other.states);
-
-  @override
-  int get hashCode => Object.hashAll([
-    for (final entry in states.entries) Object.hash(entry.key, entry.value),
-  ]);
 }

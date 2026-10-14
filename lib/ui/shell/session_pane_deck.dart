@@ -27,6 +27,7 @@ class SessionPaneDeck extends StatefulWidget {
     this.canUndo = false,
     this.minimumPaneSize = const Size(320, 224),
     this.activity = const {},
+    this.frameBuilder,
   });
 
   /// All groups stay mounted; only the current group's rectangles are visible.
@@ -50,6 +51,12 @@ class SessionPaneDeck extends StatefulWidget {
 
   /// 세션별 활동 상태. 칸 테두리가 레일의 스피너·Agent 상태와 같이 움직인다.
   final Map<String, PaneActivity> activity;
+
+  /// 칸 테두리 빌더. 지정하면 [activity] 대신 이것으로 세션별 테두리를 만든다.
+  /// 앱 셸은 칸마다 자기 세션 상태만 구독하는 테두리를 넘겨, 활동 변화가 덱과
+  /// 모든 터미널을 다시 빌드하지 않게 한다.
+  final Widget Function(String sessionId, bool focused, Widget child)?
+  frameBuilder;
   @override
   State<SessionPaneDeck> createState() => SessionPaneDeckState();
 }
@@ -636,11 +643,10 @@ class SessionPaneDeckState extends State<SessionPaneDeck> {
                   onPointerDown: (_) {
                     if (pane != null && rect != null) _focus(pane.id);
                   },
-                  child: PaneActivityFrame(
-                    focused:
-                        pane?.id == widget.layout.focused.id && rect != null,
-                    activity: widget.activity[session.id] ?? PaneActivity.idle,
-                    child: widget.terminalBuilder(
+                  child: _frame(
+                    session.id,
+                    pane?.id == widget.layout.focused.id && rect != null,
+                    widget.terminalBuilder(
                       session,
                       (actions) => _header(
                         pane ?? PaneLeaf('hidden', session.id),
@@ -657,6 +663,14 @@ class SessionPaneDeckState extends State<SessionPaneDeck> {
       ),
     );
   }
+
+  Widget _frame(String sessionId, bool focused, Widget terminal) =>
+      widget.frameBuilder?.call(sessionId, focused, terminal) ??
+      PaneActivityFrame(
+        focused: focused,
+        activity: widget.activity[sessionId] ?? PaneActivity.idle,
+        child: terminal,
+      );
 
   Widget _divider(PaneDivider divider) {
     final horizontal = divider.split.axis == PaneAxis.leftRight;

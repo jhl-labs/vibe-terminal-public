@@ -2970,8 +2970,11 @@ class _TerminalHeader extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // 세션이 2개 이상일 때만 세션 전환(위/아래) 버튼을 활성화한다.
-    final canSwitchSession = ref.watch(sessionManagerProvider).length > 1;
+    // 세션이 2개 이상일 때만 세션 전환(위/아래) 버튼을 활성화한다. 목록 전체를
+    // 구독하면 아무 세션의 상태·제목이 바뀔 때마다 모든 탭 헤더가 다시 빌드된다.
+    final canSwitchSession = ref.watch(
+      sessionManagerProvider.select((sessions) => sessions.length > 1),
+    );
     final items = ref.watch(
       appSettingsProvider.select((s) => s.terminalHeaderItems),
     );

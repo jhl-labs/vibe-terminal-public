@@ -1,7 +1,9 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../../app/theme.dart';
 import '../../../session/session_attention.dart';
+import '../../common/activity_clock.dart';
 
 /// 분할 칸 테두리에 반영할 세션 활동 상태.
 ///
@@ -42,7 +44,8 @@ PaneActivity paneActivityFor({
 /// - 완료·미확인: 강조색 실선(포커스된 칸은 포커스색 유지).
 /// - 대기: 포커스된 칸만 포커스색, 나머지는 투명.
 ///
-/// 애니메이션 비활성(접근성) 환경에서는 맥동 대신 강조색 실선을 쓴다.
+/// 애니메이션 비활성(접근성) 환경이나 숨은 칸에서는 맥동 대신 강조색 실선을 쓴다.
+/// 맥동은 [activityClock]을 따라 초당 몇 번만 갱신한다.
 class PaneActivityFrame extends StatefulWidget {
   const PaneActivityFrame({
     super.key,
@@ -58,8 +61,8 @@ class PaneActivityFrame extends StatefulWidget {
   /// 테두리 두께. 자식은 이만큼 안쪽으로 들어간다.
   static const double width = 2;
 
-  /// 맥동 한 주기(밝아졌다 어두워지는 왕복)의 절반.
-  static const pulsePeriod = Duration(milliseconds: 700);
+  /// 테두리를 그리는 [CustomPaint]. 테스트에서 현재 색을 읽을 때 쓴다.
+  static const borderKey = ValueKey('pane-activity-border');
 
   /// 포커스 링 색(Colors.tealAccent와 같은 값). 보간 결과와 비교할 수 있게 평범한
   /// Color로 둔다.
@@ -69,53 +72,68 @@ class PaneActivityFrame extends StatefulWidget {
   State<PaneActivityFrame> createState() => _PaneActivityFrameState();
 }
 
-class _PaneActivityFrameState extends State<PaneActivityFrame>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _pulse = AnimationController(
-    vsync: this,
-    duration: PaneActivityFrame.pulsePeriod,
-  );
-
-  bool get _shouldPulse =>
-      widget.activity == PaneActivity.working &&
-      !MediaQuery.disableAnimationsOf(context);
-
+class _PaneActivityFrameState extends State<PaneActivityFrame> {
   @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    _syncPulse();
+  Widget build(BuildContext context) {
+    final pulse =
+        widget.activity == PaneActivity.working &&
+        activityAnimationsEnabled(context);
+    // 테두리만 자기 레이어에서 다시 그린다. 칸 헤더와 터미널은 맥동 때문에
+    // 다시 빌드·페인트되지 않는다.
+    return Stack(
+      fit: StackFit.passthrough,
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(PaneActivityFrame.width),
+          child: widget.child,
+        ),
+        Positioned.fill(
+          child: IgnorePointer(
+            child: RepaintBoundary(
+              child: CustomPaint(
+                key: PaneActivityFrame.borderKey,
+                painter: PaneBorderPainter(
+                  activity: widget.activity,
+                  focused: widget.focused,
+                  clock: pulse ? activityClock : null,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
   }
+}
 
-  @override
-  void didUpdateWidget(PaneActivityFrame oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.activity != widget.activity) _syncPulse();
-  }
+/// [PaneActivityFrame]의 테두리. 맥동은 [clock] 값을 따른다.
+class PaneBorderPainter extends CustomPainter {
+  PaneBorderPainter({
+    required this.activity,
+    required this.focused,
+    required this.clock,
+  }) : super(repaint: clock);
 
-  void _syncPulse() {
-    if (_shouldPulse) {
-      if (!_pulse.isAnimating) _pulse.repeat(reverse: true);
-    } else if (_pulse.isAnimating) {
-      _pulse.stop();
-      _pulse.value = 0;
-    }
-  }
+  final PaneActivity activity;
+  final bool focused;
 
-  @override
-  void dispose() {
-    _pulse.dispose();
-    super.dispose();
-  }
+  /// null이면 맥동하지 않는다.
+  final ValueListenable<double>? clock;
 
-  Color _color(double t) {
-    final focus = widget.focused ? PaneActivityFrame.focusColor : null;
-    switch (widget.activity) {
+  /// 지금 그릴 테두리 색.
+  Color get color {
+    final focus = focused ? PaneActivityFrame.focusColor : null;
+    switch (activity) {
       case PaneActivity.blocked:
         return VibeColors.statusError;
       case PaneActivity.done:
         return focus ?? VibeColors.accent.withValues(alpha: 0.8);
       case PaneActivity.working:
-        if (!_shouldPulse) return focus ?? VibeColors.accent;
+        final clock = this.clock;
+        if (clock == null) return focus ?? VibeColors.accent;
+        // 한 주기 동안 어두움 → 밝음 → 어두움으로 왕복한다.
+        final phase = clock.value;
+        final t = phase < .5 ? phase * 2 : (1 - phase) * 2;
         final dim = focus ?? VibeColors.accent.withValues(alpha: 0.12);
         return Color.lerp(
           dim,
@@ -128,22 +146,22 @@ class _PaneActivityFrameState extends State<PaneActivityFrame>
   }
 
   @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _pulse,
-      child: Padding(
-        padding: const EdgeInsets.all(PaneActivityFrame.width),
-        child: widget.child,
-      ),
-      builder: (context, child) => DecoratedBox(
-        decoration: BoxDecoration(
-          border: Border.all(
-            color: _color(_pulse.value),
-            width: PaneActivityFrame.width,
-          ),
-        ),
-        child: child,
-      ),
+  void paint(Canvas canvas, Size size) {
+    final color = this.color;
+    if (color.a == 0) return;
+    const inset = PaneActivityFrame.width / 2;
+    canvas.drawRect(
+      (Offset.zero & size).deflate(inset),
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = PaneActivityFrame.width,
     );
   }
+
+  @override
+  bool shouldRepaint(PaneBorderPainter oldDelegate) =>
+      oldDelegate.activity != activity ||
+      oldDelegate.focused != focused ||
+      oldDelegate.clock != clock;
 }

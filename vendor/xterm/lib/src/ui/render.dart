@@ -39,7 +39,9 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     required bool alwaysShowCursor,
     EditableRectCallback? onEditableRect,
     String? composingText,
+    bool active = true,
   })  : _terminal = terminal,
+        _active = active,
         _controller = controller,
         _offset = offset,
         _padding = padding,
@@ -236,7 +238,27 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     markNeedsPaint();
   }
 
+  /// 화면에 보이는 터미널인지. false면 터미널 내용이 바뀌어도 레이아웃과 프레임을
+  /// 요청하지 않고, 다시 true가 될 때 한 번에 반영한다. 세션이 많을 때 숨은
+  /// 탭들의 출력이 매 프레임 레이아웃을 일으키지 않게 한다.
+  bool get active => _active;
+  bool _active;
+  bool _changedWhileInactive = false;
+  set active(bool value) {
+    if (value == _active) return;
+    _active = value;
+    if (value && _changedWhileInactive) {
+      _changedWhileInactive = false;
+      markNeedsLayout();
+      _notifyEditableRect();
+    }
+  }
+
   void _onTerminalChange() {
+    if (!_active) {
+      _changedWhileInactive = true;
+      return;
+    }
     markNeedsLayout();
     _notifyEditableRect();
   }

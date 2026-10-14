@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../core/result.dart';
 import '../data/models/host.dart';
@@ -10,6 +11,7 @@ import '../security/host_key_store.dart';
 import '../security/secure_store.dart';
 import '../terminal/terminal_session_handle.dart';
 import 'ssh_credentials.dart';
+import 'remote_session_catalog.dart';
 import 'remote_terminal_launcher.dart';
 import 'ssh_session_lifecycle.dart';
 
@@ -82,8 +84,27 @@ class SshSessionHandle implements TerminalSessionHandle {
     this._jumpClients, {
     this.persistentSessionName,
     this.resumedPersistentSession = false,
+    this.recreatedPersistentSession = false,
     this.fellBackToDirectSsh = false,
   }) : _output = _sessionOutput(_session);
+
+  /// 테스트 전용. 실제 소켓 없이 [SessionManager]의 연결 이후 경로(닫기 의도,
+  /// 탭 정리)를 검증할 수 있게 가짜 클라이언트·세션으로 만든다.
+  @visibleForTesting
+  factory SshSessionHandle.forTesting({
+    required SSHClient client,
+    required SSHSession session,
+    String? persistentSessionName,
+    bool resumedPersistentSession = false,
+    bool recreatedPersistentSession = false,
+  }) => SshSessionHandle._(
+    client,
+    session,
+    const [],
+    persistentSessionName: persistentSessionName,
+    resumedPersistentSession: resumedPersistentSession,
+    recreatedPersistentSession: recreatedPersistentSession,
+  );
 
   final SSHClient _client;
   final SSHSession _session;
@@ -95,6 +116,10 @@ class SshSessionHandle implements TerminalSessionHandle {
 
   /// 이번 연결에서 이미 실행 중이던 원격 작업에 다시 붙었는지 여부.
   final bool resumedPersistentSession;
+
+  /// 있어야 할 원격 작업이 서버에 없어 같은 이름으로 새로 만들었는지 여부
+  /// (다른 기기가 끝낸 작업을 복원·재접속한 경우).
+  final bool recreatedPersistentSession;
 
   /// 작업 이어가기를 요청했지만 tmux가 없어 일반 SSH 셸로 연결했는지 여부.
   final bool fellBackToDirectSsh;
@@ -193,19 +218,32 @@ class SshSessionHandle implements TerminalSessionHandle {
 
   /// 사용자가 명시적으로 탭을 닫을 때 앱 전용 원격 작업도 종료한다.
   /// 네트워크 단절/앱 종료 경로에서는 호출하지 않아 tmux 세션이 남게 한다.
-  Future<bool> terminatePersistentSession() async {
+  ///
+  /// 먼저 이 기기의 터미널 채널을 닫아 tmux client를 떼고, 그래도 붙어 있는
+  /// client가 있으면 다른 기기가 보고 있는 것이므로 끝내지 않는다
+  /// ([RemoteSessionTerminationOutcome.attachedElsewhere]).
+  Future<RemoteSessionTerminationOutcome> terminatePersistentSession() async {
     final name = persistentSessionName;
-    if (name == null) return true;
+    if (name == null) return RemoteSessionTerminationOutcome.terminated;
     try {
+      _session.close();
       final result = await _client
-          .runWithResult(TmuxRemoteTerminalLauncher.killCommandFor(name))
-          .timeout(const Duration(seconds: 5));
-      return result.exitCode == 0 ||
-          result.exitCode == TmuxRemoteTerminalLauncher.sessionNotFoundExitCode;
+          .runWithResult(
+            TmuxRemoteTerminalLauncher.killCommandFor(
+              name,
+              detachGrace: _ownClientDetachGrace,
+            ),
+          )
+          .timeout(_ownClientDetachGrace + const Duration(seconds: 5));
+      return remoteSessionTerminationOutcomeOf(result.exitCode);
     } catch (_) {
-      return false;
+      return RemoteSessionTerminationOutcome.failed;
     }
   }
+
+  /// 채널을 닫은 뒤 서버의 tmux가 이 기기의 client를 정리하기까지 기다리는
+  /// 최대 시간. 다른 기기가 붙어 있을 때만 끝까지 기다린다.
+  static const _ownClientDetachGrace = Duration(seconds: 3);
 }
 
 /// 셸 없이 인증만 마친 SSH 연결. 같은 연결 위에서 포워딩 채널을 연다.
@@ -315,6 +353,7 @@ class SshService {
     List<Host> jumpHosts = const [],
     SshTargetSocketOpener? targetSocket,
     String? remoteSessionId,
+    bool expectRemoteSession = false,
   }) async {
     final List<SSHClient> established;
     switch (await _establishChain(
@@ -344,6 +383,7 @@ class SshService {
         pty: pty,
 
         remoteSessionId: remoteSessionId,
+        expectExisting: expectRemoteSession,
       );
       var fellBackToDirectSsh = false;
       // tmux가 명시적으로 없는 경우에만 인증된 같은 SSH 연결에서 일반 셸을
@@ -378,6 +418,7 @@ class SshService {
           jumpClients,
           persistentSessionName: launch.persistentSessionName,
           resumedPersistentSession: launch.resumedPersistentSession,
+          recreatedPersistentSession: launch.recreatedPersistentSession,
           fellBackToDirectSsh: fellBackToDirectSsh,
         ),
       );

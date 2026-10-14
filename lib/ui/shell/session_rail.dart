@@ -1,4 +1,5 @@
 import 'session_close_dialog.dart';
+import '../common/activity_clock.dart';
 import '../settings/terminal_preferences_editor.dart';
 import '../../session/session_pane_layout.dart';
 import 'panes/pane_preset_icon.dart';
@@ -33,7 +34,6 @@ class SessionRail extends ConsumerWidget {
     required this.onDuplicateSession,
     required this.onOpenSettings,
     this.onLaunchAgent,
-    this.onReviewAgentChanges,
     this.onOpenAgentWorktrees,
     this.width = 264,
     this.onCollapse,
@@ -47,7 +47,6 @@ class SessionRail extends ConsumerWidget {
   final Future<void> Function(SessionInfo session) onDuplicateSession;
   final Future<void> Function(SessionInfo session, AgentLaunchSpec spec)?
   onLaunchAgent;
-  final Future<void> Function(SessionInfo session)? onReviewAgentChanges;
   final VoidCallback? onOpenAgentWorktrees;
   final VoidCallback onOpenSettings;
   final double width;
@@ -109,14 +108,6 @@ class SessionRail extends ConsumerWidget {
             icon: Icons.smart_toy_outlined,
             label: '새 Agent 세션',
           ),
-        if (onReviewAgentChanges != null &&
-            session.agentWorkspace != null &&
-            session.status == SessionStatus.connected)
-          _SessionMenuItem(
-            value: _SessionAction.reviewAgentChanges,
-            icon: Icons.difference_outlined,
-            label: 'Agent 변경 검토',
-          ),
         _SessionMenuItem(
           value: _SessionAction.duplicate,
           icon: Icons.copy_all_outlined,
@@ -144,7 +135,8 @@ class SessionRail extends ConsumerWidget {
           label: '이름 변경',
         ),
         if (session.host.keepsRemoteSession &&
-            session.status == SessionStatus.connected)
+            session.status == SessionStatus.connected &&
+            !session.fellBackToDirectSsh)
           _SessionMenuItem(
             value: _SessionAction.remoteSessions,
             icon: Icons.inventory_2_outlined,
@@ -182,8 +174,6 @@ class SessionRail extends ConsumerWidget {
         if (spec != null && context.mounted) {
           await onLaunchAgent!(session, spec);
         }
-      case _SessionAction.reviewAgentChanges:
-        await onReviewAgentChanges!(session);
       case _SessionAction.duplicate:
         await onDuplicateSession(session);
       case _SessionAction.moveGroup:
@@ -605,7 +595,6 @@ enum _SessionAction {
   terminalSettings,
   hostTerminalDefaults,
   launchAgent,
-  reviewAgentChanges,
   duplicate,
   moveGroup,
   rename,
@@ -618,33 +607,62 @@ class _SessionMenuItem extends PopupMenuItem<_SessionAction> {
     required _SessionAction value,
     required IconData icon,
     required String label,
+    String? detail,
   }) : super(
          value: value,
-         height: 46,
-         child: _SessionMenuItemBody(icon: icon, label: label),
+         height: detail == null ? 46 : 58,
+         child: _SessionMenuItemBody(icon: icon, label: label, detail: detail),
        );
 }
 
 class _SessionMenuItemBody extends StatelessWidget {
-  const _SessionMenuItemBody({required this.icon, required this.label});
+  const _SessionMenuItemBody({
+    required this.icon,
+    required this.label,
+    this.detail,
+  });
 
   final IconData icon;
   final String label;
 
+  /// 항목 아래 작은 상태 줄(진행 중·실패 원인).
+  final String? detail;
+
   @override
   Widget build(BuildContext context) {
+    final title = Text(
+      label,
+      style: const TextStyle(
+        color: VibeColors.onSurfaceMuted,
+        fontWeight: FontWeight.w600,
+        fontSize: 14,
+      ),
+    );
     return Row(
       children: [
         Icon(icon, color: VibeColors.onSurfaceMuted, size: 19),
         const SizedBox(width: 14),
-        Text(
-          label,
-          style: const TextStyle(
-            color: VibeColors.onSurfaceMuted,
-            fontWeight: FontWeight.w600,
-            fontSize: 14,
-          ),
-        ),
+        if (detail case final detail?)
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                title,
+                Text(
+                  detail,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: VibeColors.onSurfaceMuted,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          )
+        else
+          title,
       ],
     );
   }
@@ -1489,12 +1507,7 @@ class _BusyIndicator extends StatelessWidget {
         child: SizedBox(
           width: 13,
           height: 13,
-          child: RepaintBoundary(
-            child: CircularProgressIndicator(
-              strokeWidth: 1.8,
-              color: VibeColors.accent,
-            ),
-          ),
+          child: ActivitySpinner(color: VibeColors.accent),
         ),
       ),
     );

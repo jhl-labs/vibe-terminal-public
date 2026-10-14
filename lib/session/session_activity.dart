@@ -27,6 +27,11 @@ class SessionActivityTracker extends Notifier<Map<String, bool>> {
 
   /// 출력 활동 중 화면을 다시 읽어 Agent 상태를 분류하는 최소 간격.
   static const screenInspectInterval = Duration(milliseconds: 250);
+
+  /// 사용자가 보고 있지 않은 세션의 화면 재분류 간격. 레일·칸 테두리 표시가
+  /// 조금 늦어도 되고, 세션이 많을 때 배경 세션들의 화면 읽기와 정규식이 입력을
+  /// 막지 않게 한다. idle 전환 때는 간격과 무관하게 최신 화면으로 판정한다.
+  static const backgroundInspectInterval = Duration(seconds: 1);
   final Set<String> _notifiedTaskIds = {};
 
   @override
@@ -54,7 +59,7 @@ class SessionActivityTracker extends Notifier<Map<String, bool>> {
   ///
   /// 화면은 [screen]으로 직접 주거나 [readScreen]으로 지연 제공한다. 화면
   /// 추출(80줄 getText)과 Agent 분류(정규식)는 비싸므로 [screenInspectInterval]
-  /// 마다 한 번만 수행한다. 출력 flush는 세션마다 16ms 간격으로 오기 때문에
+  /// (보고 있지 않은 세션은 [backgroundInspectInterval])마다 한 번만 수행한다. 출력 flush는 세션마다 16ms 간격으로 오기 때문에
   /// 매번 분류하면 세션 수 × 60Hz 의 문자열·정규식 작업이 UI 아이솔레이트를
   /// 점유해 세션이 많을 때 입력이 밀린다. idle 판정([_toIdle])에서는 그 시점의
   /// 최신 화면을 다시 읽어 마지막 프롬프트 줄을 놓치지 않는다.
@@ -75,10 +80,11 @@ class SessionActivityTracker extends Notifier<Map<String, bool>> {
     final now = _now();
     final lastInspected = _lastInspectedAt[id];
     final eager = screen.isNotEmpty;
-    if (!eager &&
-        lastInspected != null &&
-        now.difference(lastInspected) < screenInspectInterval) {
-      return;
+    if (!eager && lastInspected != null) {
+      final interval = _userIsWatching(id)
+          ? screenInspectInterval
+          : backgroundInspectInterval;
+      if (now.difference(lastInspected) < interval) return;
     }
     final latest = eager ? screen : (readScreen?.call() ?? '');
     _lastInspectedAt[id] = now;

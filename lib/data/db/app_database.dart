@@ -323,7 +323,9 @@ class AppDatabase extends _$AppDatabase {
     return LazyDatabase(() async {
       final dir = await getApplicationSupportDirectory();
       final file = File(p.join(dir.path, 'vibe_terminal.sqlite'));
-      return NativeDatabase(file);
+      // 쿼리와 디스크 쓰기(fsync)를 백그라운드 isolate에서 처리한다. 세션 로그
+      // 개수 갱신처럼 세션 수에 비례하는 쓰기가 UI isolate를 막지 않게 한다.
+      return NativeDatabase.createInBackground(file);
     });
   }
 

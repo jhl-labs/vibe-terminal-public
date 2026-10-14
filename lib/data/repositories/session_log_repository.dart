@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:drift/drift.dart';
 import 'package:path/path.dart' as p;
@@ -184,6 +185,10 @@ class SessionLogRepository {
 
   /// 표시 상한을 적용한 평문과 잘림 여부를 함께 돌려준다.
   Future<SessionLogText> readPlainTextDetailed(SessionLog log) async {
+    // 기록 중인 로그는 모아 둔 출력부터 파일에 쓴 뒤 읽는다.
+    for (final writer in _openWriters.toList()) {
+      if (writer.id == log.id) await writer.flushPendingWrites();
+    }
     final file = File(log.logPath);
     if (!await file.exists()) return SessionLogText.empty;
     final length = await file.length();
@@ -446,6 +451,12 @@ class SessionLogWriter {
   Timer? _inputFlushTimer;
   Future<void>? _finishFuture;
   Future<void> _pendingWrite = Future.value();
+
+  /// 출력 조각마다 파일을 열고 닫지 않도록 잠깐 모았다가 한 번에 쓴다.
+  final _outputBuffer = BytesBuilder();
+  Timer? _bufferTimer;
+  static const _bufferDelay = Duration(milliseconds: 250);
+  static const _maxBufferedBytes = 64 * 1024;
   Future<void>? _pendingCountUpdate;
   final _inputBuffer = StringBuffer();
   String _currentOutputLine = '';
@@ -484,15 +495,28 @@ class SessionLogWriter {
 
   void _append(List<int> data) {
     if (_closed) return;
-    final chunk = List<int>.from(data, growable: false);
-    _pendingWrite = _pendingWrite.then(
-      (_) => _file.writeAsBytes(chunk, mode: FileMode.append),
-    );
+    _outputBuffer.add(data);
     _byteCount += data.length;
     for (final byte in data) {
       if (byte == 0x0A) _lineCount++;
     }
+    if (_outputBuffer.length >= _maxBufferedBytes) {
+      _drainBuffer();
+    } else {
+      _bufferTimer ??= Timer(_bufferDelay, _drainBuffer);
+    }
     _scheduleFlush();
+  }
+
+  /// 모아 둔 출력을 파일 쓰기 큐에 넣는다.
+  void _drainBuffer() {
+    _bufferTimer?.cancel();
+    _bufferTimer = null;
+    if (_outputBuffer.isEmpty) return;
+    final chunk = _outputBuffer.takeBytes();
+    _pendingWrite = _pendingWrite.then(
+      (_) => _file.writeAsBytes(chunk, mode: FileMode.append),
+    );
   }
 
   /// 예약된 디스크 쓰기가 모두 끝날 때까지 기다린다.
@@ -502,6 +526,7 @@ class SessionLogWriter {
   /// 부하에 따라 결과가 달라지지 않는다.
   Future<void> flushPendingWrites() async {
     _flushInputBuffer();
+    _drainBuffer();
     await _pendingWrite;
   }
 
@@ -526,6 +551,7 @@ class SessionLogWriter {
     _inputFlushTimer?.cancel();
     _inputFlushTimer = null;
     _flushInputBuffer();
+    _drainBuffer();
     _closed = true;
     await _pendingWrite;
     // 예약 갱신이 종료 기록보다 늦게 끝나면 최종 개수를 이전 값으로 덮는다.
@@ -553,18 +579,21 @@ class SessionLogWriter {
     });
   }
 
+  /// 비밀번호 프롬프트 감지에는 현재 줄의 끝부분만 필요하다. 조각 전체를
+  /// 디코드하고 ANSI를 지우지 않고, 마지막 줄바꿈 뒤의 바이트만 본다.
+  /// CR·LF는 ASCII라서 UTF-8 문자나 제어 시퀀스 중간에 나오지 않는다.
   void _rememberOutput(List<int> data) {
     if (data.isEmpty) return;
+    final lineBreak = data.lastIndexWhere(
+      (byte) => byte == 0x0A || byte == 0x0D,
+    );
+    var start = lineBreak + 1;
+    const maxTailBytes = 4096;
+    if (data.length - start > maxTailBytes) start = data.length - maxTailBytes;
     final text = _stripAnsi(
-      utf8.decode(data, allowMalformed: true),
-    ).replaceAll('\r\n', '\n').replaceAll('\r', '\n');
-    if (text.isEmpty) return;
-    final newline = text.lastIndexOf('\n');
-    if (newline >= 0) {
-      _currentOutputLine = text.substring(newline + 1);
-    } else {
-      _currentOutputLine += text;
-    }
+      utf8.decode(data.sublist(start), allowMalformed: true),
+    );
+    _currentOutputLine = lineBreak >= 0 ? text : _currentOutputLine + text;
     const maxPromptChars = 500;
     if (_currentOutputLine.length > maxPromptChars) {
       _currentOutputLine = _currentOutputLine.substring(
