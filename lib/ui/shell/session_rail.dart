@@ -21,9 +21,8 @@ import '../../session/session_attention.dart';
 import '../../session/session_group.dart';
 import '../../state/providers.dart';
 import 'agent_brand.dart';
-import 'agent_launch_dialog.dart';
 import 'release_notes_dialog.dart';
-import 'remote_session_manager_dialog.dart';
+import '../../session/server_work_tabs.dart';
 import 'session_group_manager.dart';
 
 /// 좌측 세로탭 세션 패널. 데스크톱 레일/모바일 drawer 양쪽에서 재사용.
@@ -33,7 +32,6 @@ class SessionRail extends ConsumerWidget {
     required this.onNewSession,
     required this.onDuplicateSession,
     required this.onOpenSettings,
-    this.onLaunchAgent,
     this.onOpenAgentWorktrees,
     this.width = 264,
     this.onCollapse,
@@ -45,8 +43,6 @@ class SessionRail extends ConsumerWidget {
 
   final VoidCallback onNewSession;
   final Future<void> Function(SessionInfo session) onDuplicateSession;
-  final Future<void> Function(SessionInfo session, AgentLaunchSpec spec)?
-  onLaunchAgent;
   final VoidCallback? onOpenAgentWorktrees;
   final VoidCallback onOpenSettings;
   final double width;
@@ -102,12 +98,6 @@ class SessionRail extends ConsumerWidget {
         side: const BorderSide(color: VibeColors.borderSoft),
       ),
       items: [
-        if (onLaunchAgent != null && session.status == SessionStatus.connected)
-          _SessionMenuItem(
-            value: _SessionAction.launchAgent,
-            icon: Icons.smart_toy_outlined,
-            label: '새 Agent 세션',
-          ),
         _SessionMenuItem(
           value: _SessionAction.duplicate,
           icon: Icons.copy_all_outlined,
@@ -152,28 +142,6 @@ class SessionRail extends ConsumerWidget {
     if (action == null || !context.mounted) return;
 
     switch (action) {
-      case _SessionAction.launchAgent:
-        final cwd = await ref
-            .read(sessionManagerProvider.notifier)
-            .currentWorkingDirectoryOf(session.id);
-        if (!context.mounted) return;
-        final spec = await showAgentLaunchDialog(
-          context,
-          preferences: ref.read(appSettingsProvider).agentLaunch,
-          initialWorkingDirectory: cwd,
-          saveProfile: ref
-              .read(appSettingsProvider.notifier)
-              .saveAgentLaunchProfile,
-          removeProfile: ref
-              .read(appSettingsProvider.notifier)
-              .removeAgentLaunchProfile,
-          onModelUsed: ref
-              .read(appSettingsProvider.notifier)
-              .rememberAgentLaunchModel,
-        );
-        if (spec != null && context.mounted) {
-          await onLaunchAgent!(session, spec);
-        }
       case _SessionAction.duplicate:
         await onDuplicateSession(session);
       case _SessionAction.moveGroup:
@@ -185,13 +153,16 @@ class SessionRail extends ConsumerWidget {
       case _SessionAction.rename:
         await _renameSession(context, ref, session);
       case _SessionAction.remoteSessions:
-        await showRemoteSessionManagerDialog(context, session);
+        FocusScope.of(context).unfocus();
+        ref.read(serverWorkTabsProvider.notifier).open(session);
+        onSessionSelected?.call();
       case _SessionAction.close:
         await requestCloseSession(context, ref, session);
     }
   }
 
   void _activateGroup(WidgetRef ref, String groupId) {
+    ref.read(serverWorkTabsProvider.notifier).showTerminal();
     ref.read(sessionGroupProvider.notifier).setActive(groupId);
     final currentActiveId = ref.read(activeSessionIdProvider);
     final groupSessions = [
@@ -389,6 +360,10 @@ class SessionRail extends ConsumerWidget {
         if (session.groupId == activeGroupId) session,
     ];
     final activeId = ref.watch(activeSessionIdProvider);
+    final archiveState = ref.watch(serverWorkTabsProvider);
+    final archiveTabs = archiveState.tabs.where(
+      (tab) => tab.groupId == activeGroupId,
+    );
     final mgr = ref.read(sessionManagerProvider.notifier);
     final sessionCounts = <String, int>{};
     for (final session in allSessions) {
@@ -477,6 +452,27 @@ class SessionRail extends ConsumerWidget {
                   : _SessionList(
                       groupId: activeGroupId,
                       sessions: sessions,
+                      trailing: [
+                        for (final tab in archiveTabs)
+                          if (tab.connection(allSessions)
+                              case final connection?)
+                            _ServerWorkTabTile(
+                              key: ValueKey('server-work-tab-${tab.id}'),
+                              hostAlias: connection.host.alias,
+                              selected: archiveState.activeId == tab.id,
+                              busy: archiveState.busyIds.contains(tab.id),
+                              onTap: () {
+                                FocusScope.of(context).unfocus();
+                                ref
+                                    .read(serverWorkTabsProvider.notifier)
+                                    .select(tab.id);
+                                onSessionSelected?.call();
+                              },
+                              onClose: () => ref
+                                  .read(serverWorkTabsProvider.notifier)
+                                  .close(tab.id),
+                            ),
+                      ],
                       onReorder: (oldIndex, slot) => mgr.moveSessionInGroup(
                         activeGroupId,
                         oldIndex,
@@ -496,7 +492,8 @@ class SessionRail extends ConsumerWidget {
                                   1,
                             ),
                           ),
-                          selected: s.id == activeId,
+                          selected:
+                              archiveState.activeId == null && s.id == activeId,
                           statusColor: _statusColor(s.status),
                           busy: tileRef.watch(
                             sessionActivityProvider.select(
@@ -509,6 +506,9 @@ class SessionRail extends ConsumerWidget {
                             ),
                           ),
                           onTap: () {
+                            ref
+                                .read(serverWorkTabsProvider.notifier)
+                                .showTerminal();
                             ref
                                 .read(activeSessionIdProvider.notifier)
                                 .set(s.id);
@@ -594,7 +594,6 @@ class _SessionRenameDialogState extends State<_SessionRenameDialog> {
 enum _SessionAction {
   terminalSettings,
   hostTerminalDefaults,
-  launchAgent,
   duplicate,
   moveGroup,
   rename,
@@ -1576,10 +1575,12 @@ class _SessionList extends StatefulWidget {
     required this.sessions,
     required this.tileBuilder,
     required this.onReorder,
+    this.trailing = const [],
   });
 
   final String groupId;
   final List<SessionInfo> sessions;
+  final List<Widget> trailing;
 
   final Widget Function(
     BuildContext context,
@@ -1863,9 +1864,62 @@ class _SessionListState extends State<_SessionList>
       builder: (context, _, _) => ListView.builder(
         controller: _scroll,
         padding: const EdgeInsets.all(10),
-        itemCount: widget.sessions.length,
-        itemBuilder: _row,
+        itemCount: widget.sessions.length + widget.trailing.length,
+        itemBuilder: (context, index) => index < widget.sessions.length
+            ? _row(context, index)
+            : Padding(
+                padding: const EdgeInsets.only(top: _gap),
+                child: widget.trailing[index - widget.sessions.length],
+              ),
       ),
     );
   }
+}
+
+class _ServerWorkTabTile extends StatelessWidget {
+  const _ServerWorkTabTile({
+    super.key,
+    required this.hostAlias,
+    required this.selected,
+    required this.busy,
+    required this.onTap,
+    required this.onClose,
+  });
+
+  final String hostAlias;
+  final bool selected;
+  final bool busy;
+  final VoidCallback onTap;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) => Material(
+    color: selected ? VibeColors.accentSoft : VibeColors.surfaceHigh,
+    borderRadius: BorderRadius.circular(8),
+    child: ListTile(
+      contentPadding: const EdgeInsets.only(left: 12, right: 4),
+      leading: const Icon(
+        Icons.inventory_2_outlined,
+        size: 19,
+        color: VibeColors.accent,
+      ),
+      title: const Text(
+        '서버 작업 보관함',
+        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+      ),
+      subtitle: Text(
+        hostAlias,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontSize: 11),
+      ),
+      selected: selected,
+      onTap: onTap,
+      trailing: IconButton(
+        tooltip: '보관함 탭 닫기',
+        onPressed: busy ? null : onClose,
+        icon: const Icon(Icons.close, size: 16),
+      ),
+    ),
+  );
 }

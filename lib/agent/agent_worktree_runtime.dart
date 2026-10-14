@@ -3,14 +3,12 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
-import 'package:path/path.dart' as p;
 
 import '../data/models/host.dart';
 import '../local/managed_process.dart';
 import 'agent_conflict.dart';
 import 'agent_integration.dart';
 import 'agent_integration_script.dart';
-import 'agent_launcher.dart';
 import 'agent_source_control.dart';
 import 'agent_workspace_test.dart';
 import 'agent_workspace_files.dart';
@@ -37,18 +35,6 @@ typedef RemoteAgentGitExecutor =
       required List<String> arguments,
       required String? workingDirectory,
     });
-
-class AgentWorktreeLocation {
-  const AgentWorktreeLocation({
-    required this.repositoryRoot,
-    required this.worktreePath,
-    required this.baseRef,
-  });
-
-  final String repositoryRoot;
-  final String worktreePath;
-  final String baseRef;
-}
 
 class AgentWorktreeInspection {
   const AgentWorktreeInspection({required this.exists, required this.gitState});
@@ -675,75 +661,6 @@ class AgentWorktreeRuntime {
         '해당 파일도 선택하거나 터미널에서 unstage해 주세요.',
       );
     }
-  }
-
-  Future<AgentWorktreeLocation> resolveLocation({
-    required Host host,
-    required String? preferredSessionId,
-    required String? workingDirectory,
-    required AgentLaunchSpec spec,
-  }) async {
-    final rootResult = await _runGit(
-      host: host,
-      preferredSessionId: preferredSessionId,
-      arguments: const ['rev-parse', '--show-toplevel'],
-      workingDirectory: workingDirectory,
-    );
-    final repositoryRoot = rootResult.stdout.trim();
-    if (rootResult.exitCode != 0 || repositoryRoot.isEmpty) {
-      final where = workingDirectory?.trim();
-      throw AgentWorktreeRuntimeException(
-        _failureMessage(
-          rootResult,
-          where == null || where.isEmpty
-              ? '현재 위치가 Git 저장소가 아닙니다. 실행 대화상자에서 저장소 폴더를 지정하세요.'
-              : "'$where'은(는) Git 저장소가 아닙니다. 실행 대화상자에서 저장소 폴더를 확인하세요.",
-        ),
-      );
-    }
-
-    var baseResult = await _runGit(
-      host: host,
-      preferredSessionId: preferredSessionId,
-      arguments: const ['symbolic-ref', '--quiet', '--short', 'HEAD'],
-      workingDirectory: repositoryRoot,
-    );
-    if (baseResult.exitCode != 0 || baseResult.stdout.trim().isEmpty) {
-      baseResult = await _runGit(
-        host: host,
-        preferredSessionId: preferredSessionId,
-        arguments: const ['rev-parse', 'HEAD'],
-        workingDirectory: repositoryRoot,
-      );
-    }
-    final baseRef = baseResult.stdout.trim();
-    if (baseResult.exitCode != 0 || baseRef.isEmpty) {
-      throw AgentWorktreeRuntimeException(
-        _failureMessage(baseResult, '기준 Git ref를 확인하지 못했습니다.'),
-      );
-    }
-
-    final directoryName = spec.branchName!.trim().replaceAll('/', '-');
-    final nativeWindows =
-        host.isLocalShell &&
-        Platform.isWindows &&
-        host.localShellType != LocalShellType.wsl;
-    final worktreePath = nativeWindows
-        ? p.windows.join(
-            p.windows.dirname(repositoryRoot),
-            '.vibe-worktrees',
-            directoryName,
-          )
-        : p.posix.join(
-            p.posix.dirname(repositoryRoot),
-            '.vibe-worktrees',
-            directoryName,
-          );
-    return AgentWorktreeLocation(
-      repositoryRoot: repositoryRoot,
-      worktreePath: worktreePath,
-      baseRef: baseRef,
-    );
   }
 
   Future<AgentWorktreeInspection> inspect({

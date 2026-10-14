@@ -461,7 +461,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         _persistOpenSessions();
         return id;
     }
-    if (_closedWith.containsKey(id) || !state.any((session) => session.id == id)) {
+    if (_closedWith.containsKey(id) ||
+        !state.any((session) => session.id == id)) {
       return id;
     }
 
@@ -687,98 +688,6 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       }
     }
     return duplicateId;
-  }
-
-  /// 현재 세션의 연결·작업 위치를 복제하고 선택한 CLI Agent를 실행한다.
-  ///
-  /// worktree 생성은 사용자가 실행 대화상자에서 명시적으로 선택한 경우에만
-  /// 수행한다. 명령 생성은 [AgentLaunchCommandBuilder]에 위임해 세션 관리자가
-  /// 셸 문법과 Git 정책을 직접 알지 않도록 한다.
-  Future<String> launchAgentSession(
-    String id,
-    AgentLaunchSpec spec, {
-    required Future<bool> Function(String, String, String, HostKeyVerdict)
-    onHostKey,
-  }) async {
-    final source = _sessionById(id);
-    if (source == null) return id;
-
-    final shell = _agentShellFlavor(source.host);
-    var command = const AgentLaunchCommandBuilder().build(spec, shell);
-    AgentWorktreeRecord? worktree;
-    var workspace = spec.toWorkspaceContext();
-    if (spec.isolatedWorktree) {
-      await _agentWorktreeInitialization;
-      final workingDirectory =
-          _cleanWorkingDirectory(spec.repositoryDirectory) ??
-          await currentWorkingDirectoryOf(source.id);
-      final location = await _worktreeRuntime.resolveLocation(
-        host: source.host,
-        preferredSessionId: source.id,
-        workingDirectory: workingDirectory,
-        spec: spec,
-      );
-      // 새 세션은 원본 세션의 폴더에서 열리므로, 실행 대화상자에서 고른
-      // 저장소로 먼저 이동해야 기록한 worktree 위치와 실제 위치가 같아진다.
-      command = const AgentLaunchCommandBuilder().build(
-        spec,
-        shell,
-        repositoryRoot: location.repositoryRoot,
-      );
-      worktree = AgentWorktreeRecord(
-        id: 'aw-${DateTime.now().microsecondsSinceEpoch}-${_randomHex(4)}',
-        hostId: source.host.id,
-        hostAlias: source.host.alias,
-        groupId: source.groupId,
-        cli: spec.cli,
-        executable: spec.executable,
-        initialGoal: spec.initialGoal,
-        model: spec.model,
-        arguments: List.unmodifiable(spec.arguments),
-        branchName: spec.branchName!.trim(),
-        baseRef: location.baseRef,
-        repositoryRoot: location.repositoryRoot,
-        worktreePath: location.worktreePath,
-        createdAt: DateTime.now(),
-        lifecycle: AgentWorktreeLifecycle.provisioning,
-      );
-      workspace = worktree.toWorkspaceContext();
-      await ref.read(agentWorktreeStoreProvider).upsert(worktree);
-    }
-    final launchedId = await duplicateSession(
-      id,
-      onHostKey: onHostKey,
-      agentWorkspace: workspace,
-    );
-    final launched = _sessionById(launchedId);
-    if (launched?.status != SessionStatus.connected) {
-      if (worktree != null) {
-        await ref
-            .read(agentWorktreeStoreProvider)
-            .upsert(
-              worktree.copyWith(
-                lifecycle: AgentWorktreeLifecycle.stranded,
-                lastError: launched?.error ?? 'Agent 세션 연결에 실패했습니다.',
-              ),
-            );
-      }
-      return launchedId;
-    }
-
-    renameSession(launchedId, '${spec.cli.label} · ${source.displayName}');
-    if (worktree != null) {
-      final activeWorktree = worktree.copyWith(
-        lifecycle: AgentWorktreeLifecycle.active,
-        sessionId: launchedId,
-        localSessionId: launched?.localSessionId,
-        lastError: null,
-      );
-      await ref.read(agentWorktreeStoreProvider).upsert(activeWorktree);
-      unawaited(_inspectAgentWorktreeAfterLaunch(activeWorktree));
-    }
-    launched!.engine.terminal.textInput(command);
-    launched.engine.terminal.keyInput(TerminalKey.enter);
-    return launchedId;
   }
 
   /// Agent의 TUI 입력 상태를 건드리지 않고 같은 작업 디렉터리에서 읽기 전용
@@ -1765,7 +1674,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     await store.upsert(entry);
     // 준비에 실패하면 탭을 닫는다. 이번에 새로 만든 서버 작업이면 같이 끝내
     // 이름만 붙은 빈 셸이 보관함에 남지 않게 한다.
-    final createdRemoteWork = reusableShell == null &&
+    final createdRemoteWork =
+        reusableShell == null &&
         _sshHandles[sessionId]?.isPersistent == true &&
         _sshHandles[sessionId]?.resumedPersistentSession == false;
     Future<void> abandon() => createdRemoteWork
@@ -2184,24 +2094,6 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   /// 기록이 missing으로 저장되면서 세션 연결(sessionId)까지 지워져, 실행 중인
   /// Agent가 "중단됨"으로 보인다. 그래서 생길 때까지는 존재만 확인하고 기록을
   /// 건드리지 않는다.
-  Future<void> _inspectAgentWorktreeAfterLaunch(
-    AgentWorktreeRecord entry,
-  ) async {
-    const delays = [350, 700, 1000, 2000, 3000, 5000];
-    for (final delay in delays) {
-      await Future<void>.delayed(Duration(milliseconds: delay));
-      try {
-        final host = await _hostForWorktree(entry);
-        final probe = await _worktreeRuntime.inspect(entry: entry, host: host);
-        if (!probe.exists) continue;
-        await inspectAgentWorktree(entry.id);
-        return;
-      } catch (_) {
-        // 생성 명령과 경합할 수 있으므로 재시도한다.
-      }
-    }
-  }
-
   Future<void> _markAgentWorktreeActiveIfResumed(
     SessionInfo session,
     SshSessionHandle handle,
@@ -2736,7 +2628,9 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   }
 
   void _handleSshSessionClosed(String id, SshSessionHandle handle) {
-    if (_closedWith.containsKey(id) || !identical(_sshHandles[id], handle)) return;
+    if (_closedWith.containsKey(id) || !identical(_sshHandles[id], handle)) {
+      return;
+    }
     ref
         .read(sessionDiagnosticsProvider.notifier)
         .record(

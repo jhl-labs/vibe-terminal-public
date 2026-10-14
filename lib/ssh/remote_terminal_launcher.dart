@@ -121,7 +121,9 @@ class TmuxRemoteTerminalLauncher implements RemoteTerminalLauncher {
     final quotedOwnerId = _quote(expectedOwnerId);
     // if-shell -F는 셸 작업 없이 같은 tmux 명령 큐에서 검사와 종료를 실행한다.
     // 앞선 대기 루프가 끝난 직후 새 client가 붙어도 마지막 검사에서 보호한다.
-    final target = '=$persistentSessionName';
+    // if-shell은 pane 대상을 받는다. ':'로 세션 부분을 명시해야 구형 tmux도
+    // 정확한 이름의 세션에서 옵션과 접속자 수를 읽는다.
+    final target = '=$persistentSessionName:';
     String guard(String condition, String command, int failure) =>
         'if-shell -F -t ${_quote(target)} ${_quote(condition)} '
         '${_quote(command)} ${_quote("run-shell 'exit $failure'")}';

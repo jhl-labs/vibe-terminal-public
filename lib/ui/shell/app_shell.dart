@@ -1,7 +1,8 @@
 import '../../ai/ai_chat_service.dart';
 import '../../ai/secret_masker.dart';
-import 'agent_issues_dialog.dart';
 import 'session_pane_deck.dart';
+import 'server_work_tab_deck.dart';
+import '../../session/server_work_tabs.dart';
 import 'session_close_dialog.dart';
 import 'panes/session_pane_activity_frame.dart';
 import 'panes/pane_preset_icon.dart';
@@ -48,7 +49,7 @@ import '../settings/settings_sheet.dart';
 import '../terminal/action_bar_catalog.dart';
 import '../terminal/extra_keys_bar.dart';
 import '../terminal/session_terminal_view.dart';
-import 'agent_launch_dialog.dart';
+import '../terminal/gui/terminal_gui_mode.dart';
 import 'agent_source_control_dialog.dart';
 import 'agent_worktrees_dialog.dart';
 import 'agent_integration_dialog.dart';
@@ -267,58 +268,6 @@ class _AppShellState extends ConsumerState<AppShell> {
           embedded: true,
           title: worktree.branchName,
           onClose: () => setState(() => _workspaceOpen = false),
-          onIssues: () async {
-            final goal = await showAgentIssuesDialog(
-              context,
-              () => manager.agentWorkspaceIssues(worktree.id),
-            );
-            if (goal == null || !mounted) return;
-            final source = ref
-                .read(sessionManagerProvider)
-                .where(
-                  (s) =>
-                      s.status == SessionStatus.connected &&
-                      s.agentWorkspace?.workspaceId == worktree.id,
-                )
-                .firstOrNull;
-            if (source == null) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('작업공간을 재개한 뒤 이슈를 가져오세요.')),
-              );
-              return;
-            }
-            final spec = await showAgentLaunchDialog(
-              context,
-              preferences: ref.read(appSettingsProvider).agentLaunch,
-              initialCli: worktree.cli,
-              initialGoal: goal,
-              initialWorkingDirectory: worktree.repositoryRoot,
-              saveProfile: ref
-                  .read(appSettingsProvider.notifier)
-                  .saveAgentLaunchProfile,
-              removeProfile: ref
-                  .read(appSettingsProvider.notifier)
-                  .removeAgentLaunchProfile,
-              onModelUsed: ref
-                  .read(appSettingsProvider.notifier)
-                  .rememberAgentLaunchModel,
-            );
-            if (spec == null || !mounted) return;
-            try {
-              final id = await manager.launchAgentSession(
-                source.id,
-                spec,
-                onHostKey: (a, t, fp, v) => _onHostKey(context, a, t, fp, v),
-              );
-              if (mounted) ref.read(activeSessionIdProvider.notifier).set(id);
-            } catch (error) {
-              if (mounted) {
-                ScaffoldMessenger.of(
-                  context,
-                ).showSnackBar(SnackBar(content: Text('$error')));
-              }
-            }
-          },
           onReview: () => _showAgentSourceControl(context, ref, worktree.id),
           resolveDelete: (file) =>
               manager.markAgentWorkspaceFileDeleted(worktree.id, file),
@@ -453,39 +402,7 @@ class _AppShellState extends ConsumerState<AppShell> {
               (ref.read(sessionActivityProvider.notifier).isBusy(id)
                   ? 'working'
                   : 'idle'),
-          spawn: (sourceId, params) async {
-            final cli = AgentCli.values
-                .where((value) => value.name == params['cli'])
-                .firstOrNull;
-            final rawArgs = params['arguments'];
-            if (cli == null ||
-                (rawArgs != null &&
-                    (rawArgs is! List ||
-                        rawArgs.any((arg) => arg is! String)))) {
-              throw ArgumentError('CLI/arguments 형식이 올바르지 않습니다.');
-            }
-            final branch = params['branch'];
-            final isolated = params['isolated'] != false;
-            if (isolated && branch is! String) {
-              throw ArgumentError('격리된 Agent의 branch를 지정하세요.');
-            }
-            // 제어 서버가 이미 거른 값이지만, spawn을 직접 부르는 경로도
-            // 같은 규칙을 지나도록 여기서 한 번 더 정규화한다.
-            final model = validateSpawnModel(params['model']);
-            return ref
-                .read(sessionManagerProvider.notifier)
-                .launchAgentSession(
-                  sourceId,
-                  AgentLaunchSpec(
-                    cli: cli,
-                    isolatedWorktree: isolated,
-                    branchName: branch is String ? branch : null,
-                    arguments: rawArgs is List ? rawArgs.cast<String>() : [],
-                    model: model,
-                  ),
-                  onHostKey: (a, t, fp, v) => _onHostKey(context, a, t, fp, v),
-                );
-          },
+          spawn: (_, _) async => throw UnsupportedError('지원하지 않는 작업입니다.'),
         );
         final directory = await getApplicationSupportDirectory();
         await server.start(
@@ -536,7 +453,9 @@ class _AppShellState extends ConsumerState<AppShell> {
     }
     if (_mobileDrawerOpen) {
       _closeMobileDrawer();
+      return;
     }
+    ref.read(serverWorkTabsProvider.notifier).showTerminal();
   }
 
   void _handleSystemBack() {
@@ -552,6 +471,10 @@ class _AppShellState extends ConsumerState<AppShell> {
       _closeMobileDrawer();
       return;
     }
+    if (ref.read(serverWorkTabsProvider).activeId != null) {
+      ref.read(serverWorkTabsProvider.notifier).showTerminal();
+      return;
+    }
     unawaited(_appChannel.invokeMethod<void>('moveToBackground'));
   }
 
@@ -565,9 +488,12 @@ class _AppShellState extends ConsumerState<AppShell> {
         child: child,
       );
     }
-    if (!_mobileDrawerOpen && !_mobileEndDrawerOpen) return child;
+    // Keep the wrapper mounted when a tab opens, preserving terminal focus state.
     return PopScope<void>(
-      canPop: false,
+      canPop:
+          !_mobileDrawerOpen &&
+          !_mobileEndDrawerOpen &&
+          ref.read(serverWorkTabsProvider).activeId == null,
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) _handleMobileBack();
       },
@@ -696,44 +622,6 @@ class _AppShellState extends ConsumerState<AppShell> {
         );
     if (!context.mounted) return;
     ref.read(activeSessionIdProvider.notifier).set(id);
-  }
-
-  Future<void> _launchAgentSession(
-    BuildContext context,
-    WidgetRef ref,
-    SessionInfo session,
-    AgentLaunchSpec spec,
-  ) async {
-    try {
-      ref
-          .read(appSettingsProvider.notifier)
-          .rememberAgentLaunch(
-            cliName: spec.cli.name,
-            arguments: spec.arguments,
-            isolateByDefault: spec.isolatedWorktree,
-          );
-      final id = await ref
-          .read(sessionManagerProvider.notifier)
-          .launchAgentSession(
-            session.id,
-            spec,
-            onHostKey: (a, t, fp, v) => _onHostKey(context, a, t, fp, v),
-          );
-      if (!context.mounted) return;
-      ref.read(activeSessionIdProvider.notifier).set(id);
-    } on ArgumentError catch (error) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(error.message?.toString() ?? 'Agent 실행 설정이 올바르지 않습니다.'),
-        ),
-      );
-    } catch (error) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('$error'.replaceFirst('Bad state: ', ''))),
-      );
-    }
   }
 
   Future<void> _reviewAgentChanges(
@@ -1085,32 +973,6 @@ class _AppShellState extends ConsumerState<AppShell> {
       }
     }
 
-    Future<void> launch(AgentCli cli) async {
-      if (active == null || !context.mounted) return;
-      final cwd = await ref
-          .read(sessionManagerProvider.notifier)
-          .currentWorkingDirectoryOf(active.id);
-      if (!context.mounted) return;
-      final spec = await showAgentLaunchDialog(
-        context,
-        preferences: ref.read(appSettingsProvider).agentLaunch,
-        initialCli: cli,
-        initialWorkingDirectory: cwd,
-        saveProfile: ref
-            .read(appSettingsProvider.notifier)
-            .saveAgentLaunchProfile,
-        removeProfile: ref
-            .read(appSettingsProvider.notifier)
-            .removeAgentLaunchProfile,
-        onModelUsed: ref
-            .read(appSettingsProvider.notifier)
-            .rememberAgentLaunchModel,
-      );
-      if (spec != null && context.mounted) {
-        await _launchAgentSession(context, ref, active, spec);
-      }
-    }
-
     final entries = <CommandPaletteEntry>[
       for (final preset in PanePreset.values)
         CommandPaletteEntry(
@@ -1211,16 +1073,6 @@ class _AppShellState extends ConsumerState<AppShell> {
         keywords: const ['agent', 'worktree', 'registry', 'resume', 'cleanup'],
         onSelected: () => _openAgentWorktrees(context, ref),
       ),
-      if (active?.status == SessionStatus.connected)
-        for (final cli in AgentCli.values)
-          CommandPaletteEntry(
-            id: 'launch-agent-${cli.name}',
-            label: '새 ${cli.label} Agent',
-            description: '${active!.displayName}에서 병렬 작업 시작',
-            icon: Icons.smart_toy_outlined,
-            keywords: const ['agent', 'worktree', 'spawn'],
-            onSelected: () => launch(cli),
-          ),
       if (active?.agentWorkspace != null)
         CommandPaletteEntry(
           id: 'review-agent',
@@ -1280,6 +1132,10 @@ class _AppShellState extends ConsumerState<AppShell> {
   }
 
   Widget _center(BuildContext context, WidgetRef ref) {
+    return ServerWorkTabDeck(terminal: _terminalWorkspace(context, ref));
+  }
+
+  Widget _terminalWorkspace(BuildContext context, WidgetRef ref) {
     return LayoutBuilder(
       builder: (context, constraints) {
         final keys = _workspacePanels.keys.toList();
@@ -1532,6 +1388,9 @@ class _AppShellState extends ConsumerState<AppShell> {
     final sessions = ref.watch(sessionManagerProvider);
     final activeId = ref.watch(activeSessionIdProvider);
     final activeGroupId = ref.watch(sessionGroupProvider).activeGroupId;
+    final guiOpen = ref.watch(terminalGuiModesProvider).contains(activeId);
+    final archive = ref.watch(serverWorkTabsProvider);
+    final archiveOpen = archive.activeId != null;
     final activePaneLayout =
         ref.watch(sessionPaneLayoutsProvider)[activeGroupId] ??
         const SessionPaneLayout();
@@ -1626,6 +1485,7 @@ class _AppShellState extends ConsumerState<AppShell> {
         child: GestureDetector(
           behavior: HitTestBehavior.translucent,
           onHorizontalDragEnd: (details) {
+            if (archiveOpen || guiOpen) return;
             if (_mobileSessionSwipeGuard.takeShouldBlock()) return;
             final velocity = details.primaryVelocity ?? 0;
             if (velocity.abs() < 240) return;
@@ -1643,6 +1503,8 @@ class _AppShellState extends ConsumerState<AppShell> {
         children: [
           Expanded(child: centerBody),
           if ((compact || usesSoftKeyboard) &&
+              !archiveOpen &&
+              !guiOpen &&
               active != null &&
               active.status == SessionStatus.connected)
             SafeArea(top: false, child: ExtraKeysBar(session: active)),
@@ -1651,7 +1513,7 @@ class _AppShellState extends ConsumerState<AppShell> {
     );
 
     if (compact) {
-      final terminalMenuTokens = active == null
+      final terminalMenuTokens = active == null || archiveOpen
           ? const <String>[]
           : activeTerminalSettings.terminalHeaderItems
                 .where((token) => resolveHeaderToken(token) != null)
@@ -1735,6 +1597,8 @@ class _AppShellState extends ConsumerState<AppShell> {
       }
 
       final compactToolActions = <Widget>[
+        if (!archiveOpen && active != null)
+          TerminalGuiModeButton(sessionId: active.id),
         // 세션 동작: 헤더 동작 토큰 + 알림 음소거 + 세션 닫기.
         Builder(
           builder: (scaffoldContext) => PopupMenuButton<String>(
@@ -1875,7 +1739,9 @@ class _AppShellState extends ConsumerState<AppShell> {
                 children: [
                   Flexible(
                     child: Text(
-                      active?.displayName ?? 'Vibe Terminal',
+                      archiveOpen
+                          ? '서버 작업 보관함'
+                          : active?.displayName ?? 'Vibe Terminal',
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
@@ -1902,10 +1768,6 @@ class _AppShellState extends ConsumerState<AppShell> {
                   onDuplicateSession: (session) async {
                     _closeMobileDrawer();
                     await _duplicateSession(context, ref, session);
-                  },
-                  onLaunchAgent: (session, spec) async {
-                    _closeMobileDrawer();
-                    await _launchAgentSession(context, ref, session, spec);
                   },
                   onOpenAgentWorktrees: () {
                     _closeMobileDrawer();
@@ -1967,8 +1829,6 @@ class _AppShellState extends ConsumerState<AppShell> {
                     onNewSession: () => _newSession(context, ref),
                     onDuplicateSession: (session) =>
                         _duplicateSession(context, ref, session),
-                    onLaunchAgent: (session, spec) =>
-                        _launchAgentSession(context, ref, session, spec),
                     onOpenAgentWorktrees: () =>
                         _openAgentWorktrees(context, ref),
                     onOpenSettings: () => showVibeTerminalSettings(context),
@@ -2058,7 +1918,6 @@ class _ResizableLeftPanel extends ConsumerStatefulWidget {
   const _ResizableLeftPanel({
     required this.onNewSession,
     required this.onDuplicateSession,
-    required this.onLaunchAgent,
     required this.onOpenAgentWorktrees,
     required this.onOpenSettings,
     this.onBulk,
@@ -2068,8 +1927,6 @@ class _ResizableLeftPanel extends ConsumerStatefulWidget {
 
   final VoidCallback onNewSession;
   final Future<void> Function(SessionInfo session) onDuplicateSession;
-  final Future<void> Function(SessionInfo session, AgentLaunchSpec spec)
-  onLaunchAgent;
   final VoidCallback onOpenAgentWorktrees;
   final VoidCallback onOpenSettings;
   final VoidCallback? onBulk, onPreviousSession, onNextSession;
@@ -2137,7 +1994,6 @@ class _ResizableLeftPanelState extends ConsumerState<_ResizableLeftPanel> {
               width: width,
               onNewSession: widget.onNewSession,
               onDuplicateSession: widget.onDuplicateSession,
-              onLaunchAgent: widget.onLaunchAgent,
               onOpenAgentWorktrees: widget.onOpenAgentWorktrees,
               onOpenSettings: widget.onOpenSettings,
               onCollapse: () =>

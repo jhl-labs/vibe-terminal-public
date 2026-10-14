@@ -1,39 +1,39 @@
-import 'dart:math' as math;
 import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/theme.dart';
-import '../adaptive/breakpoints.dart';
 import '../../core/result.dart';
 import '../../session/session.dart';
+import '../../session/server_work_tabs.dart';
 import '../../session/session_manager.dart';
 import '../../ssh/remote_session_catalog.dart';
 import '../../ssh/remote_server_info.dart';
 import '../../state/providers.dart';
 import '../security/keyboard_interactive_prompt.dart';
 
-Future<void> showRemoteSessionManagerDialog(
-  BuildContext context,
-  SessionInfo connection,
-) => showDialog<void>(
-  context: context,
-  builder: (_) => _RemoteSessionManagerDialog(connection: connection),
-);
-
-class _RemoteSessionManagerDialog extends ConsumerStatefulWidget {
-  const _RemoteSessionManagerDialog({required this.connection});
+class RemoteSessionManagerPanel extends ConsumerStatefulWidget {
+  const RemoteSessionManagerPanel({
+    super.key,
+    required this.connection,
+    required this.onClose,
+    required this.onActivated,
+    required this.onBusyChanged,
+  });
 
   final SessionInfo connection;
+  final VoidCallback onClose;
+  final VoidCallback onActivated;
+  final ValueChanged<bool> onBusyChanged;
 
   @override
-  ConsumerState<_RemoteSessionManagerDialog> createState() =>
-      _RemoteSessionManagerDialogState();
+  ConsumerState<RemoteSessionManagerPanel> createState() =>
+      _RemoteSessionManagerPanelState();
 }
 
-class _RemoteSessionManagerDialogState
-    extends ConsumerState<_RemoteSessionManagerDialog> {
+class _RemoteSessionManagerPanelState
+    extends ConsumerState<RemoteSessionManagerPanel> {
   var _loading = true;
   String? _error;
   String? _ownerId;
@@ -45,6 +45,10 @@ class _RemoteSessionManagerDialogState
   RemoteServerInfo? _serverInfo;
   var _serverInfoLoading = true;
   var _batchOpening = false;
+  int _loadEpoch = 0;
+  int _serverInfoEpoch = 0;
+
+  bool get _connected => ServerWorkTab.supports(widget.connection);
 
   bool get _busy =>
       _batchOpening || _opening.isNotEmpty || _terminating.isNotEmpty;
@@ -56,11 +60,28 @@ class _RemoteSessionManagerDialogState
     unawaited(_loadServerInfo());
   }
 
+  @override
+  void didUpdateWidget(covariant RemoteSessionManagerPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.connection.id != widget.connection.id ||
+        ServerWorkTab.supports(oldWidget.connection) != _connected) {
+      _serverInfo = null;
+      _serverInfoLoading = true;
+      unawaited(_load());
+      unawaited(_loadServerInfo());
+    }
+  }
+
   Future<void> _loadServerInfo() async {
+    final epoch = ++_serverInfoEpoch;
+    if (!_connected) {
+      _serverInfoLoading = false;
+      return;
+    }
     final info = await ref
         .read(sessionManagerProvider.notifier)
         .remoteServerInfo(widget.connection.id);
-    if (!mounted) return;
+    if (!mounted || epoch != _serverInfoEpoch) return;
     setState(() {
       _serverInfo = info;
       _serverInfoLoading = false;
@@ -68,6 +89,7 @@ class _RemoteSessionManagerDialogState
   }
 
   bool _canSelect(RemotePersistentSession session) =>
+      _connected &&
       session.name != _currentSessionName &&
       ref
               .read(sessionManagerProvider.notifier)
@@ -78,6 +100,12 @@ class _RemoteSessionManagerDialogState
           null;
 
   Future<void> _load() async {
+    final epoch = ++_loadEpoch;
+    if (!_connected) {
+      setState(() => _loading = false);
+      return;
+    }
+    final connectionId = widget.connection.id;
     if (mounted) {
       setState(() {
         _loading = true;
@@ -86,13 +114,9 @@ class _RemoteSessionManagerDialogState
     }
     final manager = ref.read(sessionManagerProvider.notifier);
     final ownerId = await manager.currentRemoteSessionOwnerId();
-    final currentName = manager.currentPersistentSessionName(
-      widget.connection.id,
-    );
-    final result = await manager.listRemotePersistentSessions(
-      widget.connection.id,
-    );
-    if (!mounted) return;
+    final currentName = manager.currentPersistentSessionName(connectionId);
+    final result = await manager.listRemotePersistentSessions(connectionId);
+    if (!mounted || epoch != _loadEpoch) return;
     switch (result) {
       case Ok(:final value):
         setState(() {
@@ -143,11 +167,13 @@ class _RemoteSessionManagerDialogState
     if (confirmed != true || !mounted) return;
 
     setState(() => _terminating.add(session.name));
+    widget.onBusyChanged(true);
     final outcome = await ref
         .read(sessionManagerProvider.notifier)
         .terminateListedRemoteSession(widget.connection.id, session);
     if (!mounted) return;
     setState(() => _terminating.remove(session.name));
+    widget.onBusyChanged(_busy);
     final notice = switch (outcome) {
       RemoteSessionTerminationOutcome.terminated ||
       RemoteSessionTerminationOutcome.alreadyAbsent => null,
@@ -167,6 +193,7 @@ class _RemoteSessionManagerDialogState
 
   Future<void> _activate(RemotePersistentSession session) async {
     setState(() => _opening.add(session.name));
+    widget.onBusyChanged(true);
     final result = await ref
         .read(sessionManagerProvider.notifier)
         .activateListedRemoteSession(
@@ -183,10 +210,11 @@ class _RemoteSessionManagerDialogState
         );
     if (!mounted) return;
     setState(() => _opening.remove(session.name));
+    widget.onBusyChanged(_busy);
 
     switch (result) {
       case Ok(:final value):
-        Navigator.of(context).pop();
+        widget.onActivated();
         final message = switch (value.kind) {
           RemoteSessionActivationKind.switchedToExistingTab =>
             '기존 터미널 탭으로 이동했습니다.',
@@ -210,6 +238,7 @@ class _RemoteSessionManagerDialogState
     final failures = <String>[];
     var opened = 0;
     setState(() => _batchOpening = true);
+    widget.onBusyChanged(true);
     for (final session in selected) {
       if (!mounted) return;
       setState(() => _opening.add(session.name));
@@ -240,10 +269,13 @@ class _RemoteSessionManagerDialogState
     }
     if (!mounted) return;
     setState(() => _batchOpening = false);
+    widget.onBusyChanged(_busy);
     final messenger = ScaffoldMessenger.of(context);
-    if (failures.isEmpty) Navigator.of(context).pop();
+    if (failures.isEmpty) widget.onActivated();
     messenger.showSnackBar(
       SnackBar(
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.fromLTRB(12, 12, 12, 80),
         content: Text(
           failures.isEmpty
               ? '선택한 작업 $opened개를 열었습니다.'
@@ -253,170 +285,160 @@ class _RemoteSessionManagerDialogState
     );
   }
 
-  /// 데스크톱에서 쓰는 목록 영역 크기. 화면이 이보다 작으면 화면에 맞춘다.
-  static const _listWidth = 620.0;
-  static const _listHeight = 440.0;
-
-  /// 제목·버튼·여백이 차지하는 높이. 목록은 화면 높이에서 이만큼 뺀 만큼 쓴다.
-  static const _dialogChromeHeight = 190.0;
-  static const _minListHeight = 140.0;
-
   @override
   Widget build(BuildContext context) {
-    final screen = MediaQuery.sizeOf(context);
-    final compact = context.isCompact;
-    final listHeight = math.max(
-      _minListHeight,
-      math.min(_listHeight, screen.height - _dialogChromeHeight),
-    );
-    return PopScope(
-      canPop: !_busy,
-      child: AlertDialog(
-        insetPadding: compact
-            ? const EdgeInsets.symmetric(horizontal: 12, vertical: 16)
-            : const EdgeInsets.symmetric(horizontal: 40, vertical: 24),
-        titlePadding: EdgeInsets.fromLTRB(compact ? 16 : 22, 20, 8, 8),
-        contentPadding: EdgeInsets.fromLTRB(
-          compact ? 12 : 22,
-          8,
-          compact ? 12 : 22,
-          8,
-        ),
-        actionsPadding: const EdgeInsets.fromLTRB(14, 8, 14, 14),
-        title: Row(
-          children: [
-            Container(
-              width: 34,
-              height: 34,
-              decoration: BoxDecoration(
-                color: VibeColors.accentSoft,
-                borderRadius: BorderRadius.circular(9),
-                border: Border.all(
-                  color: VibeColors.accent.withValues(alpha: 0.35),
-                ),
-              ),
-              child: const Icon(
-                Icons.inventory_2_outlined,
-                color: VibeColors.accent,
-                size: 19,
-              ),
-            ),
-            const SizedBox(width: 12),
-            const Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('서버 작업 보관함'),
-                  SizedBox(height: 2),
-                  Text(
-                    '원하는 작업을 선택한 뒤 한 번에 여세요.',
-                    style: TextStyle(
-                      color: VibeColors.onSurfaceDim,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w400,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact =
+            constraints.maxWidth < 700 || constraints.maxHeight < 450;
+        return Material(
+          color: VibeColors.surface,
+          child: Padding(
+            padding: EdgeInsets.all(compact ? 12 : 24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.inventory_2_outlined,
+                      color: VibeColors.accent,
                     ),
-                  ),
-                ],
-              ),
-            ),
-            IconButton(
-              tooltip: '새로고침',
-              onPressed: _loading || _busy
-                  ? null
-                  : () {
-                      _load();
-                      unawaited(_loadServerInfo());
-                    },
-              icon: const Icon(Icons.refresh),
-            ),
-          ],
-        ),
-        content: SizedBox(
-          // 폰에서는 고정 폭 대신 대화상자가 허용하는 폭을 모두 쓴다.
-          width: compact ? double.maxFinite : _listWidth,
-          height: listHeight,
-          child: Column(
-            children: [
-              Align(
-                alignment: Alignment.centerLeft,
-                child: SelectableText(
-                  [
-                    '${widget.connection.host.alias} · ${widget.connection.host.endpointLabel}',
-                    if (_serverInfo != null)
-                      [
-                        if (_serverInfo?.hostname case final hostname?)
-                          'hostname: $hostname',
-                        if (_serverInfo?.ipAddress case final ip?) 'IP: $ip',
-                      ].join(' · '),
-                    if (_serverInfo?.operatingSystem case final os?) 'OS: $os',
-                    if (_serverInfoLoading) '서버 정보 확인 중…',
-                    if (!_serverInfoLoading && _serverInfo == null)
-                      '서버 상세 정보 조회 불가',
-                  ].join('\n'),
-                  style: const TextStyle(
-                    fontSize: 11,
-                    color: VibeColors.onSurfaceDim,
-                  ),
-                  maxLines: compact ? 3 : 5,
-                ),
-              ),
-              Row(
-                children: [
-                  TextButton(
-                    onPressed:
-                        _loading || _busy || _sessions.where(_canSelect).isEmpty
-                        ? null
-                        : () => setState(
-                            () => _selected.addAll(
-                              _sessions
-                                  .where(_canSelect)
-                                  .map((session) => session.name),
+                    const SizedBox(width: 12),
+                    const Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '서버 작업 보관함',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w700,
                             ),
                           ),
-                    child: const Text('전체 선택'),
-                  ),
-                  TextButton(
-                    onPressed: _busy || _selected.isEmpty
-                        ? null
-                        : () => setState(_selected.clear),
-                    child: const Text('선택 해제'),
-                  ),
-                  Text(
-                    '${_selected.length}개 선택',
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                ],
-              ),
-              Expanded(
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 160),
-                  child: _buildContent(),
+                          Text(
+                            '원하는 작업을 선택한 뒤 한 번에 여세요.',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: VibeColors.onSurfaceDim,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '새로고침',
+                      onPressed: _loading || _busy || !_connected
+                          ? null
+                          : () {
+                              unawaited(_load());
+                              unawaited(_loadServerInfo());
+                            },
+                      icon: const Icon(Icons.refresh),
+                    ),
+                    IconButton(
+                      tooltip: '보관함 탭 닫기',
+                      onPressed: _busy ? null : widget.onClose,
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
                 ),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: _busy ? null : () => Navigator.of(context).pop(),
-            child: const Text('닫기'),
-          ),
-          FilledButton.icon(
-            key: const ValueKey('open-selected-remote-sessions'),
-            onPressed: _loading || _busy || _selected.isEmpty
-                ? null
-                : _activateSelected,
-            icon: const Icon(Icons.open_in_new, size: 16),
-            label: Text(
-              _batchOpening ? '작업 여는 중…' : '선택한 작업 열기 (${_selected.length})',
+                const SizedBox(height: 12),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: SelectableText(
+                    [
+                      '${widget.connection.host.alias} · ${widget.connection.host.endpointLabel}',
+                      if (_serverInfo != null)
+                        [
+                          if (_serverInfo?.hostname case final hostname?)
+                            'hostname: $hostname',
+                          if (_serverInfo?.ipAddress case final ip?) 'IP: $ip',
+                        ].join(' · '),
+                      if (_serverInfo?.operatingSystem case final os?)
+                        'OS: $os',
+                      if (_serverInfoLoading) '서버 정보 확인 중…',
+                      if (!_serverInfoLoading && _serverInfo == null)
+                        '서버 상세 정보 조회 불가',
+                    ].join('\n'),
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: VibeColors.onSurfaceDim,
+                    ),
+                    maxLines: compact ? 3 : 5,
+                  ),
+                ),
+                Wrap(
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    TextButton(
+                      onPressed:
+                          _loading ||
+                              _busy ||
+                              _sessions.where(_canSelect).isEmpty
+                          ? null
+                          : () => setState(
+                              () => _selected.addAll(
+                                _sessions
+                                    .where(_canSelect)
+                                    .map((session) => session.name),
+                              ),
+                            ),
+                      child: const Text('전체 선택'),
+                    ),
+                    TextButton(
+                      onPressed: _busy || _selected.isEmpty
+                          ? null
+                          : () => setState(_selected.clear),
+                      child: const Text('선택 해제'),
+                    ),
+                    Text(
+                      '${_selected.length}개 선택',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ],
+                ),
+
+                Expanded(
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 160),
+                    child: _buildContent(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: FilledButton.icon(
+                    key: const ValueKey('open-selected-remote-sessions'),
+                    onPressed:
+                        _loading || _busy || _selected.isEmpty || !_connected
+                        ? null
+                        : _activateSelected,
+                    icon: const Icon(Icons.open_in_new, size: 16),
+                    label: Text(
+                      _batchOpening
+                          ? '작업 여는 중…'
+                          : '선택한 작업 열기 (${_selected.length})',
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 
   Widget _buildContent() {
+    if (!_connected) {
+      return const _RemoteSessionMessage(
+        key: ValueKey('disconnected'),
+        icon: Icons.cloud_off_outlined,
+        title: '서버 연결을 기다리고 있습니다.',
+        detail: '연결된 터미널에서 재접속하면 보관함을 다시 불러옵니다.',
+      );
+    }
     if (_loading) {
       return const Center(
         key: ValueKey('loading'),
@@ -817,37 +839,39 @@ class _RemoteSessionMessage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 360),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 34, color: VibeColors.onSurfaceDim),
-            const SizedBox(height: 12),
-            Text(
-              title,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                color: VibeColors.onSurface,
-                fontSize: 14,
-                fontWeight: FontWeight.w700,
+      child: SingleChildScrollView(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 360),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 34, color: VibeColors.onSurfaceDim),
+              const SizedBox(height: 12),
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: VibeColors.onSurface,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              detail,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                color: VibeColors.onSurfaceDim,
-                fontSize: 12,
-                height: 1.45,
+              const SizedBox(height: 6),
+              Text(
+                detail,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: VibeColors.onSurfaceDim,
+                  fontSize: 12,
+                  height: 1.45,
+                ),
               ),
-            ),
-            if (actionLabel != null && onAction != null) ...[
-              const SizedBox(height: 14),
-              OutlinedButton(onPressed: onAction, child: Text(actionLabel!)),
+              if (actionLabel != null && onAction != null) ...[
+                const SizedBox(height: 14),
+                OutlinedButton(onPressed: onAction, child: Text(actionLabel!)),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );

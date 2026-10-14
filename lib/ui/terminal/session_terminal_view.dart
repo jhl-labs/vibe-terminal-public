@@ -22,6 +22,8 @@ import '../../state/providers.dart';
 import '../../terminal/smart_word_selection.dart';
 import '../adaptive/breakpoints.dart';
 import 'action_bar_catalog.dart';
+import 'gui/terminal_gui_mode.dart';
+import 'gui/terminal_gui_view.dart';
 import 'terminal_native_ime.dart';
 import 'terminal_selection_overlay.dart';
 
@@ -78,6 +80,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   final _terminalScrollController = ScrollController();
   final _terminalViewKey = GlobalKey<TerminalViewState>();
   late final _TerminalShortcutManager _terminalShortcutManager;
+  bool get _guiEnabled =>
+      ref.read(terminalGuiModesProvider).contains(widget.session.id);
+
   bool _clearingInput = false;
   // 조합(composing) 중이라 아직 서버로 보내지 않은 한글 꼬리.
   // xterm처럼 터미널 커서 위치에 로컬로 표시해 "입력이 안 보이는" 문제를 없앤다.
@@ -117,6 +122,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   // 마지막 하드웨어 키 입력 후 [_deferredClearKeyQuietWindow] 동안 살아 있는
   // 타이머. 활성이면 그 키의 IME 조합 갱신이 아직 도착 중일 수 있다.
   Timer? _hardwareKeyQuietTimer;
+  final Set<Timer> _pendingHardwareTextInput = {};
   Timer? _imeIdleCommitTimer;
   Timer? _imeBufferClearTimer;
   Timer? _selectionCopyTimer;
@@ -501,6 +507,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     _imeIdleCommitTimer?.cancel();
     _imeBufferClearTimer?.cancel();
     _hardwareKeyQuietTimer?.cancel();
+    _cancelPendingHardwareTextInput();
     _selectionCopyTimer?.cancel();
     _terminalLongPressTimer?.cancel();
     _terminalController.removeListener(_handleTerminalSelectionChanged);
@@ -771,6 +778,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
       TerminalNativeIme.instance.attach(this);
       _updateNativeImeCaretRect();
     } else {
+      _cancelPendingHardwareTextInput();
       TerminalNativeIme.instance.detach(this);
     }
   }
@@ -1025,7 +1033,12 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   }
 
   void _requestFocus({bool explicitKeyboard = false}) {
-    if (!mounted || (context.isCompact && !explicitKeyboard)) return;
+    if (!mounted ||
+        _guiEnabled ||
+        !_isCurrentRoute ||
+        (context.isCompact && !explicitKeyboard)) {
+      return;
+    }
     final activeId = ref.read(activeSessionIdProvider);
     if ((widget.paneHeaderBuilder != null || activeId != null) &&
         activeId != widget.session.id) {
@@ -1037,6 +1050,8 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
       _editableTextKey.currentState?.requestKeyboard();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted &&
+            !_guiEnabled &&
+            _isCurrentRoute &&
             widget.session.status == SessionStatus.connected &&
             ((widget.paneHeaderBuilder == null &&
                     ref.read(activeSessionIdProvider) == null) ||
@@ -1406,8 +1421,16 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   }
 
   void _scheduleHardwareTextInput(String text) {
-    Timer(_hardwareTextFallbackDelay, () {
-      if (!mounted || widget.session.status != SessionStatus.connected) return;
+    late final Timer timer;
+    timer = Timer(_hardwareTextFallbackDelay, () {
+      _pendingHardwareTextInput.remove(timer);
+      if (!mounted ||
+          _guiEnabled ||
+          !_inputFocusNode.hasFocus ||
+          !_isCurrentRoute ||
+          widget.session.status != SessionStatus.connected) {
+        return;
+      }
       // 네이티브 IME 브리지가 조합 중이면 이 키는 IME가 소비한 것이다.
       if (_nativeComposing.value != null) {
         _traceInput('hardwareText skip "$text" native composing');
@@ -1435,6 +1458,16 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
       }
       _sendHardwareTextInput(text);
     });
+    _pendingHardwareTextInput.add(timer);
+  }
+
+  bool get _isCurrentRoute => ModalRoute.of(context)?.isCurrent ?? true;
+
+  void _cancelPendingHardwareTextInput() {
+    for (final timer in _pendingHardwareTextInput) {
+      timer.cancel();
+    }
+    _pendingHardwareTextInput.clear();
   }
 
   void _sendHardwareTextInput(String text) {
@@ -1444,8 +1477,13 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     _traceInput('hardwareText send "$text"');
     widget.session.engine.terminal.textInput(text);
     _rememberHardwareText(text);
-    _unconfirmedHardwareText += text;
-    _unconfirmedHardwareTextAt = DateTime.now();
+    // 모바일 IME는 영문을 KeyEvent로, 한글을 TextInput으로 전달할 수 있다.
+    // 영문 에코가 없다는 이유만으로 다음 한글 입력 때 이미 보낸 영문을
+    // 조합 누출로 추측해 지우면 안 된다. 중복 제거 기록은 그대로 유지한다.
+    if (!usesSoftKeyboard) {
+      _unconfirmedHardwareText += text;
+      _unconfirmedHardwareTextAt = DateTime.now();
+    }
   }
 
   /// IME 채널에서 비ASCII 텍스트가 도착했는데, 직전에 하드웨어 경로로 보낸 라틴
@@ -1645,6 +1683,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     FocusNode _,
     KeyEvent event,
   ) {
+    if (_guiEnabled || !_inputFocusNode.hasFocus || !_isCurrentRoute) {
+      return KeyEventResult.ignored;
+    }
     _trackModifierKey(event);
     _traceInput(
       'key ${event.runtimeType} logical=${event.logicalKey.debugName} '
@@ -2345,6 +2386,19 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
         _requestFocus();
       }
     });
+    ref.listen(
+      terminalGuiModesProvider.select((ids) => ids.contains(widget.session.id)),
+      (_, enabled) {
+        if (enabled) {
+          _flushTextInputBuffer();
+          _releaseTextInputBuffer();
+          _cancelPendingHardwareTextInput();
+          _inputFocusNode.unfocus();
+        } else {
+          WidgetsBinding.instance.addPostFrameCallback((_) => _requestFocus());
+        }
+      },
+    );
     final settings = widget.session.terminalPreferences.applyTo(
       ref.watch(appSettingsProvider),
     );
@@ -2375,6 +2429,8 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
         paneActions[token] = callback;
       }
     }
+    paneActions['terminalGui'] = () =>
+        ref.read(terminalGuiModesProvider.notifier).toggle(widget.session.id);
     final paneHeader = widget.paneHeaderBuilder?.call(paneActions);
     Widget withPaneHeader(Widget body) => paneHeader == null
         ? body
@@ -2427,34 +2483,39 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
             if (widget.session.fellBackToDirectSsh)
               _DirectSshFallbackNotice(onEditHost: widget.onEditHost),
             Expanded(
-              child: Stack(
-                children: [
-                  TerminalView(
-                    widget.session.engine.terminal,
-                    key: _terminalViewKey,
-                    controller: _terminalController,
-                    scrollController: _terminalScrollController,
-                    readOnly: true,
-                    hardwareKeyboardOnly: true,
-                    resizeDebounce: context.isCompact
-                        ? const Duration(milliseconds: 150)
-                        : Duration.zero,
-                    theme: settings.resolvedTerminalTheme,
-                    padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
-                    alwaysShowCursor: false,
-                    textStyle: TerminalStyle(
-                      fontSize: fontSize,
-                      height: settings.terminalLineHeight,
-                      fontFamily: settings.terminalFontFamily,
-                      fontFamilyFallback: settings.fontFallback,
+              child: TerminalGuiSurface(
+                session: widget.session,
+                theme: settings.resolvedTerminalTheme,
+                fontSize: fontSize,
+                terminal: Stack(
+                  children: [
+                    TerminalView(
+                      widget.session.engine.terminal,
+                      key: _terminalViewKey,
+                      controller: _terminalController,
+                      scrollController: _terminalScrollController,
+                      readOnly: true,
+                      hardwareKeyboardOnly: true,
+                      resizeDebounce: context.isCompact
+                          ? const Duration(milliseconds: 150)
+                          : Duration.zero,
+                      theme: settings.resolvedTerminalTheme,
+                      padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+                      alwaysShowCursor: false,
+                      textStyle: TerminalStyle(
+                        fontSize: fontSize,
+                        height: settings.terminalLineHeight,
+                        fontFamily: settings.terminalFontFamily,
+                        fontFamilyFallback: settings.fontFallback,
+                      ),
                     ),
-                  ),
-                  const Positioned(
-                    top: 12,
-                    right: 12,
-                    child: _DisconnectedBadge(),
-                  ),
-                ],
+                    const Positioned(
+                      top: 12,
+                      right: 12,
+                      child: _DisconnectedBadge(),
+                    ),
+                  ],
+                ),
               ),
             ),
           ],
@@ -2474,141 +2535,155 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
             if (widget.session.fellBackToDirectSsh)
               _DirectSshFallbackNotice(onEditHost: widget.onEditHost),
             Expanded(
-              child: CallbackShortcuts(
-                bindings: _terminalShortcutCallbacks(
-                  settings: settings,
-                  zoomIn: zoomIn,
-                  zoomOut: zoomOut,
-                  zoomReset: zoomReset,
-                ),
-                child: Shortcuts.manager(
-                  debugLabel: 'Terminal input shortcuts',
-                  manager: _terminalShortcutManager,
-                  child: Stack(
-                    children: [
-                      Listener(
-                        onPointerDown: _handlePointerDown,
-                        onPointerMove: _handlePointerMove,
-                        onPointerUp: _handlePointerUp,
-                        onPointerCancel: _handlePointerUp,
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.deferToChild,
-                          onTap: () {
-                            _disableSelectionMode(clearSelection: true);
-                            _requestFocus();
-                          },
-                          child: TerminalView(
-                            widget.session.engine.terminal,
-                            key: _terminalViewKey,
-                            controller: _terminalController,
-                            scrollController: _terminalScrollController,
-                            readOnly: true,
-                            hardwareKeyboardOnly: true,
-                            resizeDebounce: context.isCompact
-                                ? const Duration(milliseconds: 150)
-                                : Duration.zero,
-                            theme: settings.resolvedTerminalTheme,
-                            padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
-                            alwaysShowCursor: true,
-                            onTouchSelectionChanged:
-                                _handleTouchSelectionChanged,
-                            onSecondaryTapDown: settings.rightClickPaste
-                                ? (_, _) =>
-                                      unawaited(_pasteClipboardText(context))
-                                : null,
-                            textStyle: TerminalStyle(
-                              fontSize: fontSize,
-                              height: settings.terminalLineHeight,
-                              fontFamily: settings.terminalFontFamily,
-                              fontFamilyFallback: settings.fontFallback,
+              child: TerminalGuiSurface(
+                session: widget.session,
+                theme: settings.resolvedTerminalTheme,
+                fontSize: fontSize,
+                terminal: CallbackShortcuts(
+                  bindings: _terminalShortcutCallbacks(
+                    settings: settings,
+                    zoomIn: zoomIn,
+                    zoomOut: zoomOut,
+                    zoomReset: zoomReset,
+                  ),
+                  child: Shortcuts.manager(
+                    debugLabel: 'Terminal input shortcuts',
+                    manager: _terminalShortcutManager,
+                    child: Stack(
+                      children: [
+                        Listener(
+                          onPointerDown: _handlePointerDown,
+                          onPointerMove: _handlePointerMove,
+                          onPointerUp: _handlePointerUp,
+                          onPointerCancel: _handlePointerUp,
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.deferToChild,
+                            onTap: () {
+                              _disableSelectionMode(clearSelection: true);
+                              _requestFocus();
+                            },
+                            child: TerminalView(
+                              widget.session.engine.terminal,
+                              key: _terminalViewKey,
+                              controller: _terminalController,
+                              scrollController: _terminalScrollController,
+                              readOnly: true,
+                              hardwareKeyboardOnly: true,
+                              resizeDebounce: context.isCompact
+                                  ? const Duration(milliseconds: 150)
+                                  : Duration.zero,
+                              theme: settings.resolvedTerminalTheme,
+                              padding: const EdgeInsets.fromLTRB(
+                                14,
+                                10,
+                                14,
+                                12,
+                              ),
+                              alwaysShowCursor: true,
+                              onTouchSelectionChanged:
+                                  _handleTouchSelectionChanged,
+                              onSecondaryTapDown: settings.rightClickPaste
+                                  ? (_, _) =>
+                                        unawaited(_pasteClipboardText(context))
+                                  : null,
+                              textStyle: TerminalStyle(
+                                fontSize: fontSize,
+                                height: settings.terminalLineHeight,
+                                fontFamily: settings.terminalFontFamily,
+                                fontFamilyFallback: settings.fontFallback,
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                      _TerminalImeInputLayer(
-                        editableTextKey: _editableTextKey,
-                        controller: _inputController,
-                        focusNode: _inputFocusNode,
-                        fontSize: fontSize,
-                        fontFamily: settings.terminalFontFamily,
-                        fontFallback: settings.fontFallback,
-                        onSubmitted: _handleImeSubmit,
-                        onContentInserted: _handleContentInserted,
-                      ),
-                      _buildComposingOverlay(settings, fontSize),
-                      // 선택 모드: 드래그를 가로채 마우스 모드(TUI)와 무관하게
-                      // 로컬 선택. 셀렉션 오버레이보다 아래에 둬 핸들 조작은 유지.
-                      if (_selectionMode)
+                        _TerminalImeInputLayer(
+                          editableTextKey: _editableTextKey,
+                          controller: _inputController,
+                          focusNode: _inputFocusNode,
+                          fontSize: fontSize,
+                          fontFamily: settings.terminalFontFamily,
+                          fontFallback: settings.fontFallback,
+                          onSubmitted: _handleImeSubmit,
+                          onContentInserted: _handleContentInserted,
+                        ),
+                        _buildComposingOverlay(settings, fontSize),
+                        // 선택 모드: 드래그를 가로채 마우스 모드(TUI)와 무관하게
+                        // 로컬 선택. 셀렉션 오버레이보다 아래에 둬 핸들 조작은 유지.
+                        if (_selectionMode)
+                          Positioned.fill(
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onPanStart: _selectionModePanStart,
+                              onPanUpdate: (d) =>
+                                  _selectionModePanUpdate(d.globalPosition),
+                              onPanEnd: (_) => _selectionModePanEnd(),
+                              onPanCancel: _selectionModePanEnd,
+                            ),
+                          ),
+                        // 선택 핸들·툴바는 셀 픽셀 좌표로 배치되므로 선택/스크롤
+                        // 변화뿐 아니라 레이아웃 변화(패널·창 크기 조정)와 터미널
+                        // 갱신(출력·reflow)에도 다시 계산해야 한다. xterm은 레이아웃
+                        // 중 스크롤 오프셋을 correctBy로 조용히 바꾸기 때문에 스크롤
+                        // 컨트롤러 알림만으로는 핸들이 옛 위치에 남아 하이라이트와
+                        // 어긋난다. LayoutBuilder는 터미널(앞 형제) 레이아웃 뒤에
+                        // 빌드되므로 보정된 오프셋을 읽는다.
                         Positioned.fill(
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onPanStart: _selectionModePanStart,
-                            onPanUpdate: (d) =>
-                                _selectionModePanUpdate(d.globalPosition),
-                            onPanEnd: (_) => _selectionModePanEnd(),
-                            onPanCancel: _selectionModePanEnd,
+                          child: LayoutBuilder(
+                            builder: (context, _) => ListenableBuilder(
+                              listenable: Listenable.merge([
+                                _terminalController,
+                                _terminalScrollController,
+                                _terminalChangeBridge,
+                                _selectionGestureActive,
+                              ]),
+                              builder: (context, _) {
+                                final geo = _selectionGeometry();
+                                return TerminalSelectionOverlay(
+                                  geometry: geo,
+                                  showHandles:
+                                      _lastPointerKind !=
+                                      PointerDeviceKind.mouse,
+                                  onPointerSignal:
+                                      _forwardPointerSignalToTerminal,
+                                  onHandleDragStart: _beginSelectionDrag,
+                                  onHandleDragStop: _endSelectionDrag,
+                                  onHandleDragBegin: (g) =>
+                                      _dragSelectionEnd(g, draggingBegin: true),
+                                  onHandleDragEnd: (g) => _dragSelectionEnd(
+                                    g,
+                                    draggingBegin: false,
+                                  ),
+                                  // 끌고 있는 동안에는 툴바가 고르는 글자를
+                                  // 가리지 않게 숨기고, 손을 떼면 다시 띄운다.
+                                  toolbar:
+                                      geo == null ||
+                                          _selectionGestureActive.value
+                                      ? const SizedBox.shrink()
+                                      : SelectionToolbar(
+                                          anchor: Offset(
+                                            (geo.begin.dx + geo.end.dx) / 2 +
+                                                geo.cellSize.width / 2,
+                                            geo.begin.dy < geo.end.dy
+                                                ? geo.begin.dy
+                                                : geo.end.dy,
+                                          ),
+                                          onCopy: () => unawaited(
+                                            _copySelectionFromToolbar(),
+                                          ),
+                                          onSelectAll: _selectAll,
+                                        ),
+                                );
+                              },
+                            ),
                           ),
                         ),
-                      // 선택 핸들·툴바는 셀 픽셀 좌표로 배치되므로 선택/스크롤
-                      // 변화뿐 아니라 레이아웃 변화(패널·창 크기 조정)와 터미널
-                      // 갱신(출력·reflow)에도 다시 계산해야 한다. xterm은 레이아웃
-                      // 중 스크롤 오프셋을 correctBy로 조용히 바꾸기 때문에 스크롤
-                      // 컨트롤러 알림만으로는 핸들이 옛 위치에 남아 하이라이트와
-                      // 어긋난다. LayoutBuilder는 터미널(앞 형제) 레이아웃 뒤에
-                      // 빌드되므로 보정된 오프셋을 읽는다.
-                      Positioned.fill(
-                        child: LayoutBuilder(
-                          builder: (context, _) => ListenableBuilder(
-                            listenable: Listenable.merge([
-                              _terminalController,
-                              _terminalScrollController,
-                              _terminalChangeBridge,
-                              _selectionGestureActive,
-                            ]),
-                            builder: (context, _) {
-                              final geo = _selectionGeometry();
-                              return TerminalSelectionOverlay(
-                                geometry: geo,
-                                showHandles:
-                                    _lastPointerKind != PointerDeviceKind.mouse,
-                                onPointerSignal:
-                                    _forwardPointerSignalToTerminal,
-                                onHandleDragStart: _beginSelectionDrag,
-                                onHandleDragStop: _endSelectionDrag,
-                                onHandleDragBegin: (g) =>
-                                    _dragSelectionEnd(g, draggingBegin: true),
-                                onHandleDragEnd: (g) =>
-                                    _dragSelectionEnd(g, draggingBegin: false),
-                                // 끌고 있는 동안에는 툴바가 고르는 글자를
-                                // 가리지 않게 숨기고, 손을 떼면 다시 띄운다.
-                                toolbar:
-                                    geo == null || _selectionGestureActive.value
-                                    ? const SizedBox.shrink()
-                                    : SelectionToolbar(
-                                        anchor: Offset(
-                                          (geo.begin.dx + geo.end.dx) / 2 +
-                                              geo.cellSize.width / 2,
-                                          geo.begin.dy < geo.end.dy
-                                              ? geo.begin.dy
-                                              : geo.end.dy,
-                                        ),
-                                        onCopy: () => unawaited(
-                                          _copySelectionFromToolbar(),
-                                        ),
-                                        onSelectAll: _selectAll,
-                                      ),
-                              );
-                            },
-                          ),
+                        ValueListenableBuilder<Offset?>(
+                          valueListenable: _magnifierFocus,
+                          builder: (context, focus, _) => focus == null
+                              ? const SizedBox.shrink()
+                              : _SelectionMagnifier(focus: focus),
                         ),
-                      ),
-                      ValueListenableBuilder<Offset?>(
-                        valueListenable: _magnifierFocus,
-                        builder: (context, focus, _) => focus == null
-                            ? const SizedBox.shrink()
-                            : _SelectionMagnifier(focus: focus),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -3063,7 +3138,21 @@ class _TerminalHeader extends ConsumerWidget {
               ConstrainedBox(
                 constraints: BoxConstraints(maxWidth: actionsMaxWidth),
                 child: _HeaderActions(
-                  children: [for (final token in items) ?headerItem(token)],
+                  children: [
+                    if (!items.contains('retry'))
+                      TerminalGuiModeButton(
+                        sessionId: session.id,
+                        iconSize: 18,
+                      ),
+                    for (final token in items) ...[
+                      if (token == 'retry')
+                        TerminalGuiModeButton(
+                          sessionId: session.id,
+                          iconSize: 18,
+                        ),
+                      ?headerItem(token),
+                    ],
+                  ],
                 ),
               ),
             ],
