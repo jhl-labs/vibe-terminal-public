@@ -1,5 +1,6 @@
 import 'session_close_dialog.dart';
 import '../common/activity_clock.dart';
+import '../common/device_aware_draggable.dart';
 import '../settings/terminal_preferences_editor.dart';
 import '../../session/session_pane_layout.dart';
 import 'panes/pane_preset_icon.dart';
@@ -1565,9 +1566,8 @@ extension on SessionAttentionState {
 /// 레일 안의 다른 행 위·아래에 놓으면 순서가 바뀌고, 터미널 칸
 /// ([SessionPaneDeck]의 [DragTarget]) 위에 놓으면 그 칸에 배치된다.
 ///
-/// 클릭/탭은 세션 선택으로 남긴다. 마우스(데스크톱)는 slop 이상 움직이면 바로
-/// 끌리고(즉시 인식하는 [Draggable]은 탭을 가로채므로 [Draggable.affinity]로
-/// 거리 기준 인식), 터치는 스크롤과 겹치지 않도록 길게 눌러 끈다. 터치에서
+/// 클릭/탭은 세션 선택으로 남긴다. 플랫폼과 무관하게 마우스는 slop 이상
+/// 움직이면 바로 끌리고, 터치는 스크롤과 겹치지 않도록 길게 눌러 끈다. 터치에서
 /// 길게 누른 뒤 움직이지 않고 떼면 컨텍스트 메뉴를 연다.
 class _SessionList extends StatefulWidget {
   const _SessionList({
@@ -1611,6 +1611,10 @@ class _SessionListState extends State<_SessionList>
 
   /// 이 목록에서 시작한 드래그의 원래 인덱스. 칸에서 끌어온 드래그면 null.
   int? _draggedIndex;
+  // 드롭 위치 변경이 행을 리빌드해도 시작점과 이동 이력을 유지한다.
+  Offset? _dragOrigin;
+  bool _longPressDrag = false;
+  bool _dragMoved = false;
   double _autoScrollDirection = 0;
 
   @override
@@ -1631,11 +1635,6 @@ class _SessionListState extends State<_SessionList>
     _ticker.dispose();
     _scroll.dispose();
     super.dispose();
-  }
-
-  bool get _touch {
-    final platform = Theme.of(context).platform;
-    return platform == TargetPlatform.android || platform == TargetPlatform.iOS;
   }
 
   bool _accepts(PaneSessionDrag drag) =>
@@ -1689,6 +1688,9 @@ class _SessionListState extends State<_SessionList>
   void _finishDrag() {
     if (!mounted) return;
     _draggedIndex = null;
+    _dragOrigin = null;
+    _longPressDrag = false;
+    _dragMoved = false;
     _stopAutoScroll();
     _setSlot(null);
   }
@@ -1733,47 +1735,33 @@ class _SessionListState extends State<_SessionList>
     final data = PaneSessionDrag(session.id, widget.groupId);
     final feedback = _feedback(session);
     final whenDragging = Opacity(opacity: .35, child: tile);
-    if (!_touch) {
-      return Draggable<PaneSessionDrag>(
-        data: data,
-        // 축 지정 → 포인터가 slop 이상 움직여야 드래그가 시작되어 클릭(탭)이
-        // 살아남는다. 일단 시작되면 어느 방향으로든 끌 수 있다.
-        affinity: Axis.vertical,
-        dragAnchorStrategy: pointerDragAnchorStrategy,
-        feedback: feedback,
-        childWhenDragging: whenDragging,
-        onDragStarted: () => _draggedIndex = _indexOf(session.id),
-        onDragUpdate: (details) => _updateAutoScroll(details.globalPosition),
-        onDragEnd: (_) => _finishDrag(),
-        onDragCompleted: _finishDrag,
-        onDraggableCanceled: (_, _) => _finishDrag(),
-        child: tile,
-      );
-    }
-    Offset? dragStart;
-    return LongPressDraggable<PaneSessionDrag>(
+    return DeviceAwareDraggable<PaneSessionDrag>(
       data: data,
       dragAnchorStrategy: pointerDragAnchorStrategy,
-      hapticFeedbackOnStart: true,
       feedback: feedback,
       childWhenDragging: whenDragging,
-      onDragStarted: () {
-        dragStart = null;
+      onDragStartAt: (position, delayed) {
+        _dragOrigin = position;
+        _longPressDrag = delayed;
+        _dragMoved = false;
         _draggedIndex = _indexOf(session.id);
       },
       onDragUpdate: (details) {
-        dragStart ??= details.globalPosition;
+        final start = _dragOrigin;
+        if (start != null &&
+            (details.globalPosition - start).distance >= kTouchSlop) {
+          _dragMoved = true;
+        }
         _updateAutoScroll(details.globalPosition);
       },
       onDragCompleted: _finishDrag,
       onDraggableCanceled: (_, _) => _finishDrag(),
       onDragEnd: (details) {
+        final showMenu = _longPressDrag && !_dragMoved;
         _finishDrag();
         // 길게 누른 뒤 거의 움직이지 않고 떼면 메뉴로 취급한다.
         // 제자리 드롭은 자기 행이 받아 no-op이므로 wasAccepted는 보지 않는다.
-        final start = dragStart;
-        final moved = start == null ? 0.0 : (details.offset - start).distance;
-        if (moved < kTouchSlop) {
+        if (showMenu) {
           (tileKey.currentState as _SessionTileState?)?.showMenuAtCenter();
         }
       },

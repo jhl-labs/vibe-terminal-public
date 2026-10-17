@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart';
 import '../../../app/theme.dart';
 import 'terminal_gui_links.dart';
+import '../terminal_native_text_input.dart';
 import '../../../terminal/gui/terminal_interaction.dart';
 import '../../../terminal/gui/terminal_interaction_controller.dart';
 
@@ -133,10 +134,10 @@ class _TerminalInteractionCardState extends State<TerminalInteractionCard> {
               FilledButton.icon(
                 key: const ValueKey('terminal-interaction-open'),
                 onPressed: _enabled
-                    ? () => _key(TerminalKey.arrowLeft, shift: true)
+                    ? () => unawaited(widget.controller.openQuestion(prompt))
                     : null,
                 icon: const Icon(Icons.question_answer_outlined),
-                label: const Text('질문 열기'),
+                label: const Text('선택지 보기'),
               ),
             for (var i = 0; i < prompt.options.length; i++)
               Padding(
@@ -145,7 +146,9 @@ class _TerminalInteractionCardState extends State<TerminalInteractionCard> {
                   key: ValueKey('terminal-interaction-option-$i'),
                   onPressed:
                       _enabled &&
-                          (!prompt.editing || prompt.agent == 'claude') &&
+                          (!prompt.editing ||
+                              prompt.agent == 'claude' ||
+                              prompt.isCodexAsync) &&
                           (!prompt.horizontal || prompt.selected >= 0)
                       ? () => unawaited(widget.controller.choose(prompt, i))
                       : null,
@@ -179,31 +182,36 @@ class _TerminalInteractionCardState extends State<TerminalInteractionCard> {
               ),
             if (prompt.editing) ...[
               const SizedBox(height: 8),
-              TextField(
-                key: const ValueKey('terminal-interaction-message'),
+              TerminalNativeTextInput(
                 controller: _text,
                 focusNode: _focus,
                 enabled: _enabled,
-                minLines: 1,
-                maxLines: 4,
-                keyboardType: TextInputType.multiline,
-                textInputAction: TextInputAction.send,
-                onEditingComplete: () {},
-                onSubmitted: (_) => unawaited(_send()),
-                contextMenuBuilder: (context, state) =>
-                    terminalGuiSelectionToolbar(
-                      context,
-                      state.contextMenuAnchors,
-                      state.contextMenuButtonItems,
-                      selectedText: state.widget.controller.selection
-                          .textInside(state.widget.controller.text),
-                      hideToolbar: state.hideToolbar,
-                    ),
-                decoration: const InputDecoration(
-                  labelText: '직접 답변 입력',
-                  hintText: 'Enter로 전송 · Shift+Enter로 줄바꿈',
-                  border: OutlineInputBorder(),
-                  isDense: true,
+                child: TextField(
+                  key: const ValueKey('terminal-interaction-message'),
+                  controller: _text,
+                  focusNode: _focus,
+                  enabled: _enabled,
+                  minLines: 1,
+                  maxLines: 4,
+                  keyboardType: TextInputType.multiline,
+                  textInputAction: TextInputAction.send,
+                  onEditingComplete: () {},
+                  onSubmitted: (_) => unawaited(_send()),
+                  contextMenuBuilder: (context, state) =>
+                      terminalGuiSelectionToolbar(
+                        context,
+                        state.contextMenuAnchors,
+                        state.contextMenuButtonItems,
+                        selectedText: state.widget.controller.selection
+                            .textInside(state.widget.controller.text),
+                        hideToolbar: state.hideToolbar,
+                      ),
+                  decoration: const InputDecoration(
+                    labelText: '직접 답변 입력',
+                    hintText: 'Enter로 전송 · Shift+Enter로 줄바꿈',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
                 ),
               ),
               ValueListenableBuilder<TextEditingValue>(
@@ -228,7 +236,9 @@ class _TerminalInteractionCardState extends State<TerminalInteractionCard> {
                 spacing: 4,
                 runSpacing: 4,
                 children: [
-                  if (!prompt.editing || prompt.agent == 'claude') ...[
+                  if (!prompt.editing ||
+                      prompt.agent == 'claude' ||
+                      prompt.isCodexAsync && prompt.options.isNotEmpty) ...[
                     IconButton(
                       tooltip: '이전 항목',
                       onPressed: _enabled
@@ -259,53 +269,79 @@ class _TerminalInteractionCardState extends State<TerminalInteractionCard> {
                             : Icons.keyboard_arrow_down,
                       ),
                     ),
-                    TextButton(
-                      onPressed: _enabled
-                          ? () => _key(TerminalKey.enter)
-                          : null,
-                      child: Text(
-                        prompt.kind == TerminalInteractionKind.review
-                            ? '전체 답변 제출'
-                            : prompt.multiple && prompt.agent == 'opencode'
-                            ? '현재 항목 선택'
-                            : '선택 확인',
+                    if (!prompt.editing || prompt.agent == 'claude')
+                      TextButton(
+                        onPressed: _enabled
+                            ? () => _key(TerminalKey.enter)
+                            : null,
+                        child: Text(
+                          prompt.kind == TerminalInteractionKind.review
+                              ? '전체 답변 제출'
+                              : prompt.multiple && prompt.agent == 'opencode'
+                              ? '현재 항목 선택'
+                              : '선택 확인',
+                        ),
                       ),
-                    ),
                   ],
                   if (prompt.canNavigateQuestions &&
                       !(prompt.agent == 'opencode' && prompt.editing)) ...[
-                    TextButton(
-                      onPressed: _enabled
-                          ? () => _key(
-                              prompt.agent == 'claude'
-                                  ? TerminalKey.tab
-                                  : prompt.agent == 'codex' && prompt.editing
-                                  ? TerminalKey.keyP
-                                  : TerminalKey.arrowLeft,
-                              ctrl: prompt.agent == 'codex' && prompt.editing,
-                              shift: prompt.agent == 'claude',
-                            )
-                          : null,
-                      child: const Text('이전 질문'),
-                    ),
-                    TextButton(
-                      onPressed: _enabled
-                          ? () => _key(
-                              prompt.agent == 'claude'
-                                  ? TerminalKey.tab
-                                  : prompt.agent == 'codex' && prompt.editing
-                                  ? TerminalKey.keyN
-                                  : TerminalKey.arrowRight,
-                              ctrl: prompt.agent == 'codex' && prompt.editing,
-                            )
-                          : null,
-                      child: const Text('다음 질문'),
-                    ),
+                    if (prompt.canNavigatePrevious)
+                      TextButton(
+                        onPressed: _enabled
+                            ? () => _key(
+                                prompt.isCodexAsync
+                                    ? TerminalKey.arrowRight
+                                    : prompt.agent == 'claude'
+                                    ? TerminalKey.tab
+                                    : prompt.agent == 'codex' && prompt.editing
+                                    ? TerminalKey.keyP
+                                    : TerminalKey.arrowLeft,
+                                ctrl:
+                                    prompt.agent == 'codex' &&
+                                    prompt.editing &&
+                                    !prompt.isCodexAsync,
+                                shift:
+                                    prompt.agent == 'claude' ||
+                                    prompt.isCodexAsync,
+                              )
+                            : null,
+                        child: const Text('이전 질문'),
+                      ),
+                    if (prompt.canNavigateNext)
+                      TextButton(
+                        onPressed: _enabled
+                            ? () => _key(
+                                prompt.isCodexAsync
+                                    ? TerminalKey.arrowLeft
+                                    : prompt.agent == 'claude'
+                                    ? TerminalKey.tab
+                                    : prompt.agent == 'codex' && prompt.editing
+                                    ? TerminalKey.keyN
+                                    : TerminalKey.arrowRight,
+                                ctrl:
+                                    prompt.agent == 'codex' &&
+                                    prompt.editing &&
+                                    !prompt.isCodexAsync,
+                                shift: prompt.isCodexAsync,
+                              )
+                            : null,
+                        child: const Text('다음 질문'),
+                      ),
                   ],
-                  TextButton(
-                    onPressed: _enabled ? () => _key(TerminalKey.escape) : null,
-                    child: const Text('취소 (Esc)'),
-                  ),
+                  if (prompt.isCodexAsync && !prompt.canNavigatePrevious)
+                    TextButton(
+                      onPressed: _enabled
+                          ? () => _key(TerminalKey.arrowRight, shift: true)
+                          : null,
+                      child: const Text('질문 접기'),
+                    ),
+                  if (!prompt.isCodexAsync)
+                    TextButton(
+                      onPressed: _enabled
+                          ? () => _key(TerminalKey.escape)
+                          : null,
+                      child: const Text('취소 (Esc)'),
+                    ),
                 ],
               ),
             if (widget.controller.error != null)

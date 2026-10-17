@@ -7,13 +7,22 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:xterm/xterm.dart';
 
 import '../../../app/theme.dart';
+import '../../../ai/ai_chat_service.dart';
+import '../../../ai/terminal_reply_suggestions.dart';
+import '../../../settings/app_settings.dart';
+import '../../../state/providers.dart';
 import '../../../session/session.dart';
 import '../../../terminal/gui/terminal_gui_controller.dart';
 import '../../../terminal/gui/terminal_gui_document.dart';
 import '../../../terminal/gui/terminal_interaction_controller.dart';
+import '../../../terminal/gui/terminal_interaction.dart';
+import '../../../terminal/gui/terminal_reply_suggestion_controller.dart';
+import '../../shell/ai_data_consent.dart';
 import 'terminal_interaction_card.dart';
 import 'terminal_gui_mode.dart';
+import '../terminal_native_text_input.dart';
 import 'terminal_gui_links.dart';
+import 'terminal_reply_suggestion_panel.dart';
 
 class TerminalGuiSurface extends ConsumerStatefulWidget {
   const TerminalGuiSurface({
@@ -60,6 +69,9 @@ class _TerminalGuiSurfaceState extends ConsumerState<TerminalGuiSurface> {
                 theme: widget.theme,
                 fontSize: widget.fontSize,
                 agentTitle: () => widget.session.engine.title ?? '',
+                aiSettings: ref.watch(appSettingsProvider.select((s) => s.ai)),
+                aiService: ref.watch(aiChatServiceProvider),
+                aiConsentStore: ref.watch(aiConsentStoreProvider),
               ),
             ),
           ),
@@ -77,6 +89,9 @@ class TerminalGuiView extends StatefulWidget {
     required this.fontSize,
     this.active = true,
     this.agentTitle,
+    this.aiSettings,
+    this.aiService,
+    this.aiConsentStore,
   });
 
   final Terminal terminal;
@@ -85,6 +100,9 @@ class TerminalGuiView extends StatefulWidget {
   final double fontSize;
   final bool active;
   final String Function()? agentTitle;
+  final AiSettings? aiSettings;
+  final AiChatService? aiService;
+  final AiConsentStore? aiConsentStore;
 
   @override
   State<TerminalGuiView> createState() => _TerminalGuiViewState();
@@ -94,6 +112,8 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
     with WidgetsBindingObserver {
   late TerminalGuiController _document;
   late TerminalInteractionController _interaction;
+  late TerminalReplySuggestionController _suggestions;
+  late AiDataConsent _aiConsent;
   late List<TerminalGuiBlock> _blocks;
   TerminalGuiDocument? _projected;
   final _scroll = ScrollController();
@@ -116,6 +136,9 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _attach();
+    _input.addListener(_draftChanged);
+    _replyInput.addListener(_draftChanged);
+    _aiConsent = AiDataConsent(store: widget.aiConsentStore);
     _inputFocus.onKeyEvent = _handleInputKey;
     _scroll.addListener(_scrolled);
     _scrollToLatest();
@@ -136,16 +159,99 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
     _projected = _document.document;
     _blocks = terminalGuiBlocks(_document.document);
     _document.setEnabled(_visible);
+    _suggestions = TerminalReplySuggestionController(
+      widget.terminal,
+      _interaction,
+      draft: () => _interaction.captureCurrent()?.editing == true
+          ? _replyInput.text
+          : _input.text,
+    )..addListener(_suggestionsChanged);
+    _configureSuggestions();
+  }
+
+  void _suggestionsChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _draftChanged() => _suggestions.checkCurrent();
+
+  void _configureSuggestions() => _suggestions.configure(
+    widget.aiSettings,
+    widget.aiService,
+    enabled: _visible && _appActive && widget.active && widget.connected,
+  );
+
+  Future<void> _requestSuggestions() async {
+    if (_suggestions.busy) {
+      _suggestions.clear();
+      return;
+    }
+    await _suggestions.request(
+      (settings) => _aiConsent.request(context, settings),
+    );
+  }
+
+  Future<void> _applySuggestion(TerminalReplySuggestion suggestion) async {
+    if (_composing ||
+        (_replyInput.value.composing.isValid &&
+            !_replyInput.value.composing.isCollapsed)) {
+      return;
+    }
+    final snapshot = _suggestions.take(suggestion);
+    if (snapshot == null) return;
+    _interaction.refresh();
+    var prompt = _interaction.prompt;
+    if (suggestion.optionNumber != null && prompt != null) {
+      final index = prompt.options.indexWhere(
+        (o) => o.number == suggestion.optionNumber,
+      );
+      if (index < 0) return;
+      final custom = prompt.options[index].custom;
+      final identity = prompt.identity;
+      if (!await _interaction.choose(prompt, index, submit: !custom) ||
+          !mounted ||
+          !custom) {
+        return;
+      }
+      prompt = _interaction.prompt;
+      if (prompt == null || prompt.identity != identity) return;
+      if (!prompt.editing && prompt.canAddNotes) {
+        if (!await _interaction.key(prompt, TerminalKey.tab) || !mounted) {
+          return;
+        }
+        prompt = _interaction.prompt;
+        if (prompt == null || prompt.identity != identity) return;
+      }
+    }
+    if (!mounted) return;
+    if (snapshot.prompt != null &&
+        prompt?.identity != snapshot.prompt!.identity) {
+      return;
+    }
+    if (prompt != null && prompt.editing) {
+      _replyInput.text = suggestion.text;
+      if (await _interaction.sendText(prompt, suggestion.text) && mounted) {
+        _replyInput.clear();
+      }
+    } else if (prompt == null) {
+      _input.text = suggestion.text;
+      _send();
+    }
   }
 
   @override
   void didUpdateWidget(covariant TerminalGuiView oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.terminal != widget.terminal) {
+      _suggestions.dispose();
       _document.dispose();
       _interaction.dispose();
       _attach();
     }
+    if (oldWidget.aiConsentStore != widget.aiConsentStore) {
+      _aiConsent = AiDataConsent(store: widget.aiConsentStore);
+    }
+    _configureSuggestions();
     _interaction.setEnabled(
       _visible && _appActive && widget.active && widget.connected,
     );
@@ -161,6 +267,7 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
     super.didChangeDependencies();
     // Hidden session tabs retain their reader/draft without projecting every frame.
     _visible = TickerMode.valuesOf(context).enabled;
+    _configureSuggestions();
     _document.setEnabled(_visible);
     _interaction.setEnabled(
       _visible && _appActive && widget.active && widget.connected,
@@ -171,6 +278,7 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _appActive = state == AppLifecycleState.resumed;
+    _configureSuggestions();
     if (state == AppLifecycleState.resumed && widget.active && _visible) {
       _interaction.setEnabled(widget.connected);
       if (_document.paused) {
@@ -339,6 +447,7 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _document.dispose();
+    _suggestions.dispose();
     _interaction.dispose();
     _scroll.dispose();
     _input.dispose();
@@ -459,16 +568,32 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
               ),
             ),
             const Divider(height: 1),
-            if (_interaction.prompt case final prompt?)
+            if (_interaction.prompt != null || _suggestions.hasContent)
               ConstrainedBox(
                 constraints: BoxConstraints(
                   maxHeight: constraints.maxHeight * 0.48,
                 ),
-                child: TerminalInteractionCard(
-                  key: ValueKey(prompt.identity),
-                  controller: _interaction,
-                  prompt: prompt,
-                  input: _replyInput,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (_interaction.prompt case final prompt?)
+                      Flexible(
+                        child: TerminalInteractionCard(
+                          key: ValueKey(prompt.identity),
+                          controller: _interaction,
+                          prompt: prompt,
+                          input: _replyInput,
+                        ),
+                      ),
+                    if (_suggestions.hasContent)
+                      Flexible(
+                        child: TerminalReplySuggestionPanel(
+                          controller: _suggestions,
+                          onSelected: (suggestion) =>
+                              unawaited(_applySuggestion(suggestion)),
+                        ),
+                      ),
+                  ],
                 ),
               ),
             Padding(
@@ -477,40 +602,66 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   Expanded(
-                    child: TextField(
-                      key: const ValueKey('terminal-gui-command'),
+                    child: TerminalNativeTextInput(
                       controller: _input,
                       focusNode: _inputFocus,
-                      enabled: widget.connected && _interaction.prompt == null,
-                      minLines: 1,
-                      maxLines: 4,
-                      keyboardType: TextInputType.multiline,
-                      textInputAction: TextInputAction.send,
-                      // Keep the IME and its composing range intact until _send
-                      // checks it; Flutter's default completion clears both.
-                      onEditingComplete: () {},
-                      onSubmitted: (_) => _send(),
-                      contextMenuBuilder: (context, state) =>
-                          terminalGuiSelectionToolbar(
-                            context,
-                            state.contextMenuAnchors,
-                            state.contextMenuButtonItems,
-                            selectedText: state.widget.controller.selection
-                                .textInside(state.widget.controller.text),
-                            hideToolbar: state.hideToolbar,
-                          ),
-                      decoration: InputDecoration(
-                        hintText: widget.connected
-                            ? (_interaction.prompt != null
-                                  ? '위 질문에 답변해 주세요.'
-                                  : 'Enter로 전송 · Shift+Enter로 줄바꿈')
-                            : '연결이 끊겼습니다.',
-                        border: const OutlineInputBorder(),
-                        isDense: true,
+                      enabled:
+                          widget.connected &&
+                          widget.active &&
+                          _visible &&
+                          _appActive &&
+                          _interaction.prompt == null,
+                      child: TextField(
+                        key: const ValueKey('terminal-gui-command'),
+                        controller: _input,
+                        focusNode: _inputFocus,
+                        enabled:
+                            widget.connected && _interaction.prompt == null,
+                        minLines: 1,
+                        maxLines: 4,
+                        keyboardType: TextInputType.multiline,
+                        textInputAction: TextInputAction.send,
+                        // Keep the IME and its composing range intact until _send
+                        // checks it; Flutter's default completion clears both.
+                        onEditingComplete: () {},
+                        onSubmitted: (_) => _send(),
+                        contextMenuBuilder: (context, state) =>
+                            terminalGuiSelectionToolbar(
+                              context,
+                              state.contextMenuAnchors,
+                              state.contextMenuButtonItems,
+                              selectedText: state.widget.controller.selection
+                                  .textInside(state.widget.controller.text),
+                              hideToolbar: state.hideToolbar,
+                            ),
+                        decoration: InputDecoration(
+                          hintText: widget.connected
+                              ? (_interaction.prompt != null
+                                    ? '위 질문에 답변해 주세요.'
+                                    : 'Enter로 전송 · Shift+Enter로 줄바꿈')
+                              : '연결이 끊겼습니다.',
+                          border: const OutlineInputBorder(),
+                          isDense: true,
+                        ),
                       ),
                     ),
                   ),
                   const SizedBox(width: 6),
+                  IconButton(
+                    key: const ValueKey('terminal-gui-ai-suggest'),
+                    tooltip: _suggestions.busy
+                        ? '자동 응답 제안 · 생성 취소'
+                        : !_suggestions.configured
+                        ? '자동 응답 제안 · AI Chat 연결 설정이 필요합니다.'
+                        : _interaction.prompt?.kind ==
+                              TerminalInteractionKind.collapsed
+                        ? '자동 응답 제안 · 먼저 선택지를 열어 주세요.'
+                        : '자동 응답 제안',
+                    onPressed: _suggestions.busy || _suggestions.canRequest
+                        ? () => unawaited(_requestSuggestions())
+                        : null,
+                    icon: const Icon(Icons.auto_awesome_outlined),
+                  ),
                   IconButton(
                     key: const ValueKey('terminal-gui-interrupt'),
                     tooltip: '실행 중단 (Ctrl+C 전송)',

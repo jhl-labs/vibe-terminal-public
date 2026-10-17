@@ -3,7 +3,11 @@ import 'package:xterm/xterm.dart';
 
 import '../../agent/agent_session_inspector.dart';
 
+part 'codex_async_interaction.dart';
+
 enum TerminalInteractionKind { choices, collapsed, review, input }
+
+enum TerminalInteractionProtocol { standard, codexAsync }
 
 @immutable
 class TerminalInteractionOption {
@@ -12,15 +16,19 @@ class TerminalInteractionOption {
     this.label, {
     this.selected = false,
     this.checked = false,
+    this.customInput,
   });
   final int number;
   final String label;
   final bool selected;
   final bool checked;
-  bool get custom => RegExp(
-    r'^(?:type something\.?|type your own answer|none of the above|other\.?|직접 입력|기타)$',
-    caseSensitive: false,
-  ).hasMatch(label);
+  final bool? customInput;
+  bool get custom =>
+      customInput ??
+      RegExp(
+        r'^(?:type something\.?|type your own answer|none of the above|other\.?|직접 입력|기타)$',
+        caseSensitive: false,
+      ).hasMatch(label);
 }
 
 /// Only the interpreted live viewport participates; scrollback is never input.
@@ -39,6 +47,9 @@ class TerminalInteraction {
     this.editing = false,
     this.cursor = '',
     this.inputText = '',
+    this.protocol = TerminalInteractionProtocol.standard,
+    this.canNavigatePrevious = true,
+    this.canNavigateNext = true,
   });
   final String agent;
   final TerminalInteractionKind kind;
@@ -52,6 +63,10 @@ class TerminalInteraction {
   final bool editing;
   final String cursor;
   final String inputText;
+  final TerminalInteractionProtocol protocol;
+  final bool canNavigatePrevious;
+  final bool canNavigateNext;
+  bool get isCodexAsync => protocol == TerminalInteractionProtocol.codexAsync;
   int get selected => options.indexWhere((o) => o.selected);
   String get revision =>
       '$identity|$cursor|$editing|$inputText|${options.map((o) => '${o.selected}:${o.checked}').join(',')}';
@@ -64,6 +79,7 @@ class TerminalInteraction {
     final buffer = terminal.buffer;
     if (terminal.viewWidth * terminal.viewHeight > 200000) return null;
     final rows = <String>[];
+    final wrappedRows = <bool>[];
     for (var y = buffer.scrollBack; y < buffer.height; y++) {
       final line = buffer.lines[y];
       final text = StringBuffer();
@@ -79,6 +95,7 @@ class TerminalInteraction {
         );
       }
       rows.add(text.toString().trimRight());
+      wrappedRows.add(line.isWrapped);
     }
     final screen = rows.join('\n');
     final inspection = AgentSessionInspector.inspect(
@@ -93,6 +110,7 @@ class TerminalInteraction {
       cursorX: buffer.cursorX,
       cursorY: buffer.cursorY,
       previous: previous,
+      wrappedRows: wrappedRows,
       styleAt: (row, column) {
         final line = buffer.lines[buffer.scrollBack + row];
         return (
@@ -129,6 +147,7 @@ class TerminalInteractionParser {
     int cursorX = -1,
     int cursorY = -1,
     TerminalInteraction? previous,
+    List<bool>? wrappedRows,
     (int, int, int) Function(int row, int column)? styleAt,
   }) {
     final rows = raw
@@ -137,6 +156,14 @@ class TerminalInteractionParser {
     final nonEmpty = rows.indexWhere((s) => s.trim().isNotEmpty);
     if (nonEmpty < 0) return null;
     final last = rows.lastIndexWhere((s) => s.trim().isNotEmpty);
+    final cursor = '$cursorX:$cursorY';
+    final collapsed = _CodexAsyncInteractionParser.collapsed(
+      rows,
+      last,
+      cursor,
+      wrappedRows,
+    );
+    if (collapsed != null) return collapsed;
     // A returned shell/normal CLI composer invalidates a historical dialog.
     if (RegExp(
       r'^(?:[\w.@:/~ -]+)?[\$#>%❯›]\s*$',
@@ -145,27 +172,15 @@ class TerminalInteractionParser {
     }
     final text = rows.join('\n');
     final lower = text.toLowerCase();
-    final cursor = '$cursorX:$cursorY';
-    final collapsed = RegExp(
-      r'shift\s*\+\s*(?:←|left)\s+to answer',
-      caseSensitive: false,
-    );
-    final collapsedRow = rows.lastIndexWhere((s) => collapsed.hasMatch(s));
-    if (collapsedRow >= last - 2 && collapsedRow >= 0) {
-      if (_insideFence(rows, collapsedRow)) return null;
-      return TerminalInteraction(
-        agent: 'codex',
-        kind: TerminalInteractionKind.collapsed,
-        question: rows
-            .sublist(
-              (collapsedRow - 2).clamp(0, collapsedRow),
-              collapsedRow + 1,
-            )
-            .join('\n')
-            .trim(),
-        options: const [],
-        identity: 'codex:collapsed:${rows[collapsedRow]}',
-        cursor: cursor,
+    final asyncFooter = _CodexAsyncInteractionParser.footer(rows, last);
+    if (asyncFooter != null) {
+      return _CodexAsyncInteractionParser.expanded(
+        rows,
+        last,
+        cursorX,
+        cursorY,
+        previous,
+        asyncFooter,
       );
     }
     final footer = rows.lastIndexWhere((s) => _footer.hasMatch(s));

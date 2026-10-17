@@ -25,6 +25,7 @@ import 'action_bar_catalog.dart';
 import 'gui/terminal_gui_mode.dart';
 import 'gui/terminal_gui_view.dart';
 import 'terminal_native_ime.dart';
+import 'terminal_native_text_input.dart';
 import 'terminal_selection_overlay.dart';
 
 /// 세션 하나의 터미널 화면. 줌(핀치/단축키)과 keep-alive를 담당한다.
@@ -115,6 +116,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   String _lastClearedImeText = '';
   DateTime? _lastClearedImeTextAt;
   String _sentTextInputPrefix = '';
+  // Android에서 한글 뒤의 '/' 등 확정 경계는 전송만 한다. 편집값까지
+  // 초기화하면 이어지는 한글 입력의 IME 문맥이 끊길 수 있다.
+  bool _retainsAndroidImeContext = false;
   bool _controlModifierActive = false;
   bool _altModifierActive = false;
   bool _metaModifierActive = false;
@@ -1085,13 +1089,15 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     final text = value.text;
     _traceInput('textCommit candidate ${_describeEditingValue(value)}');
     if (text.isEmpty) {
-      // Windows는 clear를 미루므로 버퍼에 남은 텍스트가 전부 서버로 보낸
-      // 것일 수 있다. 사용자가 그것을 끝까지 지웠다면 서버에서도 지워야 한다.
+      // 데스크톱의 지연 clear와 Android의 문맥 보존에서는 버퍼에 남은
+      // 텍스트가 이미 전송됐을 수 있다. 끝까지 지웠다면 서버에서도 지운다.
       // (백스페이스 방식 IME의 중간 '' 상태는 prefix가 비어 있어 영향 없음.)
-      if (_defersTextInputBufferClear && _sentTextInputPrefix.isNotEmpty) {
+      if ((_defersTextInputBufferClear || _retainsAndroidImeContext) &&
+          _sentTextInputPrefix.isNotEmpty) {
         _sendNewCommittedPrefix('', 0);
       }
       _sentTextInputPrefix = '';
+      _retainsAndroidImeContext = false;
       _updateComposingText(null);
       // IME가 Backspace 등으로 anchor까지 지웠다면 즉시 복구한다. 빈
       // setEditingState가 다음 조합의 한글 모드를 해제하지 않게 하기 위함이다.
@@ -1122,13 +1128,17 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
         // 이 경우에도 아직 서버로 보내지 않은 꼬리를 보여 줘야
         // 사용자가 idle commit을 기다리는 동안 입력이 누락된 것처럼 보이지 않는다.
         _updateComposingText(text.substring(committedEnd));
-        // 공백 등 한글 조합 경계를 넘어 확정된 텍스트는 더 이상 백스페이스로
-        // 분해될 수 없다. 이 시점에 버퍼를 비워, 우리 shadow(_sentTextInputPrefix)가
-        // 문장 전체로 누적돼 서버 표시와 desync되는 것을 막는다. desync는 "엔터로
-        // 버퍼를 비워야만 복구"되는 입력 꼬임의 원인이므로, 경계마다 자동
-        // 리셋해 desync 범위를 단어 단위로 가둔다(이슈 #3).
+        // Android에서는 '/' 등으로 한글이 확정돼도 플랫폼 편집값을
+        // 유지한다. 서버 전송과 IME 필드 초기화를 분리해 다음 한글 조합의
+        // 문맥을 보존한다. Enter·커서 이동 등 명시적 터미널 키는 기존처럼
+        // flush해서 이미 보낸 prefix를 다음 명령에 재사용하지 않는다.
         if (_endsAtImeCommitBoundary(text)) {
-          _flushTextInputBuffer();
+          if (defaultTargetPlatform == TargetPlatform.android) {
+            _retainsAndroidImeContext = true;
+            _commitImeTextWithoutClearing();
+          } else {
+            _flushTextInputBuffer();
+          }
         } else {
           _scheduleImeIdleCommit(value);
         }
@@ -1137,7 +1147,8 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     }
 
     _updateComposingText(null);
-    if (_sendNewCommittedPrefix(text, text.length)) {
+    if (_sendNewCommittedPrefix(text, text.length) &&
+        !_retainsAndroidImeContext) {
       _releaseTextInputBuffer();
     }
   }
@@ -1384,6 +1395,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     _clearingInput = true;
     _inputController.value = _emptyImeEditingValue;
     _sentTextInputPrefix = '';
+    _retainsAndroidImeContext = false;
     _clearingInput = false;
     _updateComposingText(null);
   }
@@ -1509,6 +1521,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   }
 
   bool _flushPendingAsciiTextInput(TextEditingValue value) {
+    // Earlier physical keys can still have a timer pending after a Hangul
+    // boundary. Deleting Hangul must not let that timer reset retained context.
+    if (_retainsAndroidImeContext) return false;
     if (value.text.isEmpty) return false;
     if (!_isAsciiPrintableText(value.text)) return false;
     _traceInput('hardwareText pending ascii ${_describeEditingValue(value)}');
@@ -2079,6 +2094,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     // 되돌리기 후보에서도 제외한다(백스페이스가 엉뚱한 글자를 지우지 않게).
     _unconfirmedHardwareText = '';
     _unconfirmedHardwareTextAt = null;
+    // Ctrl+C 같은 서버 편집 키는 앞선 flush를 거치지 않아도 문맥을 바꾼다.
+    // Android에서 보존한 편집값을 버려 다음 갱신이 이전 줄을 재전송하지 않게 한다.
+    if (_retainsAndroidImeContext) _clearTextInputBuffer();
     if (_sentTextInputPrefix.isEmpty && _lastClearedImeText.isEmpty) return;
     _traceInput(
       'terminal key drops shadow sent="$_sentTextInputPrefix" '
@@ -2151,11 +2169,26 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     return value.runes.any((rune) => rune > 0x7F);
   }
 
-  /// IME 텍스트가 한글 조합 경계로 끝나는지. 마지막 글자가 한글 음절/자모가
-  /// 아니면(공백·`/`·`.`·`-`·숫자 등) 직전 한글은 백스페이스로 분해해도 그 글자를
-  /// 넘어갈 수 없으므로, 여기서 버퍼를 비워 shadow 누적을 끊어도 분해 처리가
-  /// 깨지지 않는다. 터미널에서 흔한 경로/플래그(`cd /usr`, `ls -la`)마다 자동
-  /// 재동기화돼 desync 전파 범위가 크게 줄어든다(이슈 #3).
+  /// Android/Flutter가 끝까지 처리하지 못한 물리 문자만 받아들인다.
+  /// 확정 경계 뒤에는 기존 하드웨어 fallback이 비어 있지 않은 편집값 때문에
+  /// 동작하지 않으므로, 공유 네이티브 브리지로 정상 편집 경로에 삽입한다.
+  /// 한글 꼬리·미전송 입력·다른 화면에는 영문 키를 강제로 끼워 넣지 않는다.
+  bool _canInsertRetainedAndroidCharacter(TextEditingValue value) {
+    if (!_retainsAndroidImeContext ||
+        _guiEnabled ||
+        !_isCurrentRoute ||
+        widget.session.status != SessionStatus.connected) {
+      return false;
+    }
+    final logical = _logicalInputValue();
+    return logical.text == _sentTextInputPrefix &&
+        _endsAtImeCommitBoundary(logical.text) &&
+        value.selection.isCollapsed &&
+        value.selection.extentOffset == value.text.length;
+  }
+
+  /// 마지막 문자가 한글 음절/자모가 아니면 직전 조합을 확정 전송할 수 있다.
+  /// Android의 편집 문맥 보존 여부는 전송과 별도로 결정한다.
   bool _endsAtImeCommitBoundary(String text) {
     if (text.isEmpty) return false;
     final last = text.runes.last;
@@ -2373,6 +2406,16 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     ref.listen(keyboardFocusRequestProvider, (_, _) {
       if (widget.session.id == ref.read(activeSessionIdProvider)) {
         _requestFocus(explicitKeyboard: true);
+      }
+    });
+    ref.listen(ctrlStickyProvider, (_, enabled) {
+      // 보조 키바의 Ctrl도 다음 입력부터 서버 문맥을 바꾼다. 확정 경계에
+      // 보관한 이전 텍스트가 제어 문자 뒤의 새 줄 편집에 섞이지 않게 한다.
+      if (enabled &&
+          _retainsAndroidImeContext &&
+          !_hasActiveComposing(_logicalInputValue()) &&
+          _logicalInputValue().text == _sentTextInputPrefix) {
+        _clearTextInputBuffer();
       }
     });
     ref.listen(activeSessionIdProvider, (previousId, activeId) {
@@ -2595,15 +2638,21 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
                             ),
                           ),
                         ),
-                        _TerminalImeInputLayer(
-                          editableTextKey: _editableTextKey,
+                        TerminalNativeTextInput(
                           controller: _inputController,
                           focusNode: _inputFocusNode,
-                          fontSize: fontSize,
-                          fontFamily: settings.terminalFontFamily,
-                          fontFallback: settings.fontFallback,
-                          onSubmitted: _handleImeSubmit,
-                          onContentInserted: _handleContentInserted,
+                          enabled: !_guiEnabled,
+                          canInsert: _canInsertRetainedAndroidCharacter,
+                          child: _TerminalImeInputLayer(
+                            editableTextKey: _editableTextKey,
+                            controller: _inputController,
+                            focusNode: _inputFocusNode,
+                            fontSize: fontSize,
+                            fontFamily: settings.terminalFontFamily,
+                            fontFallback: settings.fontFallback,
+                            onSubmitted: _handleImeSubmit,
+                            onContentInserted: _handleContentInserted,
+                          ),
                         ),
                         _buildComposingOverlay(settings, fontSize),
                         // 선택 모드: 드래그를 가로채 마우스 모드(TUI)와 무관하게

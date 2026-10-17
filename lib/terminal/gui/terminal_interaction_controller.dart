@@ -26,6 +26,8 @@ class TerminalInteractionController extends ChangeNotifier {
     title: title?.call() ?? '',
     previous: prompt,
   );
+
+  TerminalInteraction? captureCurrent() => _capture();
   void _changed() {
     _updates++;
     _redraw?.complete();
@@ -117,32 +119,58 @@ class TerminalInteractionController extends ChangeNotifier {
     int generation, {
     bool shift = false,
     bool ctrl = false,
+    bool Function(TerminalInteraction?)? changed,
   }) async {
     final updates = _updates;
     final encoded = terminal.keyInput(key, shift: shift, ctrl: ctrl);
     if (!encoded) {
-      // xterm's default keytab omits Shift+Left outside the alternate buffer.
-      // Codex's inline question opener uses the same standard CSI sequence.
-      if (key == TerminalKey.arrowLeft && shift && !ctrl) {
-        terminal.textInput('\x1b[1;2D');
+      // Codex's queued editor uses shifted arrows in both directions. The
+      // default keytab omits them outside the alternate buffer.
+      if (shift &&
+          !ctrl &&
+          (key == TerminalKey.arrowLeft || key == TerminalKey.arrowRight)) {
+        terminal.textInput(
+          key == TerminalKey.arrowLeft ? '\x1b[1;2D' : '\x1b[1;2C',
+        );
       } else {
         throw StateError('이 키를 전송할 수 없습니다. 터미널 모드에서 입력해 주세요.');
       }
     }
-    await _waitFor((_) => _updates > updates, generation);
+    await _waitFor(changed ?? (_) => _updates > updates, generation);
   }
+
+  Future<bool> openQuestion(TerminalInteraction expected) =>
+      _run(expected, (generation) async {
+        if (expected.kind != TerminalInteractionKind.collapsed) {
+          throw StateError('현재 화면에 접힌 질문이 없습니다.');
+        }
+        await _keyAndRedraw(
+          TerminalKey.arrowLeft,
+          generation,
+          shift: true,
+          changed: (next) =>
+              next?.agent == 'codex' &&
+              next?.kind != TerminalInteractionKind.collapsed,
+        );
+      });
 
   Future<bool> choose(
     TerminalInteraction expected,
-    int index,
-  ) => _run(expected, (generation) async {
+    int index, {
+    bool submit = true,
+  }) => _run(expected, (generation) async {
     if (index < 0 ||
         index >= expected.options.length ||
-        expected.editing && expected.agent != 'claude') {
+        expected.editing &&
+            expected.agent != 'claude' &&
+            !expected.isCodexAsync) {
       throw StateError('현재 입력란을 먼저 완료해 주세요.');
     }
     // OpenCode explicitly binds digits to pick/toggle, independent of ANSI color.
-    if (expected.agent == 'opencode' && !expected.horizontal && index < 9) {
+    if (expected.agent == 'opencode' &&
+        !expected.horizontal &&
+        index < 9 &&
+        (submit || expected.options[index].custom)) {
       final updates = _updates;
       terminal.textInput('${index + 1}');
       await _waitFor((_) => _updates > updates, generation);
@@ -175,8 +203,12 @@ class TerminalInteractionController extends ChangeNotifier {
     if (!_valid(expected, generation)) {
       throw StateError('질문이 변경되었습니다. 다시 선택해 주세요.');
     }
-    // Claude's "Type something" is already an editor when it gains focus.
-    if (expected.agent == 'claude' && expected.options[index].custom) return;
+    if (!submit) return;
+    // Inline custom editors become active on focus; Enter would submit them.
+    if ((expected.agent == 'claude' || expected.isCodexAsync) &&
+        expected.options[index].custom) {
+      return;
+    }
     if (expected.multiple &&
         expected.agent == 'claude' &&
         !const {'Submit', 'Next'}.contains(expected.options[index].label)) {

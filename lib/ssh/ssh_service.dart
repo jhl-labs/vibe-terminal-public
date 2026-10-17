@@ -11,6 +11,7 @@ import '../security/host_key_store.dart';
 import '../security/secure_store.dart';
 import '../terminal/terminal_session_handle.dart';
 import 'ssh_credentials.dart';
+import 'native_ssh_socket.dart';
 import 'remote_session_catalog.dart';
 import 'remote_terminal_launcher.dart';
 import 'ssh_session_lifecycle.dart';
@@ -226,7 +227,11 @@ class SshSessionHandle implements TerminalSessionHandle {
     final name = persistentSessionName;
     if (name == null) return RemoteSessionTerminationOutcome.terminated;
     try {
-      _session.close();
+      // SSHSession.close() only sends EOF while remote output remains open.
+      // A tmux client can ignore that EOF and remain counted as another viewer.
+      // Close this terminal channel in both directions; keep SSH available for
+      // the separate guarded termination command below.
+      _session.channel.destroy();
       final result = await _client
           .runWithResult(
             TmuxRemoteTerminalLauncher.killCommandFor(
@@ -455,7 +460,7 @@ class SshService {
                 return Err(failure);
             }
           } else if (i == 0) {
-            socket = await SSHSocket.connect(
+            socket = await connectNativeSshSocket(
               hop.hostname,
               hop.port,
               timeout: const Duration(seconds: 15),
