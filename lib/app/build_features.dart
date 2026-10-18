@@ -76,17 +76,12 @@ class BuildFeatures {
 
   /// 시작할 때 GitHub Release에서 새 버전을 확인할지 여부.
   ///
-  /// 다른 플래그와 달리 디버그에서도 기본값이 꺼짐이다. 이 기능은 공개
-  /// 배포판(GitHub Release로 내보내는 빌드)에서만 의미가 있고, 사설 PRO
-  /// 배포판은 스토어와 라이선스 키로 업데이트를 받기 때문이다
-  /// (`docs/11-pro-distribution-and-licensing.md`). 개발 중에 매번 공개
-  /// 저장소를 조회하는 것도 잡음이다.
+  /// 디버그에서는 기본값이 꺼져 있다.
   final bool updateCheck;
   final bool settingsAi;
   final bool settingsAbout;
 
-  /// Crashlytics·Analytics·푸시 등 텔레메트리 기능 노출 여부. 공개판(Core)은
-  /// 항상 꺼져 있으며, 모바일 Pro 빌드만 `build-env`에서 명시적으로 켠다.
+  /// 이 배포판에서는 비활성화되어 있다.
   final bool telemetry;
 
   bool get github => settingsGithub;

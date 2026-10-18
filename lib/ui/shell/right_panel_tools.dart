@@ -18,9 +18,7 @@ List<RightPanelTool> allRightPanelToolsForBuild(BuildFeatures features) {
     RightPanelTool.paneLayout,
     if (features.snippets) RightPanelTool.snippets,
     // 세션 정보는 스니펫 패널에 딸려 있던 탭이었다. 별도 도구로 분리했지만
-    // 여전히 snippets 빌드 플래그를 공유한다(새 define을 추가하면
-    // build-env·PRO_EDITION·public-release feature-map까지 다 건드려야
-    // 해서, 원래 같이 묶여 있던 기능이라는 점을 근거로 재사용한다).
+    // 스니펫과 같은 표시 설정을 공유한다.
     if (features.snippets) RightPanelTool.sessionInfo,
     if (features.aiChat) RightPanelTool.aiChat,
     if (features.memo) RightPanelTool.memo,
@@ -75,8 +73,7 @@ IconData rightPanelToolIcon(RightPanelTool tool) {
   };
 }
 
-/// 도구 이름. Pro 전용 앱(PRO_EDITION.md)은 `(PRO)`를 붙여 툴팁·명령 팔레트·
-/// 모바일 도구 메뉴·설정 화면에서 바로 구분되게 한다.
+/// 사용자에게 표시할 도구 이름.
 String rightPanelToolLabel(RightPanelTool tool) {
   return switch (tool) {
     RightPanelTool.paneLayout => '화면 분할 관리',

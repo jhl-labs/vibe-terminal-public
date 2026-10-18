@@ -1020,13 +1020,9 @@ class _RailHeader extends ConsumerWidget {
                   ),
                 ),
                 const SizedBox(height: 2),
-                // 에디션(Core/Pro)과 버전. 빌드 번호 등 상세는 설정 > About.
                 Row(
                   children: [
                     Flexible(
-                      // Core(공개판)에서는 클릭으로 릴리즈 노트를 연다. Pro는
-                      // GitHub Release로 배포하지 않으므로 아무 일도 하지
-                      // 않는다.
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onTap: AppEdition.current == AppEdition.core

@@ -282,8 +282,8 @@ class _CliConfigPanelState extends ConsumerState<CliConfigPanel> {
         !installedApps.contains(widget.app);
     final body = _useRemote
         ? const Center(
-            key: ValueKey('cli-config-remote-pro-only'),
-            child: Text('Remote 설정은 Pro 에디션에서 제공합니다.'),
+            key: ValueKey('cli-config-remote-unavailable'),
+            child: Text('이 배포판에서는 로컬 CLI 설정을 지원합니다.'),
           )
         : home == null
         ? _MissingHome(

@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../../app/app_edition.dart';
 
 import '../../settings/app_settings.dart';
 import '../../ai/ai_consent_store.dart';
@@ -73,12 +72,9 @@ class AiDataConsent {
         actions: [
           TextButton(
             onPressed: () async {
-              final edition = AppEdition.current == AppEdition.core
-                  ? 'core'
-                  : 'pro';
               final opened = await launchUrl(
                 Uri.parse(
-                  'https://jhl-labs.github.io/vibe-terminal/$edition/privacy/',
+                  'https://jhl-labs.github.io/vibe-terminal/core/privacy/',
                 ),
                 mode: LaunchMode.externalApplication,
               );

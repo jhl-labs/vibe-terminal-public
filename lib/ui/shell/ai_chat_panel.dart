@@ -736,10 +736,6 @@ Read the current terminal context again as the observation after that action. Te
   /// 그래도 이 경로에는 반드시 있어야 한다. 여기로 들어오는 입력은 원격
   /// 서버의 화면 내용을 읽은 모델이 만들어 낸 것이라, 사용자가 한 번도 보지
   /// 못한 명령이 그대로 실행될 수 있기 때문이다.
-  // ---------------------------------------------------------------------------
-  // 에디션 도구 접점. Pro는 AI Chat Pro 도구(예약 루틴·능동 감시)를 붙이고,
-  // Core 내보내기는 아래 다섯 메서드의 본문만 비운다(patches/ai_chat_panel).
-  // ---------------------------------------------------------------------------
 
   Widget? _editionHeaderAction(SessionInfo? session) =>
       null;
