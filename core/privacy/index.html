@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>개인정보처리방침 | Vibe Terminal Core</title>
+  <meta name="description" content="Vibe Terminal Core의 기기 내 저장, SSH·AI·GitHub 통신, 개인정보 보관·삭제 및 문의 방법을 안내합니다." />
+  <meta name="theme-color" content="#0d1210" />
+  <link rel="canonical" href="https://jhl-labs.github.io/vibe-terminal-public/core/privacy/" />
+  <link rel="alternate" hreflang="en" href="en/" />
+  <link rel="icon" href="../../assets/favicon.ico" />
+  <link rel="stylesheet" href="../../assets/legal.css" />
+</head>
+<body data-edition="core">
+  <header><div class="wrap"><nav aria-label="사이트 안내">
+    <a class="brand" href="../"><img src="../../assets/brand-mark.png" alt="" />Vibe Terminal Core</a>
+    <div class="languages"><span aria-current="page">한국어</span><a href="en/" lang="en" hreflang="en">English</a><a href="mailto:bkperio@gmail.com">문의</a></div>
+  </nav></div></header>
+  <main class="wrap">
+    <nav class="edition-nav" aria-label="Product edition"><span aria-current="page">Core · 무료판</span><a href="../../pro/">Pro · 별도 제품</a></nav>
+    <p class="eyebrow">VIBE TERMINAL CORE · PRIVACY</p>
+    <h1>Core 개인정보처리방침</h1>
+    <p class="meta">시행일·최종 수정일: <time datetime="2026-10-08">2026-10-08</time></p>
+    <p>Vibe Terminal 개발자(jhl-labs, 이하 “개발자”)는 사용자의 정보를 다음과 같이 처리합니다. 이 방침은 무료판 <strong>Vibe Terminal Core</strong>에 적용됩니다. Google Play 등록명은 <strong>Vibe Terminal: SSH 터미널</strong>, Android 패키지명은 <code>com.euno.vibe_terminal</code>입니다. 별도의 Pro 제품에 이 방침을 그대로 적용하지 않습니다.</p>
+    <div class="summary">
+      <p><strong>기본 터미널 작업은 사용자의 기기와 선택한 서버 사이에서 이루어집니다.</strong></p>
+      <p>Core에는 Firebase Analytics·Crashlytics·Cloud Messaging 및 광고 SDK가 포함되지 않습니다. 선택적으로 사용하는 AI, GitHub 동기화·커뮤니티, 업데이트 확인에는 외부 서비스와의 통신이 발생합니다.</p>
+      <p>개인정보 문의: <a href="mailto:bkperio@gmail.com">bkperio@gmail.com</a></p>
+    </div>
+    <ol class="contents" aria-label="목차">
+      <li><a href="#local">기기에 저장하는 정보</a></li><li><a href="#network">네트워크 전송과 제3자</a></li>
+      <li><a href="#permissions">권한과 보안</a></li><li><a href="#retention">보관과 삭제</a></li>
+      <li><a href="#support">문의와 권리 행사</a></li><li><a href="#website">소개 사이트와 영상</a></li>
+      <li><a href="#children">어린이 개인정보</a></li><li><a href="#changes">변경 안내</a></li>
+    </ol>
+    <section id="local">
+      <h2>1. 기기에 저장하는 정보와 이용 목적</h2>
+      <p>SSH 연결, 작업 복원 및 사용자가 선택한 부가 기능을 제공하기 위해 다음 정보를 기기 안에서 처리할 수 있습니다.</p>
+      <ul>
+        <li>호스트 별칭·주소·포트·사용자명·접속 설정, 신뢰한 호스트키 지문</li>
+        <li>SSH 비밀번호·개인키·암호문구, AI 및 GitHub 인증 토큰</li>
+        <li>터미널 화면·세션 기록·명령과 출력·작업 경로, 스니펫·메모·설정</li>
+        <li>AI 대화·프롬프트와 전달한 텍스트 컨텍스트, AI 제공자·모델·접속 주소</li>
+      </ul>
+      <p>인증 비밀은 운영체제 보안 저장소를 사용합니다. 일반 설정과 작업 데이터는 앱의 로컬 저장소에 보관하며, 모든 로컬 데이터가 별도로 암호화되어 있다고 의미하지는 않습니다. Core 이용을 위한 개발자 운영 계정 가입은 요구하지 않습니다.</p>
+    </section>
+    <section id="network">
+      <h2>2. 네트워크 전송과 제3자 서비스</h2>
+      <p>개발자는 SSH 인증 정보나 터미널 내용을 별도 수집 서버로 자동 전송하거나 판매하지 않습니다. 다음 기능을 사용하면 필요한 정보가 해당 수신자에게 전달됩니다.</p>
+      <div class="table-scroll"><table>
+        <thead><tr><th scope="col">기능·수신자</th><th scope="col">전송되는 정보·목적</th></tr></thead>
+        <tbody>
+          <tr><td>사용자가 선택한 SSH 서버</td><td>인증 방식에 필요한 정보, 명령·터미널 입출력 및 사용자가 요청한 파일 내용. SSH 접속과 원격 작업에 사용합니다. 서버 운영자는 접속 주소와 활동을 기록할 수 있습니다.</td></tr>
+          <tr><td>선택적 AI 기능<br />OpenAI·Google Gemini·Anthropic 또는 지정한 호환 서버</td><td>질문·대화, 터미널 화면·명령·경로 및 기능 설정이나 요청에 따라 추가되는 세션 로그 텍스트, 인증에 필요한 API 토큰. 답변 생성·작업 보조에 사용합니다. 현재 Core AI Chat은 텍스트 요청을 사용하며 파일·이미지를 직접 첨부하는 업로드 기능은 제공하지 않습니다. 파일 내용도 붙여넣거나 터미널 출력·로그에 포함되면 텍스트로 전송될 수 있으므로 확인하세요.</td></tr>
+          <tr><td>선택적 GitHub·GitHub Enterprise 동기화</td><td>인증 정보와 저장소 지정, 사용자가 설정한 동기화 데이터. 전체 백업은 호스트·메모·설정과 인증 비밀을 포함할 수 있으며 동기화 암호로 암호화한 스냅샷으로 전송합니다. 원격 사본과 저장소 접근 권한은 사용자가 관리합니다.</td></tr>
+          <tr><td>선택적 GitHub Gist·커뮤니티</td><td>직접 내보낸 스니펫, 직접 작성한 Issues·Discussions의 제목·본문, 조회 요청과 GitHub 인증 정보. 스니펫 Gist는 별도의 전체 백업 암호화와 다릅니다. 공개 범위와 내용을 확인하세요. 공개 게시물은 다른 사용자도 볼 수 있습니다.</td></tr>
+          <tr><td>GitHub 업데이트·릴리즈 확인</td><td>릴리즈 조회 요청과 버전 비교에 필요한 공개 릴리즈 정보. GitHub는 요청 처리 과정에서 접속 IP·요청 시각·앱의 User-Agent 등 통신 정보를 처리할 수 있습니다. 자동 업데이트 확인은 앱 설정에서 관리할 수 있습니다.</td></tr>
+        </tbody>
+      </table></div>
+      <p>사용자가 실행한 외부 CLI·명령·링크도 해당 서비스와 통신할 수 있습니다. 외부 서비스의 보관·삭제·국외 처리 조건은 해당 제공자의 정책과 사용자 계정 설정에 따릅니다. 제공자에 따라 데이터가 사용자의 거주 국가 밖에서 처리될 수 있으며, 기능을 사용하지 않거나 연결을 해제해 해당 선택적 전송을 중지할 수 있습니다.</p>
+      <p>관련 정책: <a href="https://openai.com/policies/privacy-policy/">OpenAI</a> · <a href="https://policies.google.com/privacy">Google</a> · <a href="https://www.anthropic.com/legal/privacy">Anthropic</a> · <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub</a>. 직접 지정한 서버에는 그 운영자의 정책이 적용됩니다.</p>
+    </section>
+    <section id="permissions">
+      <h2>3. 권한과 보안</h2>
+      <p>네트워크 권한은 SSH와 선택한 외부 서비스 접속에 사용합니다. Android 포그라운드 서비스·알림·절전 방지 기능은 사용자가 시작한 SSH 연결을 백그라운드에서도 유지하고 상태를 표시하기 위한 것입니다. 파일·클립보드 기능은 사용자가 요청한 가져오기·내보내기·붙여넣기 등에 사용합니다.</p>
+      <p>SSH 통신 암호화, 호스트키 확인, 운영체제 보안 저장소를 사용합니다. Android 배포 구성에서는 앱 데이터의 시스템 백업·기기 간 자동 추출을 제한합니다. 사용자가 직접 내보낸 파일, 원격 백업 또는 서버에 보낸 데이터까지 삭제하거나 통제하지는 않습니다. 직접 설정한 외부 서버의 전송 보안도 확인하세요.</p>
+    </section>
+    <section id="retention">
+      <h2>4. 보관 기간과 삭제 방법</h2>
+      <ul>
+        <li>기기 내 호스트·키·스니펫·메모·대화·기록은 해당 기능의 삭제 동작이나 앱 데이터 초기화 전까지, 또는 앱의 기록 보관 설정에 따라 유지될 수 있습니다.</li>
+        <li>항목을 삭제해도 다른 호스트에서 공유하는 인증 정보·키나 별도 작업 기록이 남을 수 있습니다. 필요 없는 인증 정보·키·대화·기록도 해당 화면에서 별도로 정리하세요.</li>
+        <li>Android에서는 시스템 설정의 앱 저장공간에서 데이터 삭제를 하거나 앱을 제거하여 앱 전용 로컬 데이터를 정리할 수 있습니다.</li>
+        <li>GitHub 저장소·Gist·게시물·외부 AI 서비스·SSH 서버의 데이터와 직접 내보낸 파일은 앱 제거로 삭제되지 않습니다. 해당 서비스나 파일 저장 위치에서 별도로 삭제해야 하며, Git 이력과 제공자 백업에 이전 내용이 남을 수 있습니다.</li>
+      </ul>
+      <p>개발자는 기기에만 있는 SSH 자격증명이나 작업 기록을 원격으로 열람·복구·삭제할 수 없습니다.</p>
+    </section>
+    <section id="support">
+      <h2>5. 문의 정보와 개인정보 권리 행사</h2>
+      <p>개인정보 처리 문의, 개발자가 보유한 문의 정보의 열람·정정·삭제·처리 중지 요청은 <a href="mailto:bkperio@gmail.com">bkperio@gmail.com</a>으로 보내주세요. 담당: Vibe Terminal 개발자(jhl-labs).</p>
+      <p>이메일 문의 시 이메일 주소, 문의 내용과 사용자가 직접 보낸 첨부파일을 답변·문제 해결에 사용합니다. Gmail을 통해 수신되므로 Google의 이메일 서비스에서도 처리됩니다. 비밀번호·개인키·토큰·개인정보가 포함된 원본 로그는 보내지 마세요. 목적이 달성되어 불필요해진 문의 정보는 삭제하며, 법령상 보관이 필요한 경우 해당 의무 범위에서 보관합니다.</p>
+    </section>
+    <section id="website">
+      <h2>6. 소개 사이트와 영상</h2>
+      <p>이 사이트는 GitHub Pages에서 제공되며 GitHub가 서비스 제공·보안을 위해 IP 주소 등 접속 정보를 처리할 수 있습니다. 별도 광고·방문 분석 스크립트는 사용하지 않습니다. 소개 페이지의 언어·테마 선택은 브라우저의 로컬 저장소에 저장되며 사이트 데이터 삭제로 지울 수 있습니다.</p>
+      <p>Core 시연 영상은 vcoder.kr에서 제공합니다. 영상을 재생하면 해당 서버에 IP 주소·브라우저 정보·미디어 요청이 전달될 수 있습니다. 영상은 자동 재생하지 않습니다. <a href="https://vcoder.kr/privacy">VCoder 개인정보처리방침</a></p>
+    </section>
+    <section id="children"><h2>7. 어린이 개인정보</h2><p>이 앱은 개발자·운영자 등 터미널 사용자를 위한 도구이며 만 14세 미만 어린이를 대상으로 설계하거나 개인정보를 의도적으로 수집하지 않습니다. 관련 우려가 있다면 위 연락처로 알려주세요.</p></section>
+    <section id="changes"><h2>8. 방침 변경</h2><p>기능이나 데이터 처리 방식이 바뀌면 이 페이지의 내용과 수정일을 갱신합니다. 중요한 변경은 적용 전에 소개 사이트 또는 배포 안내를 통해 알립니다.</p></section>
+  </main>
+  <footer><div class="wrap"><a href="../">소개 사이트</a> · <a href="en/" lang="en">English privacy policy</a> · <a href="mailto:bkperio@gmail.com">bkperio@gmail.com</a></div></footer>
+</body>
+</html>

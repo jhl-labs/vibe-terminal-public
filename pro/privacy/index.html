@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>개인정보처리방침 | Vibe Terminal Pro</title>
+  <meta name="description" content="Vibe Terminal Pro의 기기 내 저장, SSH·AI·GitHub 통신, 개인정보 보관·삭제 및 문의 방법을 안내합니다." />
+  <meta name="theme-color" content="#0d1210" />
+  <link rel="canonical" href="https://jhl-labs.github.io/vibe-terminal-public/pro/privacy/" />
+  <link rel="alternate" hreflang="en" href="en/" />
+  <link rel="icon" href="../../assets/favicon.ico" />
+  <link rel="stylesheet" href="../../assets/legal.css" />
+</head>
+<body data-edition="pro">
+  <header><div class="wrap"><nav aria-label="사이트 안내">
+    <a class="brand" href="../"><img src="../../assets/brand-mark.png" alt="" />Vibe Terminal Pro</a>
+    <div class="languages"><span aria-current="page">한국어</span><a href="en/" lang="en" hreflang="en">English</a><a href="mailto:bkperio@gmail.com">문의</a></div>
+  </nav></div></header>
+  <main class="wrap">
+    <nav class="edition-nav" aria-label="제품 버전"><a href="../../core/">Core · 무료판</a><span aria-current="page">Pro · 별도 유료 제품</span></nav>
+    <p class="eyebrow">VIBE TERMINAL PRO · PRIVACY</p>
+    <h1>Pro 개인정보처리방침</h1>
+    <p class="meta">출시 준비 안내 최종 수정일: <time datetime="2026-10-08">2026-10-08</time></p>
+    <p>Vibe Terminal 개발자(jhl-labs, 이하 “개발자”)가 별도 유료 제품 <strong>Vibe Terminal Pro</strong>의 데이터 처리 방식을 안내합니다.</p>
+    <div class="edition-note"><strong>출시 준비 단계 안내</strong><p>Pro의 별도 출시를 준비하는 문서입니다. 현재 Google Play 등록 대상인 무료판에는 <a href="../../core/privacy/">Core 개인정보처리방침</a>이 적용됩니다. Pro의 최종 앱 식별자·출시 구성은 출시 전 이 문서에 반영합니다.</p></div>
+    <div class="summary"><p>SSH·원격 파일·터널 작업은 사용자가 선택한 서버에 연결됩니다. AI·GitHub 연결은 선택 사항입니다.</p><p>Pro 모바일 빌드는 설정에 따라 Firebase 오류 보고·사용 통계·공지 알림을 사용할 수 있습니다. 아래에서 처리 정보와 중지 방법을 확인하세요.</p><p>개인정보 문의: <a href="mailto:bkperio@gmail.com">bkperio@gmail.com</a></p></div>
+    <ol class="contents" aria-label="목차">
+      <li><a href="#local">기기에 저장하는 정보</a></li><li><a href="#network">네트워크 전송과 제3자</a></li>
+      <li><a href="#advanced">Pro 추가 도구</a></li><li><a href="#telemetry">모바일 진단·알림</a></li><li><a href="#permissions">권한과 보안</a></li><li><a href="#retention">보관과 삭제</a></li>
+      <li><a href="#support">문의와 권리 행사</a></li><li><a href="#website">소개 사이트</a></li>
+      <li><a href="#children">어린이 개인정보</a></li><li><a href="#changes">변경 안내</a></li>
+    </ol>
+    <section id="local">
+      <h2>1. 기기에 저장하는 정보와 이용 목적</h2>
+      <p>SSH 연결, 작업 복원 및 사용자가 선택한 부가 기능을 제공하기 위해 다음 정보를 기기 안에서 처리할 수 있습니다.</p>
+      <ul>
+        <li>호스트 별칭·주소·포트·사용자명·접속 설정, 신뢰한 호스트키 지문</li>
+        <li>SSH 비밀번호·개인키·암호문구, AI 및 GitHub 인증 토큰</li>
+        <li>터미널 화면·세션 기록·명령과 출력·작업 경로, 스니펫·메모·설정</li>
+        <li>AI 대화·프롬프트·선택한 파일이나 이미지, AI 제공자·모델·접속 주소</li>
+      </ul>
+      <p>인증 비밀은 운영체제 보안 저장소를 사용합니다. 일반 설정과 작업 데이터는 앱의 로컬 저장소에 보관하며, 모든 로컬 데이터가 별도로 암호화되어 있다고 의미하지는 않습니다.</p>
+    </section>
+    <section id="network">
+      <h2>2. 네트워크 전송과 제3자 서비스</h2>
+      <p>개발자는 SSH 인증 정보나 터미널 내용을 별도 수집 서버로 자동 전송하거나 판매하지 않습니다. 다음 기능을 사용하면 필요한 정보가 해당 수신자에게 전달됩니다.</p>
+      <div class="table-scroll"><table>
+        <thead><tr><th scope="col">기능·수신자</th><th scope="col">전송되는 정보·목적</th></tr></thead>
+        <tbody>
+          <tr><td>사용자가 선택한 SSH 서버</td><td>인증 방식에 필요한 정보, 명령·터미널 입출력 및 사용자가 요청한 파일 내용. SSH 접속과 원격 작업에 사용합니다. 서버 운영자는 접속 주소와 활동을 기록할 수 있습니다.</td></tr>
+          <tr><td>선택적 AI 기능<br />OpenAI·Google Gemini·Anthropic 또는 지정한 호환 서버</td><td>질문·대화, 기능 실행 시 선택하거나 컨텍스트로 포함된 터미널 출력·명령·경로·파일·이미지, 인증에 필요한 API 토큰. 답변 생성·작업 보조에 사용합니다. 컨텍스트에 민감한 정보가 포함될 수 있으므로 전송할 내용을 확인하세요.</td></tr>
+          <tr><td>선택적 GitHub·GitHub Enterprise 동기화</td><td>인증 정보와 저장소 지정, 사용자가 설정한 동기화 데이터. 전체 백업은 호스트·메모·설정과 인증 비밀을 포함할 수 있으며 동기화 암호로 암호화한 스냅샷으로 전송합니다. 원격 사본과 저장소 접근 권한은 사용자가 관리합니다.</td></tr>
+          <tr><td>선택적 GitHub Gist·커뮤니티</td><td>직접 내보낸 스니펫, 게시물·댓글·첨부 내용과 GitHub 인증 정보. 스니펫 Gist는 별도의 전체 백업 암호화와 다릅니다. 공개 범위와 내용을 확인하세요. 공개 게시물은 다른 사용자도 볼 수 있습니다.</td></tr>
+        </tbody>
+      </table></div>
+      <p>사용자가 실행한 외부 CLI·명령·링크도 해당 서비스와 통신할 수 있습니다. 외부 서비스의 보관·삭제·국외 처리 조건은 해당 제공자의 정책과 사용자 계정 설정에 따릅니다. 제공자에 따라 데이터가 사용자의 거주 국가 밖에서 처리될 수 있으며, 기능을 사용하지 않거나 연결을 해제해 해당 선택적 전송을 중지할 수 있습니다.</p>
+      <p>관련 정책: <a href="https://openai.com/policies/privacy-policy/">OpenAI</a> · <a href="https://policies.google.com/privacy">Google</a> · <a href="https://www.anthropic.com/legal/privacy">Anthropic</a> · <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub</a>. 직접 지정한 서버에는 그 운영자의 정책이 적용됩니다.</p>
+    </section>
+    <section id="advanced"><h2>3. Pro 추가 도구의 데이터 처리</h2>
+      <p>SFTP는 사용자가 선택한 서버·경로와 파일 내용·파일명·메타데이터를 파일 탐색·전송에 사용합니다. 포트 포워딩은 설정한 대상의 통신을 SSH 터널로 전달하며 대상 서비스에도 관련 요청이 도달합니다. Vault와 작업 패널은 사용자가 저장하거나 가져온 내용·접속 설정을 해당 기능에 사용합니다.</p>
+      <p>Agent Chat·작업 조율·자율사용·AI 루틴·감시 기능은 선택한 명령, 작업 경로, 대화와 터미널·파일 컨텍스트를 처리하고 설정한 AI 제공자·CLI·서버에 전송하거나 명령을 실행할 수 있습니다. 예약·자동 실행을 포함한 전송 범위와 작업 권한은 사용자가 설정합니다. 사용하지 않는 자동화는 중지하고 민감한 컨텍스트를 점검하세요. 브라우저·사용자 정의 앱·X11 등의 연결 대상도 자체적으로 데이터를 처리할 수 있습니다. 지원 기능은 플랫폼과 빌드 구성에 따라 다릅니다.</p>
+    </section>
+    <section id="telemetry"><h2>4. 모바일 진단·사용 통계·공지 알림</h2>
+      <p>Android·iOS에서 Firebase가 활성화된 Pro 빌드는 사용자의 진단·알림 설정에 따라 다음 서비스를 사용합니다. 데스크톱에 같은 Firebase 수집이 적용된다고 의미하지 않습니다. 광고 SDK로 사용하지 않으며 광고 저장·광고 사용자 데이터·개인 맞춤 광고 동의는 비활성으로 설정합니다.</p>
+      <ul><li><strong>Firebase Crashlytics:</strong> 오류 보고가 켜져 있으면 오류·스택 추적, 앱·운영체제·기기 진단 정보와 SDK 설치 식별자 등을 안정성 개선에 처리합니다. 오류 메시지의 민감 정보 제거를 시도하지만 모든 오류에서 완전한 제거를 보장하지는 않습니다.</li>
+      <li><strong>Firebase Analytics:</strong> 사용 통계가 켜져 있으면 세션 종류, 분할 수, AI 제공자·기능 실행 등 정해진 사용 이벤트와 SDK의 앱 인스턴스·기기·앱 정보를 사용성 개선에 처리합니다. 터미널 본문·SSH 비밀을 사용 이벤트로 의도적으로 전송하지 않습니다.</li>
+      <li><strong>Firebase Cloud Messaging:</strong> 공지 알림이 켜져 있으면 SDK 설치 식별자·등록 토큰·공지 주제 구독 등 알림 전달 정보를 Google이 처리합니다. 앱이 등록 토큰을 별도 개발자 서버로 업로드하지 않는 것과 Google이 토큰을 처리하는 것은 구분됩니다.</li></ul>
+      <p>설정의 진단·알림 항목에서 오류 보고·사용 통계·공지 알림을 각각 끌 수 있습니다. 알림을 끄면 자동 초기화와 주제 구독을 해제하고 등록 토큰 삭제를 요청합니다. 설정을 끄는 것은 이미 전송된 자료의 즉시 삭제를 의미하지 않습니다. 제공자의 처리·보관·삭제 조건은 <a href="https://firebase.google.com/support/privacy">Firebase 개인정보 보호 안내</a>와 <a href="https://policies.google.com/privacy">Google 개인정보처리방침</a>에 따르며 국외 처리가 발생할 수 있습니다.</p>
+    </section>
+    <section id="permissions">
+      <h2>5. 권한과 보안</h2>
+      <p>네트워크 권한은 SSH와 선택한 외부 서비스 접속에 사용합니다. Android 포그라운드 서비스·알림·절전 방지 기능은 사용자가 시작한 SSH 연결을 백그라운드에서도 유지하고 상태를 표시하기 위한 것입니다. 파일·클립보드 기능은 사용자가 요청한 가져오기·내보내기·붙여넣기 등에 사용합니다.</p>
+      <p>SSH 통신 암호화, 호스트키 확인, 운영체제 보안 저장소를 사용합니다. Android 배포 구성에서는 앱 데이터의 시스템 백업·기기 간 자동 추출을 제한합니다. 사용자가 직접 내보낸 파일, 원격 백업 또는 서버에 보낸 데이터까지 삭제하거나 통제하지는 않습니다. 직접 설정한 외부 서버의 전송 보안도 확인하세요.</p>
+    </section>
+    <section id="retention">
+      <h2>6. 보관 기간과 삭제 방법</h2>
+      <ul>
+        <li>기기 내 호스트·키·스니펫·메모·대화·기록은 해당 기능의 삭제 동작이나 앱 데이터 초기화 전까지, 또는 앱의 기록 보관 설정에 따라 유지될 수 있습니다.</li>
+        <li>항목을 삭제해도 다른 호스트에서 공유하는 인증 정보·키나 별도 작업 기록이 남을 수 있습니다. 필요 없는 인증 정보·키·대화·기록도 해당 화면에서 별도로 정리하세요.</li>
+        <li>Android에서는 시스템 설정의 앱 저장공간에서 데이터 삭제를 하거나 앱을 제거하여 앱 전용 로컬 데이터를 정리할 수 있습니다.</li>
+        <li>GitHub 저장소·Gist·게시물·외부 AI 서비스·SSH 서버의 데이터와 직접 내보낸 파일은 앱 제거로 삭제되지 않습니다. 해당 서비스나 파일 저장 위치에서 별도로 삭제해야 하며, Git 이력과 제공자 백업에 이전 내용이 남을 수 있습니다.</li>
+      </ul>
+      <p>Firebase 자료는 제공자의 서비스별 보관·삭제 기준에 따라 처리됩니다. 관련 삭제 문의는 아래 연락처로 보내주세요. 앱 제거만으로 이미 전송된 진단·통계가 즉시 삭제되지는 않습니다.</p>
+      <p>개발자는 기기에만 있는 SSH 자격증명이나 작업 기록을 원격으로 열람·복구·삭제할 수 없습니다.</p>
+    </section>
+    <section id="support">
+      <h2>7. 문의 정보와 개인정보 권리 행사</h2>
+      <p>개인정보 처리 문의, 개발자가 보유한 문의 정보의 열람·정정·삭제·처리 중지 요청은 <a href="mailto:bkperio@gmail.com">bkperio@gmail.com</a>으로 보내주세요. 담당: Vibe Terminal 개발자(jhl-labs).</p>
+      <p>이메일 문의 시 이메일 주소, 문의 내용과 사용자가 직접 보낸 첨부파일을 답변·문제 해결에 사용합니다. Gmail을 통해 수신되므로 Google의 이메일 서비스에서도 처리됩니다. 비밀번호·개인키·토큰·개인정보가 포함된 원본 로그는 보내지 마세요. 목적이 달성되어 불필요해진 문의 정보는 삭제하며, 법령상 보관이 필요한 경우 해당 의무 범위에서 보관합니다.</p>
+    </section>
+    <section id="website">
+      <h2>8. 소개 사이트</h2>
+      <p>이 사이트는 GitHub Pages에서 제공되며 GitHub가 서비스 제공·보안을 위해 IP 주소 등 접속 정보를 처리할 수 있습니다. 별도 광고·방문 분석 스크립트는 사용하지 않습니다. Core 소개 페이지의 언어·테마 선택은 브라우저의 로컬 저장소에 저장되며 사이트 데이터 삭제로 지울 수 있습니다.</p>
+    </section>
+    <section id="children"><h2>9. 어린이 개인정보</h2><p>이 앱은 개발자·운영자 등 터미널 사용자를 위한 도구이며 만 14세 미만 어린이를 대상으로 설계하거나 개인정보를 의도적으로 수집하지 않습니다. 관련 우려가 있다면 위 연락처로 알려주세요.</p></section>
+    <section id="changes"><h2>10. 방침 변경</h2><p>기능이나 데이터 처리 방식이 바뀌면 이 페이지의 내용과 수정일을 갱신합니다. 중요한 변경은 적용 전에 소개 사이트 또는 배포 안내를 통해 알립니다.</p></section>
+  </main>
+  <footer><div class="wrap"><a href="../">소개 사이트</a> · <a href="en/" lang="en">English privacy policy</a> · <a href="mailto:bkperio@gmail.com">bkperio@gmail.com</a></div></footer>
+</body>
+</html>

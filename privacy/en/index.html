@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Privacy Policy | Vibe Terminal Core</title>
+  <meta name="description" content="How Vibe Terminal Core handles local data, optional SSH, AI and GitHub connections, retention, deletion and privacy inquiries." />
+  <meta name="theme-color" content="#0d1210" />
+  <link rel="canonical" href="https://jhl-labs.github.io/vibe-terminal-public/core/privacy/en/" />
+  <link rel="alternate" hreflang="ko" href="../../core/privacy/" />
+  <link rel="icon" href="../../assets/favicon.ico" />
+  <link rel="stylesheet" href="../../assets/legal.css" />
+</head>
+<body data-edition="core">
+  <header><div class="wrap"><nav aria-label="Website navigation">
+    <a class="brand" href="../../core/"><img src="../../assets/brand-mark.png" alt="" />Vibe Terminal Core</a>
+    <div class="languages"><a href="../../core/privacy/" lang="ko" hreflang="ko">한국어</a><span aria-current="page">English</span><a href="mailto:bkperio@gmail.com">Contact</a></div>
+  </nav></div></header>
+  <main class="wrap">
+    <nav class="edition-nav" aria-label="Product edition"><span aria-current="page">Core · Free</span><a href="../../pro/">Pro · Separate product</a></nav>
+    <p class="eyebrow">VIBE TERMINAL CORE · PRIVACY</p>
+    <h1>Core Privacy Policy</h1>
+    <p class="meta">Effective and last updated: <time datetime="2026-10-08">2026-10-08</time></p>
+    <p>The Vibe Terminal developer (jhl-labs, “we”) handles information as described below. This policy applies to the free <strong>Vibe Terminal Core</strong> edition, listed on Google Play as <strong>Vibe Terminal: SSH 터미널</strong>, Android package <code>com.euno.vibe_terminal</code>. It does not automatically apply to a separate Pro product.</p>
+    <div class="summary">
+      <p><strong>Basic terminal work takes place between your device and the server you choose.</strong></p>
+      <p>Core does not include Firebase Analytics, Crashlytics, Cloud Messaging or advertising SDKs. Optional AI, GitHub sync and community features, and update checks communicate with external services.</p>
+      <p>Privacy contact: <a href="mailto:bkperio@gmail.com">bkperio@gmail.com</a></p>
+    </div>
+    <ol class="contents" aria-label="Contents">
+      <li><a href="#local">Local information</a></li><li><a href="#network">Transfers and third parties</a></li>
+      <li><a href="#permissions">Permissions and security</a></li><li><a href="#retention">Retention and deletion</a></li>
+      <li><a href="#support">Support and your rights</a></li><li><a href="#website">Website and video</a></li>
+      <li><a href="#children">Children</a></li><li><a href="#changes">Changes</a></li>
+    </ol>
+    <section id="local">
+      <h2>1. Information stored on your device</h2>
+      <p>To provide SSH connections, restore work and deliver features you choose, the app may process the following information locally:</p>
+      <ul>
+        <li>Host labels, addresses, ports, usernames, connection settings and trusted host key fingerprints</li>
+        <li>SSH passwords, private keys, passphrases, and AI and GitHub authentication tokens</li>
+        <li>Terminal screens, session history, commands, output, working paths, snippets, notes and settings</li>
+        <li>AI conversations, prompts, submitted text context, and provider, model and endpoint settings</li>
+      </ul>
+      <p>Authentication secrets use the operating system's secure storage. Other settings and work data use local app storage; this does not mean all local data is separately encrypted. Core does not require an account operated by the developer.</p>
+    </section>
+    <section id="network">
+      <h2>2. Network transfers and third parties</h2>
+      <p>We do not automatically upload SSH credentials or terminal content to a separate collection server or sell them. Using the following features sends necessary information to their recipients:</p>
+      <div class="table-scroll"><table>
+        <thead><tr><th scope="col">Feature and recipient</th><th scope="col">Information and purpose</th></tr></thead>
+        <tbody>
+          <tr><td>Your chosen SSH server</td><td>Authentication information required by your method, commands, terminal input/output and requested file content, to connect and perform remote work. The server operator may log connection addresses and activity.</td></tr>
+          <tr><td>Optional AI<br />OpenAI, Google Gemini, Anthropic or your compatible endpoint</td><td>Questions, conversations, terminal screens, commands and paths, plus session log text included according to feature settings or requests, and API tokens needed for authentication, to generate responses and assist work. Current Core AI Chat sends text requests and does not provide direct file or image attachment uploads. File contents can still be sent as text if pasted or included in terminal output or logs; review context before sending.</td></tr>
+          <tr><td>Optional GitHub or GitHub Enterprise sync</td><td>Authentication, repository selection and configured sync data. Full backups may include hosts, notes, settings and credential secrets and are sent as snapshots encrypted with your sync password. You manage remote copies and repository access.</td></tr>
+          <tr><td>Optional GitHub Gist and community</td><td>Snippets you export, titles and bodies of Issues or Discussions you create, retrieval requests and GitHub authentication, to share and retrieve content. Snippet Gists are separate from encrypted full backups. Check visibility and content; public posts are visible to others.</td></tr>
+          <tr><td>GitHub update and release checks</td><td>Release queries and public release information used for version comparison. GitHub may process your IP address, request time and the app's User-Agent when handling requests. Automatic update checks can be managed in app settings.</td></tr>
+        </tbody>
+      </table></div>
+      <p>External CLI tools, commands and links you run may also contact their services. Their retention, deletion and international processing depend on provider policies and your account settings. Depending on the provider, data may be processed outside your country. Avoiding an optional feature or disconnecting it stops its optional transfers.</p>
+      <p>Provider policies: <a href="https://openai.com/policies/privacy-policy/">OpenAI</a> · <a href="https://policies.google.com/privacy">Google</a> · <a href="https://www.anthropic.com/legal/privacy">Anthropic</a> · <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub</a>. Your custom endpoint is governed by its operator's policy.</p>
+    </section>
+    <section id="permissions">
+      <h2>3. Permissions and security</h2>
+      <p>Network access supports SSH and selected services. Android foreground service, notification and wake lock functions maintain SSH connections you start and display their status. File and clipboard functions support actions you request, such as imports, exports and pasting.</p>
+      <p>The app uses encrypted SSH transport, host key checks and operating system secure storage. The Android distribution configuration restricts system backups and automatic device-to-device extraction of app data. It does not control exported files, remote backups or data already sent to servers. Check transport security for endpoints you configure.</p>
+    </section>
+    <section id="retention">
+      <h2>4. Retention and deletion</h2>
+      <ul>
+        <li>Local hosts, keys, snippets, notes, conversations and records may remain until you delete them or clear app data, or according to the app's history settings.</li>
+        <li>Deleting one item may leave shared credentials or keys used by other hosts, or separate work history. Remove unneeded credentials, keys, conversations and records in their respective screens.</li>
+        <li>On Android, clear the app's storage in system settings or uninstall the app to remove its dedicated local data.</li>
+        <li>Uninstalling does not delete GitHub repositories, Gists, posts, external AI or SSH server data, or exported files. Delete these separately at the service or storage location; previous content may remain in Git history or provider backups.</li>
+      </ul>
+      <p>We cannot remotely access, restore or delete SSH credentials or work records stored only on your device.</p>
+    </section>
+    <section id="support">
+      <h2>5. Support information and your rights</h2>
+      <p>Contact <a href="mailto:bkperio@gmail.com">bkperio@gmail.com</a> for privacy inquiries or requests to access, correct, delete or stop processing support information we hold. Contact owner: Vibe Terminal developer (jhl-labs).</p>
+      <p>When you email us, we use your email address, message and attachments you choose to send to respond and troubleshoot. Messages are received through Gmail and also processed by Google's email service. Do not send passwords, private keys, tokens or unredacted personal logs. We delete support information when it is no longer needed for its purpose, except where a legal retention obligation applies.</p>
+    </section>
+    <section id="website">
+      <h2>6. Website and video</h2>
+      <p>GitHub Pages hosts this website and GitHub may process connection information such as IP addresses for service delivery and security. We add no advertising or visitor analytics scripts. Language and theme preferences on the introduction page are saved in browser local storage, which you can clear by deleting site data.</p>
+      <p>The Core demonstration video is served by vcoder.kr. Playing it may send your IP address, browser information and media requests to that server. Video does not autoplay. <a href="https://vcoder.kr/privacy">VCoder privacy policy</a></p>
+    </section>
+    <section id="children"><h2>7. Children</h2><p>The app is a terminal tool for developers, operators and similar users. It is not designed for children under 14 and we do not intentionally collect their personal information. Contact us with any concerns.</p></section>
+    <section id="changes"><h2>8. Changes</h2><p>We update this page and its revision date when features or data practices change. Material changes will be announced through the introduction site or release information before they take effect.</p></section>
+  </main>
+  <footer><div class="wrap"><a href="../../core/">Introduction</a> · <a href="../../core/privacy/" lang="ko">한국어 개인정보처리방침</a> · <a href="mailto:bkperio@gmail.com">bkperio@gmail.com</a></div></footer>
+</body>
+</html>

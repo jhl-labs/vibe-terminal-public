@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Privacy Policy | Vibe Terminal Pro</title>
+  <meta name="description" content="How Vibe Terminal Pro handles local data, optional SSH, AI and GitHub connections, retention, deletion and privacy inquiries." />
+  <meta name="theme-color" content="#0d1210" />
+  <link rel="canonical" href="https://jhl-labs.github.io/vibe-terminal-public/pro/privacy/en/" />
+  <link rel="alternate" hreflang="ko" href="../" />
+  <link rel="icon" href="../../../assets/favicon.ico" />
+  <link rel="stylesheet" href="../../../assets/legal.css" />
+</head>
+<body data-edition="pro">
+  <header><div class="wrap"><nav aria-label="Website navigation">
+    <a class="brand" href="../../"><img src="../../../assets/brand-mark.png" alt="" />Vibe Terminal Pro</a>
+    <div class="languages"><a href="../" lang="ko" hreflang="ko">한국어</a><span aria-current="page">English</span><a href="mailto:bkperio@gmail.com">Contact</a></div>
+  </nav></div></header>
+  <main class="wrap">
+    <nav class="edition-nav" aria-label="Product edition"><a href="../../../core/">Core · Free</a><span aria-current="page">Pro · Separate paid product</span></nav>
+    <p class="eyebrow">VIBE TERMINAL PRO · PRIVACY</p>
+    <h1>Pro Privacy Policy</h1>
+    <p class="meta">Pre-release notice last updated: <time datetime="2026-10-08">2026-10-08</time></p>
+    <p>The Vibe Terminal developer (jhl-labs, “we”) explains data practices for the separate paid product <strong>Vibe Terminal Pro</strong>.</p>
+    <div class="edition-note"><strong>Pre-release notice</strong><p>Pro is being prepared as a separate release. The current free Google Play submission uses the <a href="../../../core/privacy/en/">Core privacy policy</a>. Pro's final app identity and release configuration will be recorded here before launch.</p></div>
+    <div class="summary"><p>SSH, file and tunnel operations connect to servers you select. AI and GitHub connections are optional.</p><p>Depending on your settings, Pro mobile builds may use Firebase crash reporting, usage statistics and announcement notifications. See the controls below.</p><p>Privacy contact: <a href="mailto:bkperio@gmail.com">bkperio@gmail.com</a></p></div>
+    <ol class="contents" aria-label="Contents">
+      <li><a href="#local">Local information</a></li><li><a href="#network">Transfers and third parties</a></li>
+      <li><a href="#advanced">Additional Pro tools</a></li><li><a href="#telemetry">Mobile diagnostics</a></li><li><a href="#permissions">Permissions and security</a></li><li><a href="#retention">Retention and deletion</a></li>
+      <li><a href="#support">Support and your rights</a></li><li><a href="#website">Website</a></li>
+      <li><a href="#children">Children</a></li><li><a href="#changes">Changes</a></li>
+    </ol>
+    <section id="local">
+      <h2>1. Information stored on your device</h2>
+      <p>To provide SSH connections, restore work and deliver features you choose, the app may process the following information locally:</p>
+      <ul>
+        <li>Host labels, addresses, ports, usernames, connection settings and trusted host key fingerprints</li>
+        <li>SSH passwords, private keys, passphrases, and AI and GitHub authentication tokens</li>
+        <li>Terminal screens, session history, commands, output, working paths, snippets, notes and settings</li>
+        <li>AI conversations, prompts, selected files or images, and provider, model and endpoint settings</li>
+      </ul>
+      <p>Authentication secrets use the operating system's secure storage. Other settings and work data use local app storage; this does not mean all local data is separately encrypted.</p>
+    </section>
+    <section id="network">
+      <h2>2. Network transfers and third parties</h2>
+      <p>We do not automatically upload SSH credentials or terminal content to a separate collection server or sell them. Using the following features sends necessary information to their recipients:</p>
+      <div class="table-scroll"><table>
+        <thead><tr><th scope="col">Feature and recipient</th><th scope="col">Information and purpose</th></tr></thead>
+        <tbody>
+          <tr><td>Your chosen SSH server</td><td>Authentication information required by your method, commands, terminal input/output and requested file content, to connect and perform remote work. The server operator may log connection addresses and activity.</td></tr>
+          <tr><td>Optional AI<br />OpenAI, Google Gemini, Anthropic or your compatible endpoint</td><td>Questions, conversations, and terminal output, commands, paths, files or images selected or included as context, plus API tokens needed for authentication, to generate responses and assist work. Review context before sending because it may contain sensitive information.</td></tr>
+          <tr><td>Optional GitHub or GitHub Enterprise sync</td><td>Authentication, repository selection and configured sync data. Full backups may include hosts, notes, settings and credential secrets and are sent as snapshots encrypted with your sync password. You manage remote copies and repository access.</td></tr>
+          <tr><td>Optional GitHub Gist and community</td><td>Snippets you export, posts, comments, attachments and GitHub authentication, to share and retrieve content. Snippet Gists are separate from encrypted full backups. Check visibility and content; public posts are visible to others.</td></tr>
+        </tbody>
+      </table></div>
+      <p>External CLI tools, commands and links you run may also contact their services. Their retention, deletion and international processing depend on provider policies and your account settings. Depending on the provider, data may be processed outside your country. Avoiding an optional feature or disconnecting it stops its optional transfers.</p>
+      <p>Provider policies: <a href="https://openai.com/policies/privacy-policy/">OpenAI</a> · <a href="https://policies.google.com/privacy">Google</a> · <a href="https://www.anthropic.com/legal/privacy">Anthropic</a> · <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub</a>. Your custom endpoint is governed by its operator's policy.</p>
+    </section>
+    <section id="advanced"><h2>3. Additional Pro tools</h2>
+      <p>SFTP processes your selected server, paths, file contents, names and metadata for browsing and transfers. Port forwarding carries traffic to your configured destination through SSH; that destination also receives relevant requests. Vault and work panels process content and connection settings you store or import.</p>
+      <p>Agent Chat, orchestration, autonomous workflows, AI routines and watchers may process commands, working paths, conversations, terminal or file context, contact configured AI providers, CLI tools and servers, or execute commands. You configure the scope and permissions of scheduled and automatic work. Stop unused automation and review sensitive context. Browser panels, custom apps and X11 destinations may also process data. Availability depends on platform and build configuration.</p>
+    </section>
+    <section id="telemetry"><h2>4. Mobile diagnostics, statistics and announcements</h2>
+      <p>Pro Android and iOS builds with Firebase enabled use the following services according to your diagnostic and notification settings. This does not imply the same Firebase collection on desktop. We do not use these SDKs for advertising and configure ad storage, ad user data and ad personalization consent as disabled.</p>
+      <ul><li><strong>Firebase Crashlytics:</strong> When crash reports are enabled, errors, stack traces, app, OS and device diagnostics and SDK installation identifiers are processed to improve stability. The app attempts to sanitize error messages, but cannot guarantee every error is fully redacted.</li>
+      <li><strong>Firebase Analytics:</strong> When usage statistics are enabled, predefined events such as session types, split counts and AI provider or feature use, together with SDK app instance, device and app information, help improve usability. Terminal bodies and SSH secrets are not intentionally sent as usage events.</li>
+      <li><strong>Firebase Cloud Messaging:</strong> When announcements are enabled, Google processes SDK installation identifiers, registration tokens and announcement topic subscriptions to deliver notifications. The absence of a separate developer token-upload server does not mean Google does not process registration tokens.</li></ul>
+      <p>You can disable crash reports, usage statistics and announcements individually in diagnostic and notification settings. Disabling announcements turns off automatic initialization, unsubscribes topics and requests registration token deletion. Disabling collection does not immediately erase previously transmitted data. Provider processing, retention and deletion follow the <a href="https://firebase.google.com/support/privacy">Firebase privacy information</a> and <a href="https://policies.google.com/privacy">Google privacy policy</a>; processing may occur outside your country.</p>
+    </section>
+    <section id="permissions">
+      <h2>5. Permissions and security</h2>
+      <p>Network access supports SSH and selected services. Android foreground service, notification and wake lock functions maintain SSH connections you start and display their status. File and clipboard functions support actions you request, such as imports, exports and pasting.</p>
+      <p>The app uses encrypted SSH transport, host key checks and operating system secure storage. The Android distribution configuration restricts system backups and automatic device-to-device extraction of app data. It does not control exported files, remote backups or data already sent to servers. Check transport security for endpoints you configure.</p>
+    </section>
+    <section id="retention">
+      <h2>6. Retention and deletion</h2>
+      <ul>
+        <li>Local hosts, keys, snippets, notes, conversations and records may remain until you delete them or clear app data, or according to the app's history settings.</li>
+        <li>Deleting one item may leave shared credentials or keys used by other hosts, or separate work history. Remove unneeded credentials, keys, conversations and records in their respective screens.</li>
+        <li>On Android, clear the app's storage in system settings or uninstall the app to remove its dedicated local data.</li>
+        <li>Uninstalling does not delete GitHub repositories, Gists, posts, external AI or SSH server data, or exported files. Delete these separately at the service or storage location; previous content may remain in Git history or provider backups.</li>
+      </ul>
+      <p>Firebase information is retained and deleted according to provider service policies. Contact us below for related deletion inquiries. Uninstalling alone does not immediately erase previously transmitted diagnostics or statistics.</p>
+      <p>We cannot remotely access, restore or delete SSH credentials or work records stored only on your device.</p>
+    </section>
+    <section id="support">
+      <h2>7. Support information and your rights</h2>
+      <p>Contact <a href="mailto:bkperio@gmail.com">bkperio@gmail.com</a> for privacy inquiries or requests to access, correct, delete or stop processing support information we hold. Contact owner: Vibe Terminal developer (jhl-labs).</p>
+      <p>When you email us, we use your email address, message and attachments you choose to send to respond and troubleshoot. Messages are received through Gmail and also processed by Google's email service. Do not send passwords, private keys, tokens or unredacted personal logs. We delete support information when it is no longer needed for its purpose, except where a legal retention obligation applies.</p>
+    </section>
+    <section id="website">
+      <h2>8. Website</h2>
+      <p>GitHub Pages hosts this website and GitHub may process connection information such as IP addresses for service delivery and security. We add no advertising or visitor analytics scripts. Language and theme preferences on the Core introduction page are saved in browser local storage, which you can clear by deleting site data.</p>
+    </section>
+    <section id="children"><h2>9. Children</h2><p>The app is a terminal tool for developers, operators and similar users. It is not designed for children under 14 and we do not intentionally collect their personal information. Contact us with any concerns.</p></section>
+    <section id="changes"><h2>10. Changes</h2><p>We update this page and its revision date when features or data practices change. Material changes will be announced through the introduction site or release information before they take effect.</p></section>
+  </main>
+  <footer><div class="wrap"><a href="../../">Introduction</a> · <a href="../" lang="ko">한국어 개인정보처리방침</a> · <a href="mailto:bkperio@gmail.com">bkperio@gmail.com</a></div></footer>
+</body>
+</html>

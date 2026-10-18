@@ -1,0 +1,1764 @@
+<!doctype html>
+<html lang="ko" data-theme="system">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Vibe Terminal Core — 내 서버로 이어지는 SSH 작업대</title>
+    <meta
+      name="description"
+      content="무료 SSH 작업대 Vibe Terminal Core. 최대 4칸 화면 분할, GUI 문서 모드, AI CLI 클릭 응답, 선택적 AI 답변 제안, tmux 재연결과 스니펫을 Windows·macOS·Linux·Android에서 사용하세요."
+    />
+    <meta property="og:title" content="Vibe Terminal Core · Free SSH terminal" />
+    <meta
+      property="og:description"
+      content="터미널의 긴 출력을 문서처럼 읽고, 지원되는 AI CLI 질문에는 클릭으로 답하세요. SSH 분할, 스니펫, 메모와 선택적 AI를 모은 무료 Core의 실제 화면과 사용 안내입니다."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://jhl-labs.github.io/vibe-terminal-public/assets/social-card.png" />
+    <meta property="og:url" content="https://jhl-labs.github.io/vibe-terminal-public/core/" />
+    <link rel="canonical" href="https://jhl-labs.github.io/vibe-terminal-public/core/" />
+    <meta name="theme-color" content="#0B1017" />
+    <link rel="icon" href="assets/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" href="assets/favicon-32.png" sizes="32x32" />
+    <link rel="icon" type="image/png" href="assets/favicon-16.png" sizes="16x16" />
+    <link rel="apple-touch-icon" href="assets/apple-touch-icon.png" sizes="180x180" />
+    <link rel="manifest" href="assets/site.webmanifest" />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f5f7ef;
+        --bg-soft: #ebeede;
+        --surface: #ffffff;
+        --ink: #111714;
+        --muted: #536058;
+        --line: #d7ddcf;
+        --line-strong: #b6c0ae;
+        --brand: #22c96f;
+        --brand-ink: #087641;
+        --brand-2: #0f8ea3;
+        --warn: #d49a22;
+        --violet: #6a5ee8;
+        --shot-bg: #0b1017;
+        --shadow: 0 24px 80px rgba(17, 23, 20, 0.14);
+        --shadow-strong: 0 40px 120px rgba(17, 23, 20, 0.26);
+        --radius: 10px;
+        --max: 1180px;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+          --bg: #0d1210;
+          --bg-soft: #151c18;
+          --surface: #151b18;
+          --ink: #eef6ec;
+          --muted: #a7b4a8;
+          --line: #2c382f;
+          --line-strong: #445345;
+          --brand-ink: #69e0a2;
+          --shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
+          --shadow-strong: 0 40px 120px rgba(0, 0, 0, 0.5);
+        }
+      }
+
+      :root[data-theme="dark"] {
+        --bg: #0d1210;
+        --bg-soft: #151c18;
+        --surface: #151b18;
+        --ink: #eef6ec;
+        --muted: #a7b4a8;
+        --line: #2c382f;
+        --line-strong: #445345;
+        --brand-ink: #69e0a2;
+        --shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
+        --shadow-strong: 0 40px 120px rgba(0, 0, 0, 0.5);
+      }
+
+      :root[data-theme="light"] { color-scheme: light; }
+      :root[data-theme="dark"] { color-scheme: dark; }
+
+      * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; scroll-padding-top: 88px; }
+
+      body {
+        min-width: 320px;
+        margin: 0;
+        overflow-x: hidden;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: Inter, Pretendard, "Noto Sans KR", "Noto Sans JP", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        line-height: 1.62;
+        word-break: keep-all;
+        overflow-wrap: anywhere;
+      }
+
+      a { color: inherit; text-decoration: none; }
+      button { font: inherit; }
+      img { display: block; max-width: 100%; height: auto; }
+
+      a:focus-visible,
+      button:focus-visible {
+        outline: 3px solid var(--warn);
+        outline-offset: 3px;
+      }
+
+      h1, h2, h3, p { overflow-wrap: anywhere; }
+
+      .wrap { width: min(100% - clamp(32px, 6vw, 72px), var(--max)); margin: 0 auto; }
+      .mono { font-family: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+
+      /* Top bar */
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        border-bottom: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+        background: color-mix(in srgb, var(--bg) 88%, transparent);
+        backdrop-filter: blur(16px);
+      }
+      .topbar-inner { display: flex; min-height: 68px; align-items: center; justify-content: space-between; gap: 18px; }
+      .brand { display: inline-flex; min-width: max-content; align-items: center; gap: 10px; font-weight: 850; }
+      .brand-mark { width: 34px; height: 34px; border-radius: 6px; }
+      .nav { display: flex; align-items: center; justify-content: flex-end; gap: 16px; min-width: 0; }
+      .links { display: flex; gap: 16px; color: var(--muted); font-size: 14px; font-weight: 750; }
+      .links a:hover { color: var(--ink); }
+      .controls { display: flex; gap: 8px; min-width: 0; }
+      .segmented {
+        display: inline-flex;
+        align-items: center;
+        gap: 2px;
+        padding: 3px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--surface);
+      }
+      .segmented button {
+        min-height: 30px;
+        border: 0;
+        border-radius: 999px;
+        padding: 0 10px;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 800;
+      }
+      .segmented button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+
+      .edition-switch { display: flex; flex-wrap: wrap; gap: 12px; padding-top: 24px; }
+      .edition-switch a { padding: 8px 16px; border: 1px solid var(--line); border-radius: 100px; font-size: 14px; }
+      .edition-switch [aria-current] { border-color: var(--brand); color: var(--brand-ink); font-weight: 750; }
+
+      /* Hero */
+      .hero {
+        padding: clamp(28px, 5vw, 56px) 0 clamp(40px, 6vw, 72px);
+        background:
+          linear-gradient(90deg, color-mix(in srgb, var(--brand) 10%, transparent), transparent 34%),
+          radial-gradient(circle at 78% 18%, color-mix(in srgb, var(--brand-2) 16%, transparent), transparent 38%);
+      }
+      .hero-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
+        gap: clamp(28px, 5vw, 64px);
+        align-items: center;
+      }
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        margin: 0 0 18px;
+        color: var(--brand-2);
+        font-size: 13px;
+        font-weight: 850;
+        text-transform: uppercase;
+      }
+      .eyebrow::before { width: 38px; height: 2px; background: var(--brand); content: ""; }
+      h1 { margin: 0; font-size: clamp(46px, 7vw, 92px); line-height: 0.96; letter-spacing: -0.01em; }
+      h1 span { color: var(--brand); }
+      .lead { max-width: 640px; margin: 22px 0 0; color: var(--muted); font-size: clamp(17px, 1.9vw, 21px); font-weight: 560; }
+      .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
+      .button {
+        display: inline-flex;
+        min-height: 48px;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid transparent;
+        border-radius: 7px;
+        padding: 0 18px;
+        font-weight: 850;
+      }
+      .button.primary { background: var(--brand); color: #07100b; box-shadow: 0 14px 34px color-mix(in srgb, var(--brand) 28%, transparent); }
+      .button.secondary { border-color: var(--line-strong); background: var(--surface); }
+      .hero-points {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin: 28px 0 0;
+        padding: 0;
+        list-style: none;
+      }
+      .hero-points li {
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: color-mix(in srgb, var(--surface) 82%, transparent);
+        color: var(--muted);
+        font-size: 14px;
+        font-weight: 650;
+      }
+
+      /* Screenshot frames */
+      .shot { margin: 0; min-width: 0; }
+      .shot a { display: block; }
+      .frame {
+        overflow: hidden;
+        border: 1px solid var(--line-strong);
+        border-radius: 12px;
+        background: var(--shot-bg);
+        box-shadow: var(--shadow-strong);
+      }
+      .frame-bar {
+        display: flex;
+        min-height: 34px;
+        align-items: center;
+        gap: 7px;
+        padding: 0 12px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        background: #111821;
+      }
+      .frame-bar i { width: 10px; height: 10px; border-radius: 50%; background: #3a4552; }
+      .frame-bar i:nth-child(1) { background: #c64b3f; }
+      .frame-bar i:nth-child(2) { background: #d49a22; }
+      .frame-bar i:nth-child(3) { background: #22c96f; }
+      .frame-bar span { margin-left: 8px; color: #8fa0b3; font-size: 12px; font-weight: 700; }
+      .dialog-frame {
+        overflow: hidden;
+        border-radius: 14px;
+        background: var(--shot-bg);
+        box-shadow: var(--shadow);
+      }
+      .shot figcaption { margin-top: 12px; color: var(--muted); font-size: 13px; }
+
+      .phone {
+        width: min(100%, 300px);
+        margin: 0 auto;
+        overflow: hidden;
+        border: 10px solid #1b2129;
+        border-radius: 34px;
+        background: var(--shot-bg);
+        box-shadow: var(--shadow-strong);
+      }
+
+      /* Highlights strip */
+      .strip { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--surface); }
+      .strip-grid { display: grid; grid-template-columns: repeat(4, 1fr); }
+      .strip-item { padding: 22px 20px; border-right: 1px solid var(--line); }
+      .strip-item:first-child { border-left: 1px solid var(--line); }
+      .strip-item strong { display: block; margin-bottom: 6px; font-size: 17px; }
+      .strip-item span { color: var(--muted); font-size: 14px; }
+
+      /* Sections */
+      .section { padding: clamp(64px, 9vw, 112px) 0; }
+      .section.alt { background: var(--bg-soft); }
+      .section-head {
+        display: grid;
+        grid-template-columns: minmax(0, 0.9fr) minmax(260px, 0.6fr);
+        gap: clamp(22px, 6vw, 72px);
+        align-items: end;
+        margin-bottom: clamp(36px, 5vw, 56px);
+      }
+      .label { margin: 0 0 10px; color: var(--brand-2); font-size: 13px; font-weight: 900; text-transform: uppercase; }
+      h2 { margin: 0; font-size: clamp(32px, 4.6vw, 58px); line-height: 1.04; }
+      .section-head p { margin: 0; color: var(--muted); font-size: 17px; }
+
+      /* Feature tour */
+      .tour { display: grid; gap: clamp(64px, 9vw, 112px); }
+      .feature {
+        display: grid;
+        grid-template-columns: minmax(0, 0.72fr) minmax(0, 1.28fr);
+        gap: clamp(28px, 5vw, 64px);
+        align-items: center;
+      }
+      .feature.flip { grid-template-columns: minmax(0, 1.28fr) minmax(0, 0.72fr); }
+      .feature.flip .feature-copy { order: 2; }
+      .feature-copy .num { color: var(--brand-ink); font-size: 13px; font-weight: 900; }
+      .feature-copy h3 { overflow-wrap: break-word; margin: 8px 0 14px; font-size: clamp(26px, 3vw, 36px); line-height: 1.16; }
+      .feature-copy > p { margin: 0; color: var(--muted); font-size: 17px; }
+      .checks { display: grid; gap: 10px; margin: 22px 0 0; padding: 0; list-style: none; }
+      .checks li { position: relative; padding-left: 28px; color: var(--ink); font-size: 15px; }
+      .checks li::before {
+        position: absolute;
+        top: 4px;
+        left: 0;
+        display: grid;
+        width: 18px;
+        height: 18px;
+        place-items: center;
+        border-radius: 50%;
+        background: color-mix(in srgb, var(--brand) 22%, transparent);
+        color: var(--brand-ink);
+        content: "✓";
+        font-size: 11px;
+        font-weight: 900;
+      }
+      .shots-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; align-items: start; }
+      .shots-stack { display: grid; gap: 18px; }
+
+      /* Mobile */
+      .mobile-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+        gap: clamp(28px, 5vw, 64px);
+        align-items: center;
+      }
+      .phones { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; }
+      .video-card { margin: 28px 0 0; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+      .video-card video { display: block; width: 100%; max-height: 380px; border-radius: 8px; background: var(--shot-bg); }
+      .video-card figcaption { margin-top: 10px; color: var(--muted); font-size: 13px; }
+
+      /* Trust */
+      .trust-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+      .card { min-width: 0; padding: 24px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+      .card h3 { margin: 0 0 10px; font-size: 20px; }
+      .card p { margin: 0; color: var(--muted); }
+
+      /* Pro */
+      .pro {
+        position: relative;
+        overflow: hidden;
+        background:
+          radial-gradient(circle at 85% 10%, color-mix(in srgb, var(--violet) 22%, transparent), transparent 40%),
+          var(--bg-soft);
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 12px;
+        border: 1px solid color-mix(in srgb, var(--violet) 55%, var(--line));
+        border-radius: 999px;
+        color: var(--violet);
+        font-size: 13px;
+        font-weight: 850;
+      }
+      .pro-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+      .pro-card { border-top: 3px solid var(--violet); }
+      .pro-note { margin: 28px 0 0; color: var(--muted); }
+      .pro-note a { color: var(--violet); font-weight: 800; }
+
+      /* Download */
+      .closing { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(280px, 0.55fr); gap: clamp(24px, 6vw, 74px); align-items: center; }
+      .closing p { color: var(--muted); font-size: 18px; }
+      .repo-card { display: grid; gap: 12px; box-shadow: var(--shadow); }
+      .repo-card a:not(.button) { color: var(--brand-ink); font-weight: 750; }
+      .capture-note { margin-top: 28px; color: var(--muted); font-size: 13px; }
+
+      footer { border-top: 1px solid var(--line); padding: 30px 0; color: var(--muted); font-size: 14px; }
+      .footer-inner { display: flex; justify-content: space-between; gap: 16px; }
+      .footer-links { display: flex; flex-wrap: wrap; gap: 12px 22px; }
+
+      @media (max-width: 1100px) {
+        .links { display: none; }
+        .hero-grid, .feature, .feature.flip, .mobile-grid { grid-template-columns: 1fr; }
+        .feature.flip .feature-copy { order: 0; }
+        .strip-grid { grid-template-columns: repeat(2, 1fr); }
+        .strip-item:nth-child(3) { border-left: 1px solid var(--line); }
+        .strip-item:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }
+        .pro-grid, .trust-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      }
+
+      @media (max-width: 820px) {
+        html { scroll-padding-top: 128px; }
+        .topbar-inner { min-height: auto; flex-direction: column; align-items: stretch; padding: 12px 0; }
+        .nav, .controls { width: 100%; justify-content: space-between; }
+        .section-head, .closing { grid-template-columns: 1fr; }
+      }
+
+      @media (max-width: 560px) {
+        html { scroll-padding-top: 180px; }
+        .wrap { width: min(100% - 32px, var(--max)); }
+        .nav { display: block; }
+        .controls { display: grid; grid-template-columns: 1fr; gap: 8px; }
+        .segmented { width: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .segmented button { min-width: 0; padding: 0 8px; }
+        .hero-points, .shots-pair, .pro-grid, .trust-grid, .strip-grid { grid-template-columns: 1fr; }
+        .strip-item { border-left: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+        .button { width: 100%; }
+        .phones { gap: 12px; }
+        .phone { border-width: 6px; border-radius: 22px; }
+        .footer-inner { flex-direction: column; }
+      }
+
+      @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+      /* Detailed Core guide */
+      .tour { min-width:0; grid-template-columns:minmax(0,1fr); }
+      .feature-copy, .shots-stack { min-width:0; }
+      .checks li, summary, td { overflow-wrap:anywhere; }
+      .contents { display:flex; flex-wrap:wrap; gap:8px; padding-block:18px; }
+      .contents a { padding:8px 12px; border:1px solid var(--line); border-radius:6px; color:var(--muted); font-size:13px; font-weight:750; }
+      .contents a:hover { color:var(--brand-ink); border-color:var(--brand); }
+      .mode-compare, .reading-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:24px; }
+      .mode-compare h3 { margin:0 0 14px; font-size:17px; }
+      .mode-compare .frame { box-shadow:var(--shadow); }
+      .reading-grid { margin-top:28px; }
+      .content-note { margin:28px 0 0; padding:20px; border-left:3px solid var(--brand); background:var(--surface); color:var(--muted); }
+      .start-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+      .faq-list { margin:32px 0 24px; }
+      details { border-bottom:1px solid var(--line); padding:20px 0; }
+      summary { cursor:pointer; font-size:18px; font-weight:750; }
+      details p { max-width:920px; margin:16px 0 0; color:var(--muted); }
+      summary:focus-visible { outline:3px solid var(--warn); outline-offset:5px; }
+      .text-link, .platform a { color:var(--brand-ink); text-decoration:underline; text-underline-offset:4px; }
+      .compact-pro h2 { font-size:clamp(26px,3vw,38px); }
+      .compact-pro p { max-width:780px; color:var(--muted); }
+      .compact-pro a { color:var(--brand-ink); font-weight:800; }
+      .platform { margin-top:48px; }
+      .platform h3 { font-size:24px; }
+      .table-scroll { overflow-x:auto; }
+      table { width:100%; border-collapse:collapse; text-align:left; }
+      th, td { padding:18px 14px; border-bottom:1px solid var(--line); vertical-align:top; }
+      thead { background:var(--bg-soft); }
+      th:first-child { width:110px; }
+      td:last-child { min-width:150px; }
+      .skip-link { position:fixed; top:8px; left:8px; z-index:30; transform:translateY(-160%); padding:12px; background:var(--ink); color:var(--bg); }
+      .skip-link:focus { transform:translateY(0); }
+      @media (max-width:820px) { .mode-compare, .reading-grid { grid-template-columns:1fr; } }
+      @media (max-width:560px) { .start-grid { grid-template-columns:1fr; } th,td { padding:12px 8px; font-size:14px; } }
+    </style>
+  </head>
+  <body data-edition="core">
+    <a class="skip-link" href="#top">Skip to content</a>
+    <header class="topbar">
+      <div class="wrap topbar-inner">
+        <a class="brand" href="#top" aria-label="Vibe Terminal home">
+          <img class="brand-mark" src="assets/brand-mark.png" alt="" />
+          <span>Vibe Terminal Core</span>
+        </a>
+        <nav class="nav" aria-label="Page controls">
+          <div class="links">
+            <a href="#tour" data-i18n="nav.tour">기능 둘러보기</a>
+            <a href="#mobile" data-i18n="nav.mobile">모바일</a>
+            <a href="#trust" data-i18n="nav.trust">개인정보</a>
+            <a href="#document" data-i18n="nav.document">문서 모드</a>
+            <a href="#download" data-i18n="nav.download">시작하기</a>
+          </div>
+          <div class="controls">
+            <div class="segmented" aria-label="Language">
+              <button type="button" data-lang="ko" aria-pressed="true">KO</button>
+              <button type="button" data-lang="en" aria-pressed="false">EN</button>
+              <button type="button" data-lang="ja" aria-pressed="false">JA</button>
+            </div>
+            <div class="segmented" aria-label="Theme">
+              <button type="button" data-theme-choice="system" aria-pressed="true" data-i18n="theme.system">시스템</button>
+              <button type="button" data-theme-choice="light" aria-pressed="false" data-i18n="theme.light">라이트</button>
+              <button type="button" data-theme-choice="dark" aria-pressed="false" data-i18n="theme.dark">다크</button>
+            </div>
+          </div>
+        </nav>
+      </div>
+    </header>
+    <main id="top">
+      <nav class="wrap edition-switch" aria-label="Product edition">
+        <a href="core/" aria-current="page" data-i18n="edition.core">Core · 무료판</a>
+        <a href="pro/" data-i18n="edition.pro">Pro · 향후 공개 예정</a>
+      </nav>
+      <section class="hero">
+        <div class="wrap hero-grid">
+          <div>
+            <p class="eyebrow mono" data-i18n="hero.eyebrow">SSH · 문서 모드 · AI CLI · 나만의 작업대</p>
+            <h1>Vibe Terminal <span>Core</span>
+            </h1>
+            <p class="lead" data-i18n="hero.lead">서버에 연결하는 일부터 긴 출력을 읽고 다음 행동을 결정하는 순간까지. 여러 SSH 세션, 문서처럼 읽는 터미널, 재사용하는 명령과 선택적 AI를 하나의 무료 작업대에 모았습니다.</p>
+            <div class="hero-actions">
+              <a class="button primary" href="https://github.com/jhl-labs/vibe-terminal-public/releases" data-i18n="hero.primary">데스크톱 무료 다운로드</a>
+              <a class="button secondary" href="https://play.google.com/store/apps/details?id=com.euno.vibe_terminal" data-i18n="hero.secondary">Android · Google Play</a>
+            </div>
+            <ul class="hero-points">
+              <li data-i18n="hero.point1">최대 4칸 분할로 서버를 나란히</li>
+              <li data-i18n="hero.point2">터미널 ↔ 문서 모드, 같은 세션의 두 가지 보기</li>
+              <li data-i18n="hero.point3">클릭으로 답하는 CLI 질문과 선택적 AI 제안</li>
+              <li data-i18n="hero.point4">앱 회원가입 없이 시작 · AI 연결은 선택</li>
+            </ul>
+          </div>
+          <figure class="shot">
+            <a href="assets/screens/desktop-split.webp" target="_blank" rel="noopener">
+              <div class="frame">
+                <div class="frame-bar" aria-hidden="true">
+                  <i>
+                  </i>
+                  <i>
+                  </i>
+                  <i>
+                  </i>
+                  <span>Vibe Terminal · Core</span>
+                </div>
+                <img src="assets/screens/desktop-split.webp" width="1600" height="900" alt="Vibe Terminal Core에서 build-box와 api-prod 두 SSH 세션을 좌우로 분할해 빌드 결과와 접속 로그를 함께 보는 화면" data-i18n-alt="alt.hero" />
+              </div>
+            </a>
+            <figcaption data-i18n="hero.caption">실제 Core 앱 화면 · 왼쪽은 빌드 서버, 오른쪽은 API 서버 세션입니다.</figcaption>
+          </figure>
+        </div>
+      </section>
+      <nav class="wrap contents" aria-label="Sections">
+        <a href="#overview" data-i18n="intro.1.title">개발자 · AI CLI 사용자</a>
+        <a href="#document" data-i18n="nav.document">문서 모드</a>
+        <a href="#interaction" data-i18n="interaction.label">You stay in the loop</a>
+        <a href="#tour" data-i18n="nav.tour">기능 둘러보기</a>
+        <a href="#mobile" data-i18n="nav.mobile">모바일</a>
+        <a href="#start" data-i18n="nav.download">시작하기</a>
+        <a href="#faq" data-i18n="nav.faq">자주 묻는 질문</a>
+      </nav>
+      <section class="strip" aria-label="Highlights">
+        <div class="wrap strip-grid">
+          <div class="strip-item">
+            <strong data-i18n="strip.1.title">무료 사용 · 소스 공개</strong>
+            <span data-i18n="strip.1.body">이용·수정·재배포 조건은 라이선스에서 확인</span>
+          </div>
+          <div class="strip-item">
+            <strong data-i18n="strip.2.title">다시 연결하는 작업</strong>
+            <span data-i18n="strip.2.body">서버 tmux와 작업 이어가기 옵션으로 지원</span>
+          </div>
+          <div class="strip-item">
+            <strong data-i18n="strip.3.title">내가 고른 AI</strong>
+            <span data-i18n="strip.3.body">OpenAI·Claude·Gemini·Ollama·호환 게이트웨이</span>
+          </div>
+          <div class="strip-item">
+            <strong data-i18n="strip.4.title">데스크톱과 Android</strong>
+            <span data-i18n="strip.4.body">Windows·macOS·Linux와 휴대폰에서 같은 작업대</span>
+          </div>
+        </div>
+      </section>
+      <section class="section" id="overview">
+        <div class="wrap">
+          <div class="section-head">
+            <div>
+              <p class="label mono" data-i18n="intro.label">Your everyday terminal workspace</p>
+              <h2 data-i18n="intro.title">명령 한 줄 뒤에 이어지는 작업까지.</h2>
+            </div>
+            <p data-i18n="intro.lead">접속할 서버를 찾고, 로그를 읽고, 명령을 다시 입력하고, AI CLI의 질문에 답하는 흐름을 한곳에서 이어갑니다. 이런 일을 자주 한다면 Core가 잘 맞습니다.</p>
+          </div>
+          <div class="trust-grid">
+            <article class="card">
+              <h3 data-i18n="intro.1.title">개발자 · AI CLI 사용자</h3>
+              <p data-i18n="intro.1.body">로컬 셸이나 원격 개발 서버에서 CLI를 실행하세요. 긴 응답은 문서처럼 읽고 코드만 복사하며, 감지된 질문에는 클릭으로 답합니다.</p>
+            </article>
+            <article class="card">
+              <h3 data-i18n="intro.2.title">서버 운영 · 배포 담당자</h3>
+              <p data-i18n="intro.2.body">빌드 결과와 서비스 로그를 나란히 보세요. 호스트 메모에 점검 순서를 남기고 스니펫의 변수만 바꿔 반복 명령을 실행합니다.</p>
+            </article>
+            <article class="card">
+              <h3 data-i18n="intro.3.title">개인 서버 · 이동 중 점검</h3>
+              <p data-i18n="intro.3.body">여러 SSH 호스트를 그룹으로 정리하고 휴대폰에서도 접속하세요. tmux로 유지 중인 작업은 네트워크가 돌아오면 다시 확인할 수 있습니다.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+      <section class="section alt" id="document">
+        <div class="wrap">
+          <div class="section-head">
+            <div>
+              <p class="label mono" data-i18n="document.label">Terminal, easier to read</p>
+              <h2 data-i18n="document.title">실행은 터미널에서. 읽기는 문서처럼.</h2>
+            </div>
+            <p data-i18n="document.lead">같은 세션의 출력을 두 가지 방식으로 봅니다. 터미널의 조작감이 필요할 때는 그대로, 긴 설명과 코드를 읽을 때는 GUI 문서 모드로 전환하세요. Core에 기본으로 제공됩니다.</p>
+          </div>
+          <div class="mode-compare">
+            <figure class="shot">
+              <h3 data-i18n="document.terminal">터미널 · 명령과 원래 출력을 그대로</h3>
+              <a href="assets/screens/core-terminal-mode.webp" target="_blank" rel="noopener">
+                <div class="frame">
+                  <img src="assets/screens/core-terminal-mode.webp" width="1280" height="720" loading="lazy" data-i18n-alt="alt.terminal.current" alt="Core 0.25.8 실제 터미널에 마크다운 형식의 시연용 명령 출력이 표시된 모습" />
+                </div>
+              </a>
+            </figure>
+            <figure class="shot">
+              <h3 data-i18n="document.gui">문서 · 같은 출력의 제목·목록·코드 표시</h3>
+              <a href="assets/screens/core-gui-document.webp" target="_blank" rel="noopener">
+                <div class="frame">
+                  <img src="assets/screens/core-gui-document.webp" width="1280" height="720" loading="lazy" data-i18n-alt="alt.agent" alt="Core 0.25.8 문서 모드에 제목, 목록, 복사 버튼이 있는 코드 블록과 URL이 표시된 실제 앱 화면" />
+                </div>
+              </a>
+            </figure>
+          </div>
+          <p class="capture-note" data-i18n="document.caption">Core 0.25.8 실제 앱 · 시연용 명령의 같은 출력을 비교한 화면입니다. 이미지를 누르면 크게 볼 수 있습니다.</p>
+          <div class="reading-grid">
+            <article class="card">
+              <h3 data-i18n="document.a.title">선택하고 복사하기 편하게</h3>
+              <p data-i18n="document.a.body">일반 문서처럼 텍스트를 선택하고 스크롤하세요. 인식된 제목·목록·코드 블록은 읽기 좋은 형태로 표시하며, 코드 블록에는 복사 버튼이 붙습니다.</p>
+            </article>
+            <article class="card">
+              <h3 data-i18n="document.b.title">링크와 입력도 자연스럽게</h3>
+              <p data-i18n="document.b.body">웹 URL의 메뉴에서 브라우저로 열거나 링크를 복사하세요. 하단 입력창은 Enter로 전송하고 Shift+Enter로 줄을 바꿉니다. 한글 조합 중 Enter는 전송하지 않습니다.</p>
+            </article>
+          </div>
+          <p class="content-note" data-i18n="document.note">문서 모드는 실제 터미널 출력을 다시 표현하는 보기입니다. 별도의 AI 대화 기록이나 에이전트 실행 엔진을 만드는 기능이 아니며, 전체 화면 TUI 조작은 터미널 모드가 더 적합할 수 있습니다.</p>
+        </div>
+      </section>
+      <section class="section" id="interaction">
+        <div class="wrap">
+          <div class="section-head">
+            <div>
+              <p class="label mono" data-i18n="interaction.label">You stay in the loop</p>
+              <h2 data-i18n="interaction.title">CLI의 질문에는 클릭으로. 결정은 내 손으로.</h2>
+            </div>
+            <p data-i18n="interaction.lead">Claude Code, Codex, OpenCode의 지원되는 선택 화면을 감지해 문서 모드에서 선택지와 직접 입력 영역을 보여 줍니다. 작은 화면에서도 방향키만으로 답을 찾아다니는 수고를 줄입니다.</p>
+          </div>
+          <div class="trust-grid">
+            <article class="card">
+              <h3 data-i18n="interaction.1.title">01 · 질문 열기</h3>
+              <p data-i18n="interaction.1.body">인식한 질문의 선택지를 터치하거나 클릭합니다. Codex가 접어 둔 대기 질문도 지원되는 화면에서 열어 확인할 수 있습니다.</p>
+            </article>
+            <article class="card">
+              <h3 data-i18n="interaction.2.title">02 · 내 말로 답하기</h3>
+              <p data-i18n="interaction.2.body">선택지만으로 충분하지 않으면 직접 메시지를 입력하세요. CLI와 화면 형식에 따라 제공되는 동작이 달라질 수 있습니다.</p>
+            </article>
+            <article class="card">
+              <h3 data-i18n="interaction.3.title">03 · 필요할 때 AI 제안</h3>
+              <p data-i18n="interaction.3.body">AI Chat을 연결했다면 입력창 왼쪽 AI 버튼으로 2~4개의 답변 후보를 요청하세요. 후보를 클릭하면 그 답변이 즉시 세션에 전송됩니다.</p>
+            </article>
+          </div>
+          <p class="content-note" data-i18n="interaction.note">자동 응답 제안은 요청할 때만 실행합니다. 질문·출력 맥락은 설정한 LLM에 전달될 수 있으며 제공자 요금이 적용됩니다. 선택 화면 인식은 CLI 버전과 출력 형태에 따라 달라질 수 있어, 필요한 경우 언제든 터미널 모드에서 직접 조작하세요.</p>
+        </div>
+      </section>
+      <section class="section" id="tour">
+        <div class="wrap">
+          <div class="section-head">
+            <div>
+              <p class="label mono" data-i18n="tour.label">Feature tour</p>
+              <h2 data-i18n="tour.title">설명보다 화면으로. 실제로 이렇게 일합니다.</h2>
+            </div>
+            <p data-i18n="tour.lead">세션 관리부터 반복 명령, 서버별 기록, 선택적 AI까지. 실제 Core 앱 화면으로 사용 흐름을 살펴보세요. 스크린숏을 누르면 크게 볼 수 있으며, 촬영 버전과 시연 조건은 페이지 하단에 안내합니다.</p>
+          </div>
+          <div class="tour">
+            <article class="feature" id="split">
+              <div class="feature-copy">
+                <span class="num mono">01 · WORKSPACE</span>
+                <h3 data-i18n="f1.title">여러 서버를 한 화면에서, 나란히.</h3>
+                <p data-i18n="f1.body">세션 목록에서 서버를 고르고 칸을 나누기만 하면 됩니다. 빌드를 돌리면서 운영 로그를 보고, 한 칸만 크게 키웠다가 다시 돌아올 수 있습니다.</p>
+                <ul class="checks">
+                  <li data-i18n="f1.a">오른쪽·아래로 나누기, 칸 교환, 한 칸 전체 화면</li>
+                  <li data-i18n="f1.b">세션을 그룹으로 묶고 순서를 바꿔 정리</li>
+                  <li data-i18n="f1.c">칸마다 확대·축소, 세션별 폰트·테마</li>
+                </ul>
+              </div>
+              <figure class="shot">
+                <a href="assets/screens/desktop-split.webp" target="_blank" rel="noopener">
+                  <div class="frame">
+                    <img src="assets/screens/desktop-split.webp" width="1600" height="900" loading="lazy" alt="두 SSH 세션을 좌우 분할로 띄운 Vibe Terminal 화면" data-i18n-alt="alt.split" />
+                  </div>
+                </a>
+                <figcaption data-i18n="f1.caption">build-box에서 빌드를 실행하고, api-prod에서 접속 로그를 확인하는 분할 화면.</figcaption>
+              </figure>
+            </article>
+            <article class="feature flip" id="resume">
+              <div class="feature-copy">
+                <span class="num mono">02 · RESUME</span>
+                <h3 data-i18n="f2.title">연결이 끊겨도, 서버에 남은 작업으로.</h3>
+                <p data-i18n="f2.body">서버에 tmux가 설치되어 있고 호스트의 “작업 이어가기”를 켰다면, 네트워크가 끊긴 동안에도 서버에서 실행 중인 작업에 다시 붙을 수 있습니다. 서버 재부팅이나 작업 자체의 종료까지 복구하는 기능은 아닙니다.</p>
+                <ul class="checks">
+                  <li data-i18n="f2.a">끊김을 감지하면 자동으로 재연결</li>
+                  <li data-i18n="f2.b">세션 정보에서 연결 시각·지속 시간·재연결 기록 확인</li>
+                  <li data-i18n="f2.c">좌측 목록 하단의 고정 “서버 작업 보관함” 탭에서 작업 다시 열기·종료</li>
+                </ul>
+              </div>
+              <div class="shots-stack">
+                <figure class="shot">
+                  <a href="assets/screens/session-reconnect.webp" target="_blank" rel="noopener">
+                    <div class="frame">
+                      <img src="assets/screens/session-reconnect.webp" width="1600" height="900" loading="lazy" alt="세션 정보 패널에 연결 끊김, 재연결 시도, 재연결 성공 이벤트가 기록된 화면" data-i18n-alt="alt.resume" />
+                    </div>
+                  </a>
+                  <figcaption data-i18n="f2.caption">Core 0.20 시연 화면 · 연결 끊김과 재연결 이벤트를 기록한 세션 정보입니다.</figcaption>
+                </figure>
+              </div>
+            </article>
+            <article class="feature" id="secure">
+              <div class="feature-copy">
+                <span class="num mono">03 · CONNECT SAFELY</span>
+                <h3 data-i18n="f3.title">처음 접속부터 안전하게.</h3>
+                <p data-i18n="f3.body">주소·포트·사용자를 저장하고 비밀번호, 공개키, 키보드 인터랙티브(2FA) 중 인증 방식을 고릅니다. 처음 연결할 때는 서버의 호스트키 지문을 보여 주고 직접 신뢰하도록 묻습니다.</p>
+                <ul class="checks">
+                  <li data-i18n="f3.a">인증 정보는 운영체제 보안 저장소에 보관</li>
+                  <li data-i18n="f3.b">Jump 호스트·Kubernetes Pod 경유 연결, 데스크톱 로컬 셸 프로필</li>
+                  <li data-i18n="f3.c">연결 직후 실행할 시작 스크립트와 호스트별 터미널 기본값</li>
+                </ul>
+              </div>
+              <div class="shots-pair">
+                <figure class="shot">
+                  <a href="assets/screens/host-form.webp" target="_blank" rel="noopener">
+                    <div class="dialog-frame">
+                      <img src="assets/screens/host-form.webp" width="900" height="1024" loading="lazy" alt="호스트 추가 화면에서 작업 이어가기를 켜고 사용자와 비밀번호 인증을 입력한 모습" data-i18n-alt="alt.hostform" />
+                    </div>
+                  </a>
+                  <figcaption data-i18n="f3.caption">호스트 추가 · 작업 이어가기와 인증 방식</figcaption>
+                </figure>
+                <figure class="shot">
+                  <a href="assets/screens/host-key.webp" target="_blank" rel="noopener">
+                    <div class="dialog-frame">
+                      <img src="assets/screens/host-key.webp" width="800" height="429" loading="lazy" alt="api-prod 새 호스트 키 신뢰 대화상자에 SHA256 지문이 표시된 모습" data-i18n-alt="alt.hostkey" />
+                    </div>
+                  </a>
+                  <figcaption data-i18n="f3.caption2">첫 접속 시 호스트키 지문 확인</figcaption>
+                </figure>
+              </div>
+            </article>
+            <article class="feature flip" id="snippets">
+              <div class="feature-copy">
+                <span class="num mono">04 · SNIPPETS</span>
+                <h3 data-i18n="f4.title">반복 명령은 한 번만 적어 두세요.</h3>
+                <p data-i18n="f4.body">자주 쓰는 명령을 전역 또는 호스트별 스니펫으로 저장합니다. 본문에 <span class="mono">{{lines}}</span> 같은 변수를 넣으면 실행 직전에 값만 물어보고 바로 실행하거나 붙여 넣습니다.</p>
+                <ul class="checks">
+                  <li data-i18n="f4.a">기본 동작을 &quot;실행&quot; 또는 &quot;붙여넣기&quot;로 선택</li>
+                  <li data-i18n="f4.b">검색, 순서 정렬, 크게 보기, 코드 복사</li>
+                  <li data-i18n="f4.c">GitHub 동기화로 다른 기기에서도 같은 스니펫</li>
+                </ul>
+              </div>
+              <div class="shots-stack">
+                <figure class="shot">
+                  <a href="assets/screens/snippet-variables.webp" target="_blank" rel="noopener">
+                    <div class="frame">
+                      <img src="assets/screens/snippet-variables.webp" width="1600" height="900" loading="lazy" alt="Tail access log 스니펫을 실행하자 lines 변수 값을 묻는 대화상자가 뜬 화면" data-i18n-alt="alt.snippetvar" />
+                    </div>
+                  </a>
+                  <figcaption data-i18n="f4.caption">스니펫 실행 → 변수 lines에 8 입력</figcaption>
+                </figure>
+                <figure class="shot">
+                  <a href="assets/screens/snippet-run.webp" target="_blank" rel="noopener">
+                    <div class="frame">
+                      <img src="assets/screens/snippet-run.webp" width="1600" height="900" loading="lazy" alt="변수가 채워진 tail 명령이 터미널에서 실행되어 최근 로그 8줄이 출력된 화면" data-i18n-alt="alt.snippetrun" />
+                    </div>
+                  </a>
+                  <figcaption data-i18n="f4.caption2">값이 채워진 명령이 현재 세션에서 바로 실행됩니다.</figcaption>
+                </figure>
+              </div>
+            </article>
+            <article class="feature" id="memo">
+              <div class="feature-copy">
+                <span class="num mono">05 · HOST MEMO</span>
+                <h3 data-i18n="f5.title">서버마다 필요한 맥락을 옆에.</h3>
+                <p data-i18n="f5.body">배포 시간, 로그 위치, 점검 순서처럼 그 서버에서만 필요한 내용을 메모로 남깁니다. 세션을 열면 해당 호스트의 메모가 바로 옆 패널에 열립니다.</p>
+                <ul class="checks">
+                  <li data-i18n="f5.a">입력하는 대로 자동 저장</li>
+                  <li data-i18n="f5.b">버전 기록으로 이전 메모 되돌리기</li>
+                  <li data-i18n="f5.c">GitHub 동기화로 기기 간 공유</li>
+                </ul>
+              </div>
+              <figure class="shot">
+                <a href="assets/screens/host-memo.webp" target="_blank" rel="noopener">
+                  <div class="frame">
+                    <img src="assets/screens/host-memo.webp" width="1600" height="900" loading="lazy" alt="api-prod 세션 옆 메모 패널에 배포 시간과 릴리스 체크리스트가 적혀 있는 화면" data-i18n-alt="alt.memo" />
+                  </div>
+                </a>
+                <figcaption data-i18n="f5.caption">api-prod 호스트 메모 · 배포 창, 로그 위치, 릴리스 체크리스트</figcaption>
+              </figure>
+            </article>
+            <article class="feature flip" id="ai">
+              <div class="feature-copy">
+                <span class="num mono">06 · AI CHAT</span>
+                <h3 data-i18n="f6.title">막히는 순간, 지금 화면을 그대로 물어보세요.</h3>
+                <p data-i18n="f6.body">AI Chat으로 현재 터미널의 텍스트를 바탕으로 오류 원인이나 다음 명령을 물어볼 수 있습니다. OpenAI, Claude, Gemini, OpenAI 호환 서버나 Ollama를 직접 설정하세요. 사용료와 데이터 처리는 선택한 제공자에 따르며, Ollama도 설정에 따라 클라우드 모델을 사용할 수 있습니다.</p>
+                <ul class="checks">
+                  <li data-i18n="f6.a">&quot;현재 화면 요약&quot;, &quot;마지막 오류 원인 분석&quot;, &quot;다음 명령 추천&quot; 바로가기</li>
+                  <li data-i18n="f6.b">처음 쓸 때 어떤 데이터가 어디로 가는지 알려 주고 동의를 받음</li>
+                  <li data-i18n="f6.c">AI 없이도 모든 SSH 기능을 그대로 사용</li>
+                </ul>
+              </div>
+              <div class="shots-stack">
+                <figure class="shot">
+                  <a href="assets/screens/ai-chat.webp" target="_blank" rel="noopener">
+                    <div class="frame">
+                      <img src="assets/screens/ai-chat.webp" width="1600" height="900" loading="lazy" alt="DB 커넥션 타임아웃 오류 로그 옆에서 AI Chat이 원인을 DB Connection Pool 고갈로 분석한 화면" data-i18n-alt="alt.ai" />
+                    </div>
+                  </a>
+                  <figcaption data-i18n="f6.caption">&quot;마지막 오류 원인 분석&quot; 결과 · Ollama를 거쳐 클라우드 모델 gemma4:31b-cloud가 실제로 생성한 답변입니다.</figcaption>
+                </figure>
+                <div class="shots-pair">
+                  <figure class="shot">
+                    <a href="assets/screens/ai-provider.webp" target="_blank" rel="noopener">
+                      <div class="dialog-frame">
+                        <img src="assets/screens/ai-provider.webp" width="1100" height="945" loading="lazy" alt="AI 설정에서 OpenAI compatible 제공자에 Ollama 주소와 gemma4:31b-cloud 모델을 넣고 연결 테스트에 성공한 화면" data-i18n-alt="alt.aiprovider" />
+                      </div>
+                    </a>
+                    <figcaption data-i18n="f6.caption2">OpenAI 호환 제공자로 Ollama 연결 · 모델 gemma4:31b-cloud</figcaption>
+                  </figure>
+                  <figure class="shot">
+                    <a href="assets/screens/ai-consent.webp" target="_blank" rel="noopener">
+                      <div class="dialog-frame">
+                        <img src="assets/screens/ai-consent.webp" width="1400" height="419" loading="lazy" alt="AI 데이터 전송 동의 대화상자에 수신 서비스와 전송 내용이 안내된 화면" data-i18n-alt="alt.aiconsent" />
+                      </div>
+                    </a>
+                    <figcaption data-i18n="f6.caption3">전송 전에 받는 곳과 내용을 먼저 안내</figcaption>
+                  </figure>
+                </div>
+              </div>
+            </article>
+            <article class="feature" id="agent">
+              <div class="feature-copy">
+                <span class="num mono">07 · AGENT CLI</span>
+                <h3 data-i18n="f7.title">익숙한 CLI를, 내가 직접 제어하며.</h3>
+                <p data-i18n="f7.body">Claude Code, Codex, OpenCode 등을 로컬 또는 원격 터미널에서 직접 실행하세요. Core의 문서 모드로 출력을 읽고 지원되는 질문에 답할 수 있습니다. CLI 설치·로그인·모델 이용료는 각 도구에서 별도로 준비합니다.</p>
+                <ul class="checks">
+                  <li data-i18n="f7.a">로컬 셸과 SSH 세션에서 이미 설치된 CLI 실행</li>
+                  <li data-i18n="f7.b">문서 모드의 출력 읽기·텍스트 복사·클릭 응답은 Core 공통 기능</li>
+                  <li data-i18n="f7.c">“새 Agent 세션” 자동 생성·새 worktree 생성은 Pro 범위</li>
+                </ul>
+              </div>
+              <figure class="shot">
+                <a href="assets/screens/core-gui-document.webp" target="_blank" rel="noopener">
+                  <div class="frame">
+                    <img src="assets/screens/core-gui-document.webp" width="1280" height="720" loading="lazy" alt="Core 0.25.8 문서 모드에 제목, 목록, 복사 버튼이 있는 코드 블록과 URL이 표시된 실제 앱 화면" data-i18n-alt="alt.agent" />
+                  </div>
+                </a>
+                <figcaption data-i18n="f7.caption">Core 0.25.8 · 실제 앱에서 시연용 명령 출력을 문서 모드로 표시했습니다.</figcaption>
+              </figure>
+            </article>
+            <article class="feature flip" id="sync">
+              <div class="feature-copy">
+                <span class="num mono">08 · SYNC &amp; STYLE</span>
+                <h3 data-i18n="f8.title">어느 기기에서든 내 작업대 그대로.</h3>
+                <p data-i18n="f8.body">GitHub 동기화를 켜면 호스트·스니펫·메모·키체인과 터미널 표시·알림·AI 설정이 내 private 저장소의 암호화된 파일 하나로 오갑니다. 터미널 테마와 폰트, 크기, 줄 간격은 미리보기를 보면서 고릅니다.</p>
+                <ul class="checks">
+                  <li data-i18n="f8.a">직접 선택한 GitHub 저장소로 암호화 백업·기기 간 동기화</li>
+                  <li data-i18n="f8.b">로컬 셸·패널 배치·단축키·폰트는 기기마다 따로</li>
+                  <li data-i18n="f8.c">내장 터미널 폰트와 CJK 표시 설정 · 플랫폼별 지원 확인</li>
+                </ul>
+              </div>
+              <div class="shots-pair">
+                <figure class="shot">
+                  <a href="assets/screens/github-sync.webp" target="_blank" rel="noopener">
+                    <div class="dialog-frame">
+                      <img src="assets/screens/github-sync.webp" width="1100" height="945" loading="lazy" alt="GitHub 동기화 설정 화면에 로그인과 앱 설치 단계가 안내된 모습" data-i18n-alt="alt.sync" />
+                    </div>
+                  </a>
+                  <figcaption data-i18n="f8.caption">GitHub 동기화 설정 안내</figcaption>
+                </figure>
+                <figure class="shot">
+                  <a href="assets/screens/terminal-style.webp" target="_blank" rel="noopener">
+                    <div class="dialog-frame">
+                      <img src="assets/screens/terminal-style.webp" width="1100" height="945" loading="lazy" alt="터미널 화면 설정에서 테마와 폰트, 크기를 미리보기와 함께 고르는 모습" data-i18n-alt="alt.style" />
+                    </div>
+                  </a>
+                  <figcaption data-i18n="f8.caption2">테마·폰트 미리보기</figcaption>
+                </figure>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+      <section class="section alt" id="mobile">
+        <div class="wrap mobile-grid">
+          <div>
+            <p class="label mono">ANDROID · MOBILE LAYOUT</p>
+            <h2 data-i18n="mobile.title">휴대폰에서도 같은 서버, 같은 작업.</h2>
+            <p class="lead" data-i18n="mobile.lead">좁은 화면에서는 세션 목록이 서랍으로 들어가고, 키보드 위에 Esc·Tab·Ctrl·방향키 보조 키가 붙습니다. 이동 중에도 서버 상태를 확인하고, 데스크톱에서 하던 tmux 작업에 그대로 붙을 수 있습니다.</p>
+            <ul class="checks">
+              <li data-i18n="mobile.a">Android 포그라운드 서비스로 연결 유지 지원 · OS·배터리 정책의 영향 있음</li>
+              <li data-i18n="mobile.b">터치로 텍스트 선택·복사·붙여넣기, 외장 키보드 입력 지원</li>
+              <li data-i18n="mobile.c">Google Play에서 공개 중 · Vibe Terminal: SSH Client</li>
+            </ul>
+            <figure class="video-card">
+              <video controls playsinline preload="none" poster="assets/icon-512.png" aria-label="Vibe Terminal Core Android SSH demonstration">
+                <source src="https://vcoder.kr/api/v1/uploads/videos/1aa87cf9-eab9-4ae8-bff5-a649ac3696dc.mp4" type="video/mp4" />
+                <a href="https://vcoder.kr/api/v1/uploads/videos/1aa87cf9-eab9-4ae8-bff5-a649ac3696dc.mp4" data-i18n="core.video">Core SSH 연결 시연 영상 보기</a>
+              </video>
+              <figcaption data-i18n="core.caption">실제 Android Core 앱의 SSH 연결·백그라운드 유지 시연입니다. 재생하면 영상을 제공하는 vcoder.kr에 연결됩니다.</figcaption>
+            </figure>
+          </div>
+          <div class="phones">
+            <figure class="shot">
+              <div class="phone">
+                <img src="assets/screens/mobile-terminal.webp" width="600" height="1054" loading="lazy" alt="좁은 화면 레이아웃에서 api-prod 터미널과 하단 보조 키 막대가 보이는 화면" data-i18n-alt="alt.mobile1" />
+              </div>
+              <figcaption data-i18n="mobile.caption1">한 칸 터미널 + 보조 키</figcaption>
+            </figure>
+            <figure class="shot">
+              <div class="phone">
+                <img src="assets/screens/mobile-sessions.webp" width="600" height="1054" loading="lazy" alt="좁은 화면에서 세션 서랍을 열어 api-prod와 build-box 세션을 고르는 화면" data-i18n-alt="alt.mobile2" />
+              </div>
+              <figcaption data-i18n="mobile.caption2">세션 서랍에서 서버 전환</figcaption>
+            </figure>
+          </div>
+        </div>
+      </section>
+      <section class="section alt" id="workflow">
+        <div class="wrap">
+          <div class="section-head">
+            <div>
+              <p class="label mono" data-i18n="workflow.label">A day with Core</p>
+              <h2 data-i18n="workflow.title">작업이 이어지는 세 가지 장면.</h2>
+            </div>
+          </div>
+          <div class="trust-grid">
+            <article class="card">
+              <h3 data-i18n="workflow.1.title">배포 전후를 한눈에</h3>
+              <p data-i18n="workflow.1.body">빌드 서버와 서비스 서버를 분할로 엽니다. 호스트 메모의 점검 순서를 따라 상태를 확인하고, 스니펫의 서비스 이름만 바꿔 로그 명령을 재사용합니다.</p>
+            </article>
+            <article class="card">
+              <h3 data-i18n="workflow.2.title">긴 AI CLI 응답을 정리하며</h3>
+              <p data-i18n="workflow.2.body">터미널에서 CLI를 시작한 뒤 문서 모드로 바꿉니다. 설명을 스크롤하고 코드 블록을 복사합니다. 질문이 감지되면 선택지나 직접 작성한 메시지로 답합니다.</p>
+            </article>
+            <article class="card">
+              <h3 data-i18n="workflow.3.title">이동 중 서버 상태 확인</h3>
+              <p data-i18n="workflow.3.body">Android에서 저장한 호스트를 열고 상태를 확인합니다. 서버에서 tmux로 유지한 작업이 있다면 다시 연결해 결과를 보고, 다음에 필요한 내용을 메모에 남깁니다.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+      <section class="section" id="start">
+        <div class="wrap">
+          <div class="section-head">
+            <div>
+              <p class="label mono" data-i18n="start.label">Start in four steps</p>
+              <h2 data-i18n="start.title">첫 접속부터 내 작업대 만들기까지.</h2>
+            </div>
+          </div>
+          <div class="start-grid">
+            <article class="card">
+              <h3 data-i18n="start.1.title">01 · 설치</h3>
+              <p data-i18n="start.1.body">운영체제에 맞는 데스크톱 압축 파일을 받거나 Android에서 Google Play를 엽니다. 데스크톱은 압축을 풀고 포함된 라이브러리와 함께 실행하세요.</p>
+            </article>
+            <article class="card">
+              <h3 data-i18n="start.2.title">02 · 연결</h3>
+              <p data-i18n="start.2.body">호스트 주소·포트·사용자·인증 방식을 저장합니다. 첫 SSH 접속 시 호스트키 지문을 신뢰할 수 있는 경로로 확인하세요. 데스크톱에서는 로컬 셸로 시작해도 됩니다.</p>
+            </article>
+            <article class="card">
+              <h3 data-i18n="start.3.title">03 · 정리</h3>
+              <p data-i18n="start.3.body">세션을 그룹과 분할 화면으로 정리하고, 자주 쓰는 명령과 서버별 메모를 남깁니다. 작업 이어가기를 원하면 서버 tmux 설치와 호스트 옵션을 확인합니다.</p>
+            </article>
+            <article class="card">
+              <h3 data-i18n="start.4.title">04 · 확장</h3>
+              <p data-i18n="start.4.body">문서 아이콘으로 보기 방식을 바꾸고, 필요할 때만 AI 제공자나 GitHub 동기화를 연결하세요. AI 없이도 SSH·문서 모드·스니펫을 사용할 수 있습니다.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+      <section class="section alt" id="faq">
+        <div class="wrap">
+          <h2 data-i18n="faq.title">시작하기 전에 궁금한 것들.</h2>
+          <div class="faq-list">
+            <details>
+              <summary data-i18n="faq.1.q">Core는 무료인가요? AI 비용도 포함되나요?</summary>
+              <p data-i18n="faq.1.a">Core 앱은 무료로 사용할 수 있습니다. AI는 선택 기능이며, 직접 연결한 제공자의 API 키·계정·모델 설정과 요금이 적용됩니다. CLI 도구의 구독이나 사용료도 별도입니다. AI를 연결하지 않아도 터미널과 문서 모드는 사용할 수 있습니다.</p>
+            </details>
+            <details>
+              <summary data-i18n="faq.2.q">GUI 문서 모드는 AI 채팅 앱인가요?</summary>
+              <p data-i18n="faq.2.a">같은 터미널 세션의 실제 출력을 읽기 편하게 표현하는 보기입니다. 새 AI 모델을 실행하거나 CLI의 전체 대화 상태를 가져오는 기능은 아닙니다. 읽기와 복사에는 문서 모드, 화면 전체를 사용하는 도구의 세밀한 조작에는 터미널 모드를 선택하세요.</p>
+            </details>
+            <details>
+              <summary data-i18n="faq.3.q">모든 CLI 질문을 클릭으로 답할 수 있나요?</summary>
+              <p data-i18n="faq.3.a">지원되는 Claude Code·Codex·OpenCode의 화면을 감지하는 방식이므로 도구 버전과 출력 형태에 따라 인식 결과가 달라집니다. 인식되지 않는 질문은 터미널에서 직접 답할 수 있습니다. AI 답변 후보는 별도로 AI Chat을 연결하고 버튼을 눌렀을 때만 생성됩니다.</p>
+            </details>
+            <details>
+              <summary data-i18n="faq.4.q">연결이 끊기거나 앱을 닫으면 작업은 어떻게 되나요?</summary>
+              <p data-i18n="faq.4.a">원격 작업은 서버에 tmux가 있고 “작업 이어가기”를 사용한 경우, 서버에서 계속 실행 중인 작업에 다시 연결할 수 있습니다. 서버 재부팅·프로세스 종료·tmux 삭제는 별개입니다. 데스크톱 로컬 셸도 지원 환경의 내장 데몬으로 재연결을 지원하지만 모든 종료 상황에서 작업 보존을 보장하지는 않습니다.</p>
+            </details>
+            <details>
+              <summary data-i18n="faq.5.q">가입이나 클라우드 동기화가 꼭 필요한가요?</summary>
+              <p data-i18n="faq.5.a">앱 회원가입 없이 SSH와 로컬 기능을 시작할 수 있습니다. AI·GitHub 동기화·외부 공유를 이용할 때는 해당 서비스의 인증과 설정이 필요할 수 있습니다. 동기화는 선택 사항이며, 전체 백업에 인증 정보가 포함될 수 있으므로 저장소와 암호화 설정을 확인하세요.</p>
+            </details>
+            <details>
+              <summary data-i18n="faq.6.q">소스가 공개되어 있으면 자유롭게 재배포해도 되나요?</summary>
+              <p data-i18n="faq.6.a">공개 저장소에서 소스를 열람할 수 있으며 Vibe Terminal Source-Available License 1.0이 적용됩니다. 무제한 수정·재배포를 허용하는 오픈소스 라이선스와는 다릅니다. 이용·복제·수정·재배포 조건은 저장소의 LICENSE를 확인하세요.</p>
+            </details>
+            <details>
+              <summary data-i18n="faq.7.q">Core와 Pro의 기능 경계는 어디인가요?</summary>
+              <p data-i18n="faq.7.a">SSH·로컬 셸·분할·문서 모드·지원 질문 클릭 응답·AI Chat·답변 제안·스니펫·메모·GitHub 동기화는 Core 범위입니다. 새 Agent 세션 및 새 worktree 자동 생성, Agent Chat, SFTP·포트 포워딩 UI, Vault, 브라우저 패널, 고급 자동화와 실험용 커스텀 앱은 Pro 범위입니다. 이 페이지의 다운로드는 Core입니다.</p>
+            </details>
+            <details>
+              <summary data-i18n="faq.8.q">Jump 호스트와 Kubernetes 연결에는 무엇이 필요한가요?</summary>
+              <p data-i18n="faq.8.a">접근 권한이 있는 SSH 경유 호스트나 Kubernetes 게이트웨이를 먼저 준비해야 합니다. Kubernetes 경유 연결은 사용할 수 있는 kubectl과 올바른 클러스터 접근 설정이 필요합니다. Core가 서버나 클러스터의 권한을 대신 발급하지는 않습니다.</p>
+            </details>
+          </div>
+          <a href="https://github.com/jhl-labs/vibe-terminal-public/blob/main/LICENSE" class="text-link" data-i18n="license.link">사용·재배포 라이선스 확인</a>
+        </div>
+      </section>
+      <section class="section" id="trust">
+        <div class="wrap">
+          <div class="section-head">
+            <div>
+              <p class="label mono" data-i18n="trust.label">Data &amp; control</p>
+              <h2 data-i18n="trust.title">내가 연결하고, 내가 선택하는 데이터 흐름.</h2>
+            </div>
+            <p data-i18n="trust.lead">SSH 연결에 앱 회원가입이나 AI 설정은 필요하지 않습니다. 호스트 정보와 메모는 기기에 저장하며, AI·GitHub 백업·공유 기능을 사용하면 각각의 목적지로 데이터가 전송됩니다. 기능별 범위를 확인하고 선택하세요.</p>
+          </div>
+          <div class="trust-grid">
+            <article class="card">
+              <h3 data-i18n="trust.1.title">기기 안에 저장</h3>
+              <p data-i18n="trust.1.body">호스트·스니펫·메모는 기기에, 비밀번호와 키는 운영체제 보안 저장소에 보관합니다.</p>
+            </article>
+            <article class="card">
+              <h3 data-i18n="trust.2.title">선택해서 연결</h3>
+              <p data-i18n="trust.2.body">AI에는 질문과 선택한 터미널 맥락이 전달될 수 있습니다. 수신 서비스에 대한 안내와 동의를 확인하고, 민감한 내용은 전송 전에 검토하세요.</p>
+            </article>
+            <article class="card">
+              <h3 data-i18n="trust.3.title">투명한 안내</h3>
+              <p data-i18n="trust.3.body">GitHub 전체 백업은 인증 비밀을 포함할 수 있는 암호화 파일입니다. Gist·커뮤니티 공유는 별도의 공개 범위를 가지므로 저장소와 공유 대상을 직접 확인하세요.</p>
+            </article>
+          </div>
+          <div class="hero-actions">
+            <a class="button secondary" href="core/privacy/" data-i18n="nav.privacy">개인정보처리방침</a>
+            <a class="button secondary" href="mailto:bkperio@gmail.com" data-i18n="core.contact">지원 문의</a>
+          </div>
+        </div>
+      </section>
+      <section class="section alt" id="pro">
+        <div class="wrap compact-pro">
+          <h2 data-i18n="pro.title">이 페이지의 주인공은 무료 Core입니다.</h2>
+          <p data-i18n="pro.lead">문서 모드와 클릭 응답, 선택적 AI 기능을 포함한 Core부터 사용해 보세요. 별도 Pro 제품의 기능과 개인정보 안내는 Pro 페이지에서 구분해 확인할 수 있습니다.</p>
+          <a href="pro/" data-i18n="pro.link">별도 Pro 안내 보기 →</a>
+        </div>
+      </section>
+      <section class="section" id="download">
+        <div class="wrap closing">
+          <div>
+            <p class="label mono" data-i18n="download.label">Free Core edition</p>
+            <h2 data-i18n="download.title">지금 무료로 시작하세요.</h2>
+            <p data-i18n="download.lead">데스크톱은 GitHub Releases, Android는 Google Play에서 시작하세요. 이 페이지의 데스크톱 안내 기준은 Core 0.25.8이며, 각 배포 채널의 버전과 지원 조건은 다를 수 있습니다.</p>
+          </div>
+          <div class="card repo-card">
+            <strong data-i18n="download.run">Core 배포와 지원</strong>
+            <span class="mono" style="color:var(--muted);font-size:14px">Windows · macOS · Linux · Android</span>
+            <a class="button primary" href="https://github.com/jhl-labs/vibe-terminal-public/releases" data-i18n="download.repo">Core 릴리스 받기</a>
+            <a class="button secondary" href="https://play.google.com/store/apps/details?id=com.euno.vibe_terminal" data-i18n="hero.secondary">Android · Google Play</a>
+            <a href="core/privacy/" data-i18n="nav.privacy">개인정보처리방침</a>
+            <a href="mailto:bkperio@gmail.com">bkperio@gmail.com</a>
+          </div>
+        </div>
+        <div class="wrap platform">
+          <h3 data-i18n="platform.title">내 환경에 맞게 받으세요.</h3>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col" data-i18n="platform.os">플랫폼</th>
+                  <th scope="col" data-i18n="platform.requirement">배포 파일·지원 조건</th>
+                  <th scope="col" data-i18n="platform.link">받는 곳</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row">Windows</th>
+                  <td data-i18n="platform.windows">Windows x64 · 압축을 푼 전체 폴더로 실행</td>
+                  <td>
+                    <a href="https://github.com/jhl-labs/vibe-terminal-public/releases" data-i18n="platform.release">GitHub Releases</a>
+                  </td>
+                </tr>
+                <tr>
+                  <th scope="row">macOS</th>
+                  <td data-i18n="platform.macos">Apple Silicon ARM64 · Intel Mac 지원 빌드 아님</td>
+                  <td>
+                    <a href="https://github.com/jhl-labs/vibe-terminal-public/releases" data-i18n="platform.release">GitHub Releases</a>
+                  </td>
+                </tr>
+                <tr>
+                  <th scope="row">Linux</th>
+                  <td data-i18n="platform.linux">Linux x64 · glibc 2.38 이상 (예: Ubuntu 24.04) · 데스크톱 그래픽 환경 및 한글용 CJK 폰트</td>
+                  <td>
+                    <a href="https://github.com/jhl-labs/vibe-terminal-public/releases" data-i18n="platform.release">GitHub Releases</a>
+                  </td>
+                </tr>
+                <tr>
+                  <th scope="row">Android</th>
+                  <td data-i18n="platform.android">Google Play 공개 Core · 스토어의 기기 호환성과 배포 버전 확인</td>
+                  <td>
+                    <a href="https://play.google.com/store/apps/details?id=com.euno.vibe_terminal" data-i18n="hero.secondary">Android · Google Play</a>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="capture-note" data-i18n="platform.note">데스크톱 안내 기준: v0.25.8. 릴리스별 변경사항과 SHA256SUMS를 함께 확인하세요. 앱 실행 파일 하나만 다른 폴더로 옮기면 포함된 라이브러리나 도구를 찾지 못할 수 있습니다.</p>
+        </div>
+        <p class="wrap capture-note" data-i18n="capture.note">화면 안내: 문서 모드와 대응 터미널 화면은 Core 0.25.8의 실제 Linux 앱에서 시연용 명령을 실행해 캡처했습니다. AI 답변이 아닙니다. 나머지 화면은 Core 0.20의 실제 앱과 데모 서버로 촬영한 기능 예시이며 현재 UI와 다를 수 있습니다. AI Chat 예시는 Ollama를 거쳐 ollama.com의 gemma4:31b-cloud가 데모 로그로 생성한 답변입니다. 휴대폰 이미지는 데스크톱 앱의 좁은 화면 레이아웃이며, 영상은 실제 Android Core 시연입니다.</p>
+      </section>
+    </main>
+    <footer>
+      <div class="wrap footer-inner">
+        <span>Vibe Terminal Core · Free SSH terminal</span>
+        <div class="footer-links">
+          <a href="core/privacy/" data-i18n="nav.privacy">개인정보처리방침</a>
+          <a href="core/privacy/en/" lang="en">Privacy policy</a>
+          <a href="pro/">Pro</a>
+          <a href="mailto:bkperio@gmail.com">bkperio@gmail.com</a>
+          <a href="https://github.com/jhl-labs/vibe-terminal-public">GitHub Core</a>
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      const copy = {
+  "ko": {
+    "edition.core": "Core · 무료판",
+    "edition.pro": "Pro · 향후 공개 예정",
+    "nav.tour": "기능 둘러보기",
+    "nav.mobile": "모바일",
+    "nav.trust": "개인정보",
+    "nav.download": "시작하기",
+    "nav.privacy": "개인정보처리방침",
+    "theme.system": "시스템",
+    "theme.light": "라이트",
+    "theme.dark": "다크",
+    "hero.eyebrow": "SSH · 문서 모드 · AI CLI · 나만의 작업대",
+    "hero.lead": "서버에 연결하는 일부터 긴 출력을 읽고 다음 행동을 결정하는 순간까지. 여러 SSH 세션, 문서처럼 읽는 터미널, 재사용하는 명령과 선택적 AI를 하나의 무료 작업대에 모았습니다.",
+    "hero.primary": "데스크톱 무료 다운로드",
+    "hero.secondary": "Android · Google Play",
+    "hero.point1": "최대 4칸 분할로 서버를 나란히",
+    "hero.point2": "터미널 ↔ 문서 모드, 같은 세션의 두 가지 보기",
+    "hero.point3": "클릭으로 답하는 CLI 질문과 선택적 AI 제안",
+    "hero.point4": "앱 회원가입 없이 시작 · AI 연결은 선택",
+    "hero.caption": "실제 Core 앱 화면 · 왼쪽은 빌드 서버, 오른쪽은 API 서버 세션입니다.",
+    "strip.1.title": "무료 사용 · 소스 공개",
+    "strip.1.body": "이용·수정·재배포 조건은 라이선스에서 확인",
+    "strip.2.title": "다시 연결하는 작업",
+    "strip.2.body": "서버 tmux와 작업 이어가기 옵션으로 지원",
+    "strip.3.title": "내가 고른 AI",
+    "strip.3.body": "OpenAI·Claude·Gemini·Ollama·호환 게이트웨이",
+    "strip.4.title": "데스크톱과 Android",
+    "strip.4.body": "Windows·macOS·Linux와 휴대폰에서 같은 작업대",
+    "tour.label": "Feature tour",
+    "tour.title": "설명보다 화면으로. 실제로 이렇게 일합니다.",
+    "tour.lead": "세션 관리부터 반복 명령, 서버별 기록, 선택적 AI까지. 실제 Core 앱 화면으로 사용 흐름을 살펴보세요. 스크린숏을 누르면 크게 볼 수 있으며, 촬영 버전과 시연 조건은 페이지 하단에 안내합니다.",
+    "f1.title": "여러 서버를 한 화면에서, 나란히.",
+    "f1.body": "세션 목록에서 서버를 고르고 칸을 나누기만 하면 됩니다. 빌드를 돌리면서 운영 로그를 보고, 한 칸만 크게 키웠다가 다시 돌아올 수 있습니다.",
+    "f1.a": "오른쪽·아래로 나누기, 칸 교환, 한 칸 전체 화면",
+    "f1.b": "세션을 그룹으로 묶고 순서를 바꿔 정리",
+    "f1.c": "칸마다 확대·축소, 세션별 폰트·테마",
+    "f1.caption": "build-box에서 빌드를 실행하고, api-prod에서 접속 로그를 확인하는 분할 화면.",
+    "f2.title": "연결이 끊겨도, 서버에 남은 작업으로.",
+    "f2.body": "서버에 tmux가 설치되어 있고 호스트의 “작업 이어가기”를 켰다면, 네트워크가 끊긴 동안에도 서버에서 실행 중인 작업에 다시 붙을 수 있습니다. 서버 재부팅이나 작업 자체의 종료까지 복구하는 기능은 아닙니다.",
+    "f2.a": "끊김을 감지하면 자동으로 재연결",
+    "f2.b": "세션 정보에서 연결 시각·지속 시간·재연결 기록 확인",
+    "f2.c": "좌측 목록 하단의 고정 “서버 작업 보관함” 탭에서 작업 다시 열기·종료",
+    "f2.caption": "Core 0.20 시연 화면 · 연결 끊김과 재연결 이벤트를 기록한 세션 정보입니다.",
+    "f3.title": "처음 접속부터 안전하게.",
+    "f3.body": "주소·포트·사용자를 저장하고 비밀번호, 공개키, 키보드 인터랙티브(2FA) 중 인증 방식을 고릅니다. 처음 연결할 때는 서버의 호스트키 지문을 보여 주고 직접 신뢰하도록 묻습니다.",
+    "f3.a": "인증 정보는 운영체제 보안 저장소에 보관",
+    "f3.b": "Jump 호스트·Kubernetes Pod 경유 연결, 데스크톱 로컬 셸 프로필",
+    "f3.c": "연결 직후 실행할 시작 스크립트와 호스트별 터미널 기본값",
+    "f3.caption": "호스트 추가 · 작업 이어가기와 인증 방식",
+    "f3.caption2": "첫 접속 시 호스트키 지문 확인",
+    "f4.title": "반복 명령은 한 번만 적어 두세요.",
+    "f4.a": "기본 동작을 \"실행\" 또는 \"붙여넣기\"로 선택",
+    "f4.b": "검색, 순서 정렬, 크게 보기, 코드 복사",
+    "f4.c": "GitHub 동기화로 다른 기기에서도 같은 스니펫",
+    "f4.caption": "스니펫 실행 → 변수 lines에 8 입력",
+    "f4.caption2": "값이 채워진 명령이 현재 세션에서 바로 실행됩니다.",
+    "f5.title": "서버마다 필요한 맥락을 옆에.",
+    "f5.body": "배포 시간, 로그 위치, 점검 순서처럼 그 서버에서만 필요한 내용을 메모로 남깁니다. 세션을 열면 해당 호스트의 메모가 바로 옆 패널에 열립니다.",
+    "f5.a": "입력하는 대로 자동 저장",
+    "f5.b": "버전 기록으로 이전 메모 되돌리기",
+    "f5.c": "GitHub 동기화로 기기 간 공유",
+    "f5.caption": "api-prod 호스트 메모 · 배포 창, 로그 위치, 릴리스 체크리스트",
+    "f6.title": "막히는 순간, 지금 화면을 그대로 물어보세요.",
+    "f6.body": "AI Chat으로 현재 터미널의 텍스트를 바탕으로 오류 원인이나 다음 명령을 물어볼 수 있습니다. OpenAI, Claude, Gemini, OpenAI 호환 서버나 Ollama를 직접 설정하세요. 사용료와 데이터 처리는 선택한 제공자에 따르며, Ollama도 설정에 따라 클라우드 모델을 사용할 수 있습니다.",
+    "f6.a": "\"현재 화면 요약\", \"마지막 오류 원인 분석\", \"다음 명령 추천\" 바로가기",
+    "f6.b": "처음 쓸 때 어떤 데이터가 어디로 가는지 알려 주고 동의를 받음",
+    "f6.c": "AI 없이도 모든 SSH 기능을 그대로 사용",
+    "f6.caption": "\"마지막 오류 원인 분석\" 결과 · Ollama를 거쳐 클라우드 모델 gemma4:31b-cloud가 실제로 생성한 답변입니다.",
+    "f6.caption2": "OpenAI 호환 제공자로 Ollama 연결 · 모델 gemma4:31b-cloud",
+    "f6.caption3": "전송 전에 받는 곳과 내용을 먼저 안내",
+    "f7.title": "익숙한 CLI를, 내가 직접 제어하며.",
+    "f7.body": "Claude Code, Codex, OpenCode 등을 로컬 또는 원격 터미널에서 직접 실행하세요. Core의 문서 모드로 출력을 읽고 지원되는 질문에 답할 수 있습니다. CLI 설치·로그인·모델 이용료는 각 도구에서 별도로 준비합니다.",
+    "f7.a": "로컬 셸과 SSH 세션에서 이미 설치된 CLI 실행",
+    "f7.b": "문서 모드의 출력 읽기·텍스트 복사·클릭 응답은 Core 공통 기능",
+    "f7.c": "“새 Agent 세션” 자동 생성·새 worktree 생성은 Pro 범위",
+    "f7.caption": "Core 0.25.8 · 실제 앱에서 시연용 명령 출력을 문서 모드로 표시했습니다.",
+    "f8.title": "어느 기기에서든 내 작업대 그대로.",
+    "f8.body": "GitHub 동기화를 켜면 호스트·스니펫·메모·키체인과 터미널 표시·알림·AI 설정이 내 private 저장소의 암호화된 파일 하나로 오갑니다. 터미널 테마와 폰트, 크기, 줄 간격은 미리보기를 보면서 고릅니다.",
+    "f8.a": "직접 선택한 GitHub 저장소로 암호화 백업·기기 간 동기화",
+    "f8.b": "로컬 셸·패널 배치·단축키·폰트는 기기마다 따로",
+    "f8.c": "내장 터미널 폰트와 CJK 표시 설정 · 플랫폼별 지원 확인",
+    "f8.caption": "GitHub 동기화 설정 안내",
+    "f8.caption2": "테마·폰트 미리보기",
+    "mobile.title": "휴대폰에서도 같은 서버, 같은 작업.",
+    "mobile.lead": "좁은 화면에서는 세션 목록이 서랍으로 들어가고, 키보드 위에 Esc·Tab·Ctrl·방향키 보조 키가 붙습니다. 이동 중에도 서버 상태를 확인하고, 데스크톱에서 하던 tmux 작업에 그대로 붙을 수 있습니다.",
+    "mobile.a": "Android 포그라운드 서비스로 연결 유지 지원 · OS·배터리 정책의 영향 있음",
+    "mobile.b": "터치로 텍스트 선택·복사·붙여넣기, 외장 키보드 입력 지원",
+    "mobile.c": "Google Play에서 공개 중 · Vibe Terminal: SSH Client",
+    "mobile.caption1": "한 칸 터미널 + 보조 키",
+    "mobile.caption2": "세션 서랍에서 서버 전환",
+    "core.video": "Core SSH 연결 시연 영상 보기",
+    "core.caption": "실제 Android Core 앱의 SSH 연결·백그라운드 유지 시연입니다. 재생하면 영상을 제공하는 vcoder.kr에 연결됩니다.",
+    "core.contact": "지원 문의",
+    "trust.label": "Data & control",
+    "trust.title": "내가 연결하고, 내가 선택하는 데이터 흐름.",
+    "trust.lead": "SSH 연결에 앱 회원가입이나 AI 설정은 필요하지 않습니다. 호스트 정보와 메모는 기기에 저장하며, AI·GitHub 백업·공유 기능을 사용하면 각각의 목적지로 데이터가 전송됩니다. 기능별 범위를 확인하고 선택하세요.",
+    "trust.1.title": "기기 안에 저장",
+    "trust.1.body": "호스트·스니펫·메모는 기기에, 비밀번호와 키는 운영체제 보안 저장소에 보관합니다.",
+    "trust.2.title": "선택해서 연결",
+    "trust.2.body": "AI에는 질문과 선택한 터미널 맥락이 전달될 수 있습니다. 수신 서비스에 대한 안내와 동의를 확인하고, 민감한 내용은 전송 전에 검토하세요.",
+    "trust.3.title": "투명한 안내",
+    "trust.3.body": "GitHub 전체 백업은 인증 비밀을 포함할 수 있는 암호화 파일입니다. Gist·커뮤니티 공유는 별도의 공개 범위를 가지므로 저장소와 공유 대상을 직접 확인하세요.",
+    "pro.title": "이 페이지의 주인공은 무료 Core입니다.",
+    "pro.lead": "문서 모드와 클릭 응답, 선택적 AI 기능을 포함한 Core부터 사용해 보세요. 별도 Pro 제품의 기능과 개인정보 안내는 Pro 페이지에서 구분해 확인할 수 있습니다.",
+    "pro.link": "별도 Pro 안내 보기 →",
+    "download.label": "Free Core edition",
+    "download.title": "지금 무료로 시작하세요.",
+    "download.lead": "데스크톱은 GitHub Releases, Android는 Google Play에서 시작하세요. 이 페이지의 데스크톱 안내 기준은 Core 0.25.8이며, 각 배포 채널의 버전과 지원 조건은 다를 수 있습니다.",
+    "download.run": "Core 배포와 지원",
+    "download.repo": "Core 릴리스 받기",
+    "capture.note": "화면 안내: 문서 모드와 대응 터미널 화면은 Core 0.25.8의 실제 Linux 앱에서 시연용 명령을 실행해 캡처했습니다. AI 답변이 아닙니다. 나머지 화면은 Core 0.20의 실제 앱과 데모 서버로 촬영한 기능 예시이며 현재 UI와 다를 수 있습니다. AI Chat 예시는 Ollama를 거쳐 ollama.com의 gemma4:31b-cloud가 데모 로그로 생성한 답변입니다. 휴대폰 이미지는 데스크톱 앱의 좁은 화면 레이아웃이며, 영상은 실제 Android Core 시연입니다.",
+    "alt.hero": "Vibe Terminal Core에서 build-box와 api-prod 두 SSH 세션을 좌우로 분할해 빌드 결과와 접속 로그를 함께 보는 화면",
+    "alt.split": "두 SSH 세션을 좌우 분할로 띄운 Vibe Terminal 화면",
+    "alt.resume": "세션 정보 패널에 연결 끊김, 재연결 시도, 재연결 성공 이벤트가 기록된 화면",
+    "alt.hostform": "호스트 추가 화면에서 작업 이어가기를 켜고 사용자와 비밀번호 인증을 입력한 모습",
+    "alt.hostkey": "api-prod 새 호스트 키 신뢰 대화상자에 SHA256 지문이 표시된 모습",
+    "alt.snippetvar": "Tail access log 스니펫을 실행하자 lines 변수 값을 묻는 대화상자가 뜬 화면",
+    "alt.snippetrun": "변수가 채워진 tail 명령이 터미널에서 실행되어 최근 로그 8줄이 출력된 화면",
+    "alt.memo": "api-prod 세션 옆 메모 패널에 배포 시간과 릴리스 체크리스트가 적혀 있는 화면",
+    "alt.ai": "DB 커넥션 타임아웃 오류 로그 옆에서 AI Chat이 원인을 DB Connection Pool 고갈로 분석한 화면",
+    "alt.aiprovider": "AI 설정에서 OpenAI compatible 제공자에 Ollama 주소와 gemma4:31b-cloud 모델을 넣고 연결 테스트에 성공한 화면",
+    "alt.aiconsent": "AI 데이터 전송 동의 대화상자에 수신 서비스와 전송 내용이 안내된 화면",
+    "alt.agent": "Core 0.25.8 문서 모드에 제목, 목록, 복사 버튼이 있는 코드 블록과 URL이 표시된 실제 앱 화면",
+    "alt.sync": "GitHub 동기화 설정 화면에 로그인과 앱 설치 단계가 안내된 모습",
+    "alt.style": "터미널 화면 설정에서 테마와 폰트, 크기를 미리보기와 함께 고르는 모습",
+    "alt.mobile1": "좁은 화면 레이아웃에서 api-prod 터미널과 하단 보조 키 막대가 보이는 화면",
+    "alt.mobile2": "좁은 화면에서 세션 서랍을 열어 api-prod와 build-box 세션을 고르는 화면",
+    "nav.document": "문서 모드",
+    "nav.faq": "자주 묻는 질문",
+    "intro.label": "Your everyday terminal workspace",
+    "intro.title": "명령 한 줄 뒤에 이어지는 작업까지.",
+    "intro.lead": "접속할 서버를 찾고, 로그를 읽고, 명령을 다시 입력하고, AI CLI의 질문에 답하는 흐름을 한곳에서 이어갑니다. 이런 일을 자주 한다면 Core가 잘 맞습니다.",
+    "intro.1.title": "개발자 · AI CLI 사용자",
+    "intro.1.body": "로컬 셸이나 원격 개발 서버에서 CLI를 실행하세요. 긴 응답은 문서처럼 읽고 코드만 복사하며, 감지된 질문에는 클릭으로 답합니다.",
+    "intro.2.title": "서버 운영 · 배포 담당자",
+    "intro.2.body": "빌드 결과와 서비스 로그를 나란히 보세요. 호스트 메모에 점검 순서를 남기고 스니펫의 변수만 바꿔 반복 명령을 실행합니다.",
+    "intro.3.title": "개인 서버 · 이동 중 점검",
+    "intro.3.body": "여러 SSH 호스트를 그룹으로 정리하고 휴대폰에서도 접속하세요. tmux로 유지 중인 작업은 네트워크가 돌아오면 다시 확인할 수 있습니다.",
+    "document.label": "Terminal, easier to read",
+    "document.title": "실행은 터미널에서. 읽기는 문서처럼.",
+    "document.lead": "같은 세션의 출력을 두 가지 방식으로 봅니다. 터미널의 조작감이 필요할 때는 그대로, 긴 설명과 코드를 읽을 때는 GUI 문서 모드로 전환하세요. Core에 기본으로 제공됩니다.",
+    "document.a.title": "선택하고 복사하기 편하게",
+    "document.a.body": "일반 문서처럼 텍스트를 선택하고 스크롤하세요. 인식된 제목·목록·코드 블록은 읽기 좋은 형태로 표시하며, 코드 블록에는 복사 버튼이 붙습니다.",
+    "document.b.title": "링크와 입력도 자연스럽게",
+    "document.b.body": "웹 URL의 메뉴에서 브라우저로 열거나 링크를 복사하세요. 하단 입력창은 Enter로 전송하고 Shift+Enter로 줄을 바꿉니다. 한글 조합 중 Enter는 전송하지 않습니다.",
+    "document.note": "문서 모드는 실제 터미널 출력을 다시 표현하는 보기입니다. 별도의 AI 대화 기록이나 에이전트 실행 엔진을 만드는 기능이 아니며, 전체 화면 TUI 조작은 터미널 모드가 더 적합할 수 있습니다.",
+    "document.terminal": "터미널 · 명령과 원래 출력을 그대로",
+    "document.gui": "문서 · 같은 출력의 제목·목록·코드 표시",
+    "document.caption": "Core 0.25.8 실제 앱 · 시연용 명령의 같은 출력을 비교한 화면입니다. 이미지를 누르면 크게 볼 수 있습니다.",
+    "alt.terminal.current": "Core 0.25.8 실제 터미널에 마크다운 형식의 시연용 명령 출력이 표시된 모습",
+    "interaction.label": "You stay in the loop",
+    "interaction.title": "CLI의 질문에는 클릭으로. 결정은 내 손으로.",
+    "interaction.lead": "Claude Code, Codex, OpenCode의 지원되는 선택 화면을 감지해 문서 모드에서 선택지와 직접 입력 영역을 보여 줍니다. 작은 화면에서도 방향키만으로 답을 찾아다니는 수고를 줄입니다.",
+    "interaction.1.title": "01 · 질문 열기",
+    "interaction.1.body": "인식한 질문의 선택지를 터치하거나 클릭합니다. Codex가 접어 둔 대기 질문도 지원되는 화면에서 열어 확인할 수 있습니다.",
+    "interaction.2.title": "02 · 내 말로 답하기",
+    "interaction.2.body": "선택지만으로 충분하지 않으면 직접 메시지를 입력하세요. CLI와 화면 형식에 따라 제공되는 동작이 달라질 수 있습니다.",
+    "interaction.3.title": "03 · 필요할 때 AI 제안",
+    "interaction.3.body": "AI Chat을 연결했다면 입력창 왼쪽 AI 버튼으로 2~4개의 답변 후보를 요청하세요. 후보를 클릭하면 그 답변이 즉시 세션에 전송됩니다.",
+    "interaction.note": "자동 응답 제안은 요청할 때만 실행합니다. 질문·출력 맥락은 설정한 LLM에 전달될 수 있으며 제공자 요금이 적용됩니다. 선택 화면 인식은 CLI 버전과 출력 형태에 따라 달라질 수 있어, 필요한 경우 언제든 터미널 모드에서 직접 조작하세요.",
+    "workflow.label": "A day with Core",
+    "workflow.title": "작업이 이어지는 세 가지 장면.",
+    "workflow.1.title": "배포 전후를 한눈에",
+    "workflow.1.body": "빌드 서버와 서비스 서버를 분할로 엽니다. 호스트 메모의 점검 순서를 따라 상태를 확인하고, 스니펫의 서비스 이름만 바꿔 로그 명령을 재사용합니다.",
+    "workflow.2.title": "긴 AI CLI 응답을 정리하며",
+    "workflow.2.body": "터미널에서 CLI를 시작한 뒤 문서 모드로 바꿉니다. 설명을 스크롤하고 코드 블록을 복사합니다. 질문이 감지되면 선택지나 직접 작성한 메시지로 답합니다.",
+    "workflow.3.title": "이동 중 서버 상태 확인",
+    "workflow.3.body": "Android에서 저장한 호스트를 열고 상태를 확인합니다. 서버에서 tmux로 유지한 작업이 있다면 다시 연결해 결과를 보고, 다음에 필요한 내용을 메모에 남깁니다.",
+    "start.label": "Start in four steps",
+    "start.title": "첫 접속부터 내 작업대 만들기까지.",
+    "start.1.title": "01 · 설치",
+    "start.1.body": "운영체제에 맞는 데스크톱 압축 파일을 받거나 Android에서 Google Play를 엽니다. 데스크톱은 압축을 풀고 포함된 라이브러리와 함께 실행하세요.",
+    "start.2.title": "02 · 연결",
+    "start.2.body": "호스트 주소·포트·사용자·인증 방식을 저장합니다. 첫 SSH 접속 시 호스트키 지문을 신뢰할 수 있는 경로로 확인하세요. 데스크톱에서는 로컬 셸로 시작해도 됩니다.",
+    "start.3.title": "03 · 정리",
+    "start.3.body": "세션을 그룹과 분할 화면으로 정리하고, 자주 쓰는 명령과 서버별 메모를 남깁니다. 작업 이어가기를 원하면 서버 tmux 설치와 호스트 옵션을 확인합니다.",
+    "start.4.title": "04 · 확장",
+    "start.4.body": "문서 아이콘으로 보기 방식을 바꾸고, 필요할 때만 AI 제공자나 GitHub 동기화를 연결하세요. AI 없이도 SSH·문서 모드·스니펫을 사용할 수 있습니다.",
+    "platform.title": "내 환경에 맞게 받으세요.",
+    "platform.os": "플랫폼",
+    "platform.requirement": "배포 파일·지원 조건",
+    "platform.link": "받는 곳",
+    "platform.windows": "Windows x64 · 압축을 푼 전체 폴더로 실행",
+    "platform.macos": "Apple Silicon ARM64 · Intel Mac 지원 빌드 아님",
+    "platform.linux": "Linux x64 · glibc 2.38 이상 (예: Ubuntu 24.04) · 데스크톱 그래픽 환경 및 한글용 CJK 폰트",
+    "platform.android": "Google Play 공개 Core · 스토어의 기기 호환성과 배포 버전 확인",
+    "platform.release": "GitHub Releases",
+    "platform.note": "데스크톱 안내 기준: v0.25.8. 릴리스별 변경사항과 SHA256SUMS를 함께 확인하세요. 앱 실행 파일 하나만 다른 폴더로 옮기면 포함된 라이브러리나 도구를 찾지 못할 수 있습니다.",
+    "faq.title": "시작하기 전에 궁금한 것들.",
+    "faq.1.q": "Core는 무료인가요? AI 비용도 포함되나요?",
+    "faq.1.a": "Core 앱은 무료로 사용할 수 있습니다. AI는 선택 기능이며, 직접 연결한 제공자의 API 키·계정·모델 설정과 요금이 적용됩니다. CLI 도구의 구독이나 사용료도 별도입니다. AI를 연결하지 않아도 터미널과 문서 모드는 사용할 수 있습니다.",
+    "faq.2.q": "GUI 문서 모드는 AI 채팅 앱인가요?",
+    "faq.2.a": "같은 터미널 세션의 실제 출력을 읽기 편하게 표현하는 보기입니다. 새 AI 모델을 실행하거나 CLI의 전체 대화 상태를 가져오는 기능은 아닙니다. 읽기와 복사에는 문서 모드, 화면 전체를 사용하는 도구의 세밀한 조작에는 터미널 모드를 선택하세요.",
+    "faq.3.q": "모든 CLI 질문을 클릭으로 답할 수 있나요?",
+    "faq.3.a": "지원되는 Claude Code·Codex·OpenCode의 화면을 감지하는 방식이므로 도구 버전과 출력 형태에 따라 인식 결과가 달라집니다. 인식되지 않는 질문은 터미널에서 직접 답할 수 있습니다. AI 답변 후보는 별도로 AI Chat을 연결하고 버튼을 눌렀을 때만 생성됩니다.",
+    "faq.4.q": "연결이 끊기거나 앱을 닫으면 작업은 어떻게 되나요?",
+    "faq.4.a": "원격 작업은 서버에 tmux가 있고 “작업 이어가기”를 사용한 경우, 서버에서 계속 실행 중인 작업에 다시 연결할 수 있습니다. 서버 재부팅·프로세스 종료·tmux 삭제는 별개입니다. 데스크톱 로컬 셸도 지원 환경의 내장 데몬으로 재연결을 지원하지만 모든 종료 상황에서 작업 보존을 보장하지는 않습니다.",
+    "faq.5.q": "가입이나 클라우드 동기화가 꼭 필요한가요?",
+    "faq.5.a": "앱 회원가입 없이 SSH와 로컬 기능을 시작할 수 있습니다. AI·GitHub 동기화·외부 공유를 이용할 때는 해당 서비스의 인증과 설정이 필요할 수 있습니다. 동기화는 선택 사항이며, 전체 백업에 인증 정보가 포함될 수 있으므로 저장소와 암호화 설정을 확인하세요.",
+    "faq.6.q": "소스가 공개되어 있으면 자유롭게 재배포해도 되나요?",
+    "faq.6.a": "공개 저장소에서 소스를 열람할 수 있으며 Vibe Terminal Source-Available License 1.0이 적용됩니다. 무제한 수정·재배포를 허용하는 오픈소스 라이선스와는 다릅니다. 이용·복제·수정·재배포 조건은 저장소의 LICENSE를 확인하세요.",
+    "faq.7.q": "Core와 Pro의 기능 경계는 어디인가요?",
+    "faq.7.a": "SSH·로컬 셸·분할·문서 모드·지원 질문 클릭 응답·AI Chat·답변 제안·스니펫·메모·GitHub 동기화는 Core 범위입니다. 새 Agent 세션 및 새 worktree 자동 생성, Agent Chat, SFTP·포트 포워딩 UI, Vault, 브라우저 패널, 고급 자동화와 실험용 커스텀 앱은 Pro 범위입니다. 이 페이지의 다운로드는 Core입니다.",
+    "faq.8.q": "Jump 호스트와 Kubernetes 연결에는 무엇이 필요한가요?",
+    "faq.8.a": "접근 권한이 있는 SSH 경유 호스트나 Kubernetes 게이트웨이를 먼저 준비해야 합니다. Kubernetes 경유 연결은 사용할 수 있는 kubectl과 올바른 클러스터 접근 설정이 필요합니다. Core가 서버나 클러스터의 권한을 대신 발급하지는 않습니다.",
+    "license.link": "사용·재배포 라이선스 확인"
+  },
+  "en": {
+    "edition.core": "Core · Free",
+    "edition.pro": "Pro · Coming later",
+    "nav.tour": "Tour",
+    "nav.mobile": "Mobile",
+    "nav.trust": "Privacy",
+    "nav.download": "Get started",
+    "nav.privacy": "Privacy policy",
+    "theme.system": "System",
+    "theme.light": "Light",
+    "theme.dark": "Dark",
+    "hero.eyebrow": "SSH · Document view · AI CLI · Your workspace",
+    "hero.lead": "From connecting to a server to reading long output and deciding what comes next. Bring multiple SSH sessions, readable terminal output, reusable commands and optional AI into one free workspace.",
+    "hero.primary": "Free desktop download",
+    "hero.secondary": "Android · Google Play",
+    "hero.point1": "Up to four panes, servers side by side",
+    "hero.point2": "Terminal ↔ document: two views of one session",
+    "hero.point3": "Clickable CLI questions and optional AI suggestions",
+    "hero.point4": "Start without an app account · AI is optional",
+    "hero.caption": "Real Core app screen · build server on the left, API server session on the right.",
+    "strip.1.title": "Free to use · Source available",
+    "strip.1.body": "See the license for use, modification and redistribution",
+    "strip.2.title": "Reconnect to your work",
+    "strip.2.body": "Supported with server-side tmux and the resume option",
+    "strip.3.title": "Your choice of AI",
+    "strip.3.body": "OpenAI · Claude · Gemini · Ollama · compatible gateways",
+    "strip.4.title": "Desktop and Android",
+    "strip.4.body": "One workspace on Windows, macOS, Linux and phones",
+    "tour.label": "Feature tour",
+    "tour.title": "Less talk, more screens. This is how it works.",
+    "tour.lead": "Explore the workflow through genuine Core screenshots, from sessions to reusable commands, host notes and optional AI. Open an image to inspect it; capture versions and demo conditions are listed below.",
+    "f1.title": "Several servers, side by side.",
+    "f1.body": "Pick a server from the session list and split the pane. Watch production logs while a build runs, zoom one pane to full screen and come back.",
+    "f1.a": "Split right or down, swap panes, full-screen one pane",
+    "f1.b": "Group and reorder sessions",
+    "f1.c": "Per-pane zoom, per-session font and theme",
+    "f1.caption": "Running a build on build-box while checking access logs on api-prod.",
+    "f2.title": "Reconnect to work still running on your server.",
+    "f2.body": "With tmux installed on the server and “Resume work” enabled for the host, reconnect to work that kept running during a network interruption. This does not recover a terminated job or work lost in a server reboot.",
+    "f2.a": "Automatic reconnect when a drop is detected",
+    "f2.b": "Session info shows connect time, uptime and reconnect history",
+    "f2.c": "Reopen or end jobs from the fixed archive tab below the session list",
+    "f2.caption": "Core 0.20 demo · Session information records disconnect and reconnect events.",
+    "f3.title": "Safe from the very first connection.",
+    "f3.body": "Save address, port and user, then choose password, public key or keyboard-interactive (2FA). On first connection the app shows the server's host-key fingerprint and asks you to trust it.",
+    "f3.a": "Credentials kept in operating system secure storage",
+    "f3.b": "Jump hosts, Kubernetes Pod relays and desktop local shell profiles",
+    "f3.c": "Startup scripts and per-host terminal defaults",
+    "f3.caption": "Add host · resumable work and authentication",
+    "f3.caption2": "Host-key fingerprint check on first connection",
+    "f4.title": "Write repetitive commands once.",
+    "f4.a": "Choose \"Run\" or \"Paste\" as the default action",
+    "f4.b": "Search, reorder, expand and copy",
+    "f4.c": "Same snippets on other devices with GitHub sync",
+    "f4.caption": "Run a snippet → enter 8 for the lines variable",
+    "f4.caption2": "The filled-in command runs right away in the current session.",
+    "f5.title": "Server context, right beside the terminal.",
+    "f5.body": "Keep deploy windows, log locations and checklists as host notes. Open a session and that host's note appears in the side panel.",
+    "f5.a": "Saves as you type",
+    "f5.b": "Restore earlier versions from history",
+    "f5.c": "Share across devices with GitHub sync",
+    "f5.caption": "api-prod host note · deploy window, log location, release checklist",
+    "f6.title": "Stuck? Ask about the screen you are looking at.",
+    "f6.body": "Ask AI Chat about an error or a possible next command using terminal text as context. Configure OpenAI, Claude, Gemini, an OpenAI-compatible server or Ollama yourself. Provider fees and data policies apply; Ollama may also use cloud models depending on its configuration.",
+    "f6.a": "Shortcuts: summarize screen, analyze last error, suggest next command",
+    "f6.b": "First use explains what data goes where and asks for consent",
+    "f6.c": "Every SSH feature works without AI",
+    "f6.caption": "\"Analyze last error\" result · a real answer generated by the cloud model gemma4:31b-cloud through Ollama.",
+    "f6.caption2": "Ollama as an OpenAI-compatible provider · model gemma4:31b-cloud",
+    "f6.caption3": "Destination and data explained before sending",
+    "f7.title": "Use your familiar CLI, under your control.",
+    "f7.body": "Run Claude Code, Codex or OpenCode directly in a local or remote terminal. Read output and answer supported prompts in Core’s document view. Install each CLI and arrange its login and model access separately.",
+    "f7.a": "Run installed CLIs in local shells and SSH sessions",
+    "f7.b": "Document reading, copying and supported clickable prompts are in Core",
+    "f7.c": "Automatic “New Agent session” and new worktree creation belong to Pro",
+    "f7.caption": "Core 0.25.8 · Demo command output displayed in the real app’s document view.",
+    "f8.title": "Your workspace on every device.",
+    "f8.body": "GitHub sync carries hosts, snippets, notes, keychain, display, notification and AI settings as one encrypted file in your own private repository. Pick terminal themes, fonts, size and line spacing with a live preview.",
+    "f8.a": "Encrypted backup and sync through a GitHub repository you choose",
+    "f8.b": "Local shells, layout, shortcuts and fonts stay per device",
+    "f8.c": "Built-in terminal fonts and CJK display settings · check platform support",
+    "f8.caption": "GitHub sync setup guide",
+    "f8.caption2": "Theme and font preview",
+    "mobile.title": "Same servers, same work, on your phone.",
+    "mobile.lead": "On narrow screens the session list moves into a drawer and an Esc, Tab, Ctrl and arrow key bar sits above the keyboard. Check servers on the go and attach to the tmux work you started on desktop.",
+    "mobile.a": "Foreground service helps maintain Android connections; OS and battery policies apply",
+    "mobile.b": "Touch selection, copy and paste, plus external keyboard input",
+    "mobile.c": "Available on Google Play · Vibe Terminal: SSH Client",
+    "mobile.caption1": "Single-pane terminal + extra keys",
+    "mobile.caption2": "Switch servers from the session drawer",
+    "core.video": "Watch the Core SSH demonstration",
+    "core.caption": "Actual Android Core app demonstration of SSH connections and background continuity. Playing connects to the video host, vcoder.kr.",
+    "core.contact": "Contact support",
+    "trust.label": "Data & control",
+    "trust.title": "Choose your connections and data flow.",
+    "trust.lead": "SSH does not require an app account or AI setup. Host information and notes are stored on your device. AI, GitHub backup and sharing send data to their respective destinations when used; review each feature’s scope before enabling it.",
+    "trust.1.title": "Stored on device",
+    "trust.1.body": "Hosts, snippets and notes stay on the device; passwords and keys in OS secure storage.",
+    "trust.2.title": "Connect by choice",
+    "trust.2.body": "AI requests may include your question and selected terminal context. Review the destination notice and consent, and check sensitive content before sending.",
+    "trust.3.title": "Clear disclosure",
+    "trust.3.body": "An encrypted GitHub backup may include credentials. Gist and community sharing have separate visibility settings; check your repository and sharing audience.",
+    "pro.title": "This page introduces the free Core edition.",
+    "pro.lead": "Start with Core, including document view, supported clickable prompts and optional AI. See the separate Pro page for that product’s features and privacy information.",
+    "pro.link": "Read about the separate Pro edition →",
+    "download.label": "Free Core edition",
+    "download.title": "Start free today.",
+    "download.lead": "Start with GitHub Releases on desktop or Google Play on Android. Desktop details here refer to Core 0.25.8; versions and requirements may differ between distribution channels.",
+    "download.run": "Core releases and support",
+    "download.repo": "Get Core releases",
+    "capture.note": "Capture notes: the document view and matching terminal were captured from the real Core 0.25.8 Linux app running a demo command, not an AI response. Other images show Core 0.20 with demo servers and may differ from the current UI. The AI Chat example was generated from demo logs by gemma4:31b-cloud on ollama.com through Ollama. Phone images show the desktop app’s narrow layout; the video demonstrates the actual Android Core app.",
+    "alt.hero": "Vibe Terminal Core with build-box and api-prod SSH sessions split side by side, showing build output and access logs",
+    "alt.split": "Vibe Terminal with two SSH sessions split side by side",
+    "alt.resume": "Session info panel listing drop, reconnect attempt and reconnect success events",
+    "alt.hostform": "Add host form with resumable work on and password authentication filled in",
+    "alt.hostkey": "Trust new host key dialog for api-prod showing a SHA256 fingerprint",
+    "alt.snippetvar": "Running the Tail access log snippet opens a prompt for the lines variable",
+    "alt.snippetrun": "The filled-in tail command runs and prints the last eight log lines",
+    "alt.memo": "Memo panel beside the api-prod session with deploy window and release checklist",
+    "alt.ai": "AI Chat beside DB connection timeout errors, identifying connection pool exhaustion",
+    "alt.aiprovider": "AI settings with an OpenAI-compatible provider pointing at Ollama with the gemma4:31b-cloud model and a successful connection test",
+    "alt.aiconsent": "AI data transfer consent dialog describing the destination and the data sent",
+    "alt.agent": "Real Core 0.25.8 document view showing headings, lists, a code block with a copy button and a URL",
+    "alt.sync": "GitHub sync settings with sign-in and app installation steps",
+    "alt.style": "Terminal display settings with theme, font and size and a live preview",
+    "alt.mobile1": "Narrow layout with the api-prod terminal and the extra key bar",
+    "alt.mobile2": "Narrow layout with the session drawer listing api-prod and build-box",
+    "nav.document": "Document view",
+    "nav.faq": "FAQ",
+    "intro.label": "Your everyday terminal workspace",
+    "intro.title": "A workspace for everything after the command.",
+    "intro.lead": "Keep finding servers, reading logs, reusing commands and answering AI CLI prompts in one place. Core is built for these everyday workflows.",
+    "intro.1.title": "Developers & AI CLI users",
+    "intro.1.body": "Run a CLI locally or on a development server. Read long output as a document, copy code and click to answer detected prompts.",
+    "intro.2.title": "Server operations & deployments",
+    "intro.2.body": "Watch build output beside service logs. Keep a checklist in host notes and change snippet variables to reuse common commands.",
+    "intro.3.title": "Personal servers & checks on the go",
+    "intro.3.body": "Group your SSH hosts and connect from your phone. Reattach to work kept alive by tmux when the network returns.",
+    "document.label": "Terminal, easier to read",
+    "document.title": "Run in a terminal. Read like a document.",
+    "document.lead": "Two ways to view the same session. Keep the terminal for direct control; switch to GUI document view for long explanations and code. Both are included in Core.",
+    "document.a.title": "Select and copy comfortably",
+    "document.a.body": "Select text and scroll like a regular document. Recognized headings, lists and fenced code are formatted for reading, with a copy button on code blocks.",
+    "document.b.title": "Links and input that fit the flow",
+    "document.b.body": "Use a URL’s menu to open it in your browser or copy the link. Send from the composer with Enter; use Shift+Enter for a new line. Enter does not send during IME composition.",
+    "document.note": "Document view reformats actual terminal output. It is not a separate AI transcript or agent engine; terminal view may work better for full-screen TUI interaction.",
+    "document.terminal": "Terminal · commands and original output",
+    "document.gui": "Document · headings, lists and code from the same output",
+    "document.caption": "Real Core 0.25.8 app · Two views of the same demo command output. Open either image for a larger view.",
+    "alt.terminal.current": "Actual Core 0.25.8 terminal displaying Markdown-formatted demo command output",
+    "interaction.label": "You stay in the loop",
+    "interaction.title": "Click through CLI questions. Keep the decision yours.",
+    "interaction.lead": "Document view detects supported choice screens from Claude Code, Codex and OpenCode, exposing choices and custom input. Spend less time navigating prompts with arrow keys on a small screen.",
+    "interaction.1.title": "01 · Open the question",
+    "interaction.1.body": "Tap or click choices for recognized prompts. Supported Codex screens also let you open folded queued questions.",
+    "interaction.2.title": "02 · Answer in your own words",
+    "interaction.2.body": "Enter a custom message when a fixed choice is not enough. Available actions depend on the CLI and its screen format.",
+    "interaction.3.title": "03 · Ask for AI suggestions",
+    "interaction.3.body": "With AI Chat configured, request 2–4 reply suggestions using the AI button on the left of the composer. Clicking a suggestion immediately sends it to the session.",
+    "interaction.note": "Reply suggestions run only when requested. Prompt and output context may be sent to your configured LLM, with provider charges. Detection depends on CLI versions and output formats; switch to terminal view whenever direct control is needed.",
+    "workflow.label": "A day with Core",
+    "workflow.title": "Three workflows, one workspace.",
+    "workflow.1.title": "Before and after a deployment",
+    "workflow.1.body": "Split a build server and a service server. Follow the host’s checklist, then reuse a log command by changing only the service name in a snippet.",
+    "workflow.2.title": "Read a long AI CLI response",
+    "workflow.2.body": "Start your CLI in a terminal, then switch to document view. Scroll through explanations and copy code blocks. Answer detected questions with a choice or your own message.",
+    "workflow.3.title": "Check a server on the go",
+    "workflow.3.body": "Open a saved host on Android and check its status. Reattach to a tmux job still running on the server, inspect its result and leave a note for next time.",
+    "start.label": "Start in four steps",
+    "start.title": "From first connection to your own workspace.",
+    "start.1.title": "01 · Install",
+    "start.1.body": "Download the archive for your desktop OS, or open Google Play on Android. Extract the desktop bundle and keep its included libraries alongside the app.",
+    "start.2.title": "02 · Connect",
+    "start.2.body": "Save the host address, port, user and authentication method. Verify the first SSH host-key fingerprint through a trusted channel, or start with a local shell on desktop.",
+    "start.3.title": "03 · Organize",
+    "start.3.body": "Organize sessions into groups and split panes. Save frequent commands and host notes; for resumed remote work, check server-side tmux and the host option.",
+    "start.4.title": "04 · Add what you need",
+    "start.4.body": "Switch views with the document icon. Connect an AI provider or GitHub sync only if useful to you. SSH, document view and snippets work without AI.",
+    "platform.title": "Get the build for your environment.",
+    "platform.os": "Platform",
+    "platform.requirement": "Build & requirements",
+    "platform.link": "Get it",
+    "platform.windows": "Windows x64 · run from the complete extracted folder",
+    "platform.macos": "Apple Silicon ARM64 · not an Intel Mac build",
+    "platform.linux": "Linux x64 · glibc 2.38+ (e.g. Ubuntu 24.04) · graphical desktop and CJK fonts for Korean",
+    "platform.android": "Public Core on Google Play · check store compatibility and version",
+    "platform.release": "GitHub Releases",
+    "platform.note": "Desktop reference: v0.25.8. Check the release notes and SHA256SUMS. Moving only the executable may prevent the app from finding its bundled libraries or tools.",
+    "faq.title": "Questions before you start.",
+    "faq.1.q": "Is Core free? Does it include AI usage?",
+    "faq.1.a": "Core is free to use. AI is optional and uses your configured provider account, API key, model and pricing. CLI subscriptions or usage fees are separate. Terminal and document views work without AI.",
+    "faq.2.q": "Is document view a separate AI chat app?",
+    "faq.2.a": "It is a readable view of actual output from the same terminal session. It does not run a new AI model or import the CLI’s complete conversation state. Use document view for reading and copying, and terminal view for precise full-screen interaction.",
+    "faq.3.q": "Can every CLI question be answered by clicking?",
+    "faq.3.a": "Detection covers supported Claude Code, Codex and OpenCode screens and depends on the tool version and output format. Answer unrecognized prompts directly in the terminal. AI reply suggestions require AI Chat setup and an explicit button press.",
+    "faq.4.q": "What happens if the connection drops or I close the app?",
+    "faq.4.a": "For remote work, server-side tmux with “Resume work” lets you reattach to jobs still running on the server. Reboots, terminated processes and deleted tmux sessions are separate. Supported desktop local shells also use the bundled daemon for reconnection, but work preservation is not guaranteed for every shutdown scenario.",
+    "faq.5.q": "Do I need an account or cloud sync?",
+    "faq.5.a": "SSH and local features work without an app account. AI, GitHub sync and external sharing may require authentication and setup with those services. Sync is optional; full backups may include credentials, so review the repository and encryption settings.",
+    "faq.6.q": "Does source availability allow unrestricted redistribution?",
+    "faq.6.a": "The source can be inspected in the public repository under Vibe Terminal Source-Available License 1.0. This is not an open-source license granting unrestricted modification and redistribution. Read LICENSE for the terms of use, copying, modification and redistribution.",
+    "faq.7.q": "Which features belong to Core and Pro?",
+    "faq.7.a": "Core includes SSH, local shells, split panes, document view, supported clickable prompts, AI Chat and reply suggestions, snippets, notes and GitHub sync. Pro covers automatic new Agent sessions/worktrees, Agent Chat, SFTP and port-forwarding UIs, Vault, browser panels, advanced automation and experimental custom apps. Downloads on this page are Core.",
+    "faq.8.q": "What do Jump host and Kubernetes connections require?",
+    "faq.8.a": "Prepare an authorized SSH jump host or Kubernetes gateway. Kubernetes relays need a working kubectl setup and valid cluster access. Core does not grant server or cluster permissions for you.",
+    "license.link": "Read the usage and redistribution license"
+  },
+  "ja": {
+    "edition.core": "Core · 無料版",
+    "edition.pro": "Pro · 今後公開予定",
+    "nav.tour": "機能ツアー",
+    "nav.mobile": "モバイル",
+    "nav.trust": "プライバシー",
+    "nav.download": "はじめる",
+    "nav.privacy": "プライバシー",
+    "theme.system": "システム",
+    "theme.light": "ライト",
+    "theme.dark": "ダーク",
+    "hero.eyebrow": "SSH · ドキュメント表示 · AI CLI · 自分の作業場",
+    "hero.lead": "サーバーへの接続から、長い出力を読み、次の操作を決める瞬間まで。複数のSSHセッション、文書のように読める出力、再利用できるコマンド、任意のAIを無料の作業場にまとめました。",
+    "hero.primary": "デスクトップ版を無料で入手",
+    "hero.secondary": "Android · Google Play",
+    "hero.point1": "最大 4 分割でサーバーを並べて表示",
+    "hero.point2": "ターミナル ↔ 文書：同じセッションを2つの表示で",
+    "hero.point3": "クリックで答えるCLIの質問と任意のAI候補",
+    "hero.point4": "アプリの会員登録不要 · AI接続は任意",
+    "hero.caption": "実際の Core アプリ画面 · 左はビルドサーバー、右は API サーバーのセッションです。",
+    "strip.1.title": "無料で利用 · ソース公開",
+    "strip.1.body": "利用・変更・再配布の条件はライセンスで確認",
+    "strip.2.title": "作業に再接続",
+    "strip.2.body": "サーバー側tmuxと作業継続オプションで対応",
+    "strip.3.title": "選べる AI",
+    "strip.3.body": "OpenAI・Claude・Gemini・Ollama・互換ゲートウェイ",
+    "strip.4.title": "デスクトップと Android",
+    "strip.4.body": "Windows・macOS・Linux とスマホで同じ作業環境",
+    "tour.label": "Feature tour",
+    "tour.title": "説明より画面で。実際にこう使います。",
+    "tour.lead": "セッション管理からコマンドの再利用、ホスト別メモ、任意のAIまで、実際のCore画面で紹介します。画像を押すと拡大できます。撮影バージョンとデモ条件はページ末尾をご覧ください。",
+    "f1.title": "複数のサーバーを、一画面に並べて。",
+    "f1.body": "セッション一覧からサーバーを選び、ペインを分割するだけ。ビルドを走らせながら本番ログを確認し、1 つのペインを全画面にしてまた戻れます。",
+    "f1.a": "右・下への分割、ペイン入れ替え、全画面表示",
+    "f1.b": "セッションをグループ化して並べ替え",
+    "f1.c": "ペインごとのズーム、セッションごとのフォント・テーマ",
+    "f1.caption": "build-box でビルドを実行し、api-prod でアクセスログを確認する分割画面。",
+    "f2.title": "切断しても、サーバーで動いている作業へ。",
+    "f2.body": "サーバーにtmuxを導入し、ホストの「作業継続」を有効にすると、ネットワーク切断中も動き続けた作業に再接続できます。サーバー再起動や終了済みの処理を復元する機能ではありません。",
+    "f2.a": "切断を検知すると自動で再接続",
+    "f2.b": "セッション情報で接続時刻・継続時間・再接続履歴を確認",
+    "f2.c": "セッション一覧の下部に固定された保管タブから作業を再開・終了",
+    "f2.caption": "Core 0.20のデモ · 切断と再接続を記録したセッション情報です。",
+    "f3.title": "最初の接続から安全に。",
+    "f3.body": "アドレス・ポート・ユーザーを保存し、パスワード、公開鍵、キーボードインタラクティブ（2FA）から認証方式を選びます。初回接続時はホストキーの指紋を表示し、信頼するか確認します。",
+    "f3.a": "認証情報は OS の安全なストレージに保存",
+    "f3.b": "踏み台ホスト、Kubernetes Pod経由の接続、デスクトップのローカルシェル",
+    "f3.c": "接続直後のスタートアップスクリプトとホスト別の端末設定",
+    "f3.caption": "ホスト追加 · 作業の継続と認証方式",
+    "f3.caption2": "初回接続時のホストキー指紋確認",
+    "f4.title": "繰り返すコマンドは一度だけ書く。",
+    "f4.a": "既定の動作を「実行」か「貼り付け」から選択",
+    "f4.b": "検索、並べ替え、拡大表示、コードのコピー",
+    "f4.c": "GitHub 同期でほかの端末でも同じスニペット",
+    "f4.caption": "スニペット実行 → 変数 lines に 8 を入力",
+    "f4.caption2": "値を埋めたコマンドが現在のセッションですぐ実行されます。",
+    "f5.title": "サーバーごとの文脈を、すぐ隣に。",
+    "f5.body": "デプロイ時間、ログの場所、確認手順など、そのサーバーだけに必要な内容をメモに残せます。セッションを開くと、そのホストのメモが横のパネルに表示されます。",
+    "f5.a": "入力と同時に自動保存",
+    "f5.b": "履歴から以前のメモに戻せる",
+    "f5.c": "GitHub 同期で端末間で共有",
+    "f5.caption": "api-prod のホストメモ · デプロイ時間、ログの場所、リリースチェックリスト",
+    "f6.title": "行き詰まったら、今の画面をそのまま質問。",
+    "f6.body": "ターミナルのテキストを文脈に、AI Chatへエラーの原因や次のコマンドを質問できます。OpenAI、Claude、Gemini、OpenAI互換サーバー、Ollamaを自分で設定します。料金とデータ処理は提供元に従い、Ollamaも設定によってクラウドモデルを利用します。",
+    "f6.a": "「画面の要約」「直近のエラー原因分析」「次のコマンド提案」ショートカット",
+    "f6.b": "初回利用時に送信先と送信内容を説明し、同意を確認",
+    "f6.c": "AI なしでもすべての SSH 機能を利用可能",
+    "f6.caption": "「直近のエラー原因分析」の結果 · Ollama 経由でクラウドモデル gemma4:31b-cloud が実際に生成した回答です。",
+    "f6.caption2": "OpenAI 互換プロバイダーとして Ollama を接続 · モデル gemma4:31b-cloud",
+    "f6.caption3": "送信前に送信先と内容を案内",
+    "f7.title": "いつものCLIを、自分の手で使う。",
+    "f7.body": "Claude Code、Codex、OpenCodeなどをローカルまたはリモートのターミナルで直接実行。Coreの文書表示で出力を読み、対応する質問に答えられます。CLIの導入・ログイン・モデル利用料は各ツールで別途準備します。",
+    "f7.a": "ローカルシェルとSSHセッションで導入済みCLIを実行",
+    "f7.b": "文書表示・コピー・対応する質問へのクリック回答はCoreに搭載",
+    "f7.c": "「新しいAgentセッション」と新規worktreeの自動作成はProの範囲",
+    "f7.caption": "Core 0.25.8 · 実際のアプリでデモ用コマンド出力を文書表示しています。",
+    "f8.title": "どの端末でも、自分の作業環境そのまま。",
+    "f8.body": "GitHub 同期をオンにすると、ホスト・スニペット・メモ・キーチェーンと表示・通知・AI 設定が、自分の private リポジトリの暗号化ファイル 1 つで同期されます。テーマ・フォント・サイズ・行間はプレビューを見ながら選べます。",
+    "f8.a": "自分で選んだGitHubリポジトリに暗号化してバックアップ・同期",
+    "f8.b": "ローカルシェル・レイアウト・ショートカット・フォントは端末ごと",
+    "f8.c": "内蔵ターミナルフォントとCJK表示設定 · 対応状況は環境別に確認",
+    "f8.caption": "GitHub 同期の設定ガイド",
+    "f8.caption2": "テーマとフォントのプレビュー",
+    "mobile.title": "スマホでも、同じサーバーで同じ作業を。",
+    "mobile.lead": "狭い画面ではセッション一覧がドロワーに収まり、キーボードの上に Esc・Tab・Ctrl・矢印キーの補助キーが付きます。外出先でもサーバーを確認し、デスクトップで始めた tmux 作業にそのまま接続できます。",
+    "mobile.a": "Androidのフォアグラウンドサービスで接続維持を支援。OS・電池設定の影響あり",
+    "mobile.b": "タッチで選択・コピー・貼り付け、外付けキーボード入力に対応",
+    "mobile.c": "Google Playで公開中 · Vibe Terminal: SSH Client",
+    "mobile.caption1": "1 ペインの端末 + 補助キー",
+    "mobile.caption2": "セッションドロワーでサーバーを切り替え",
+    "core.video": "Core の SSH 接続デモを見る",
+    "core.caption": "実際の Android Core アプリで SSH 接続とバックグラウンド維持を実演。再生時に動画の配信元 vcoder.kr へ接続します。",
+    "core.contact": "サポートに連絡",
+    "trust.label": "Data & control",
+    "trust.title": "接続先とデータの流れを、自分で選ぶ。",
+    "trust.lead": "SSH接続にアプリ会員登録やAI設定は不要です。ホスト情報とメモは端末に保存し、AI・GitHubバックアップ・共有を使う場合は各接続先へデータを送信します。機能ごとの範囲を確認して選んでください。",
+    "trust.1.title": "端末内に保存",
+    "trust.1.body": "ホスト・スニペット・メモは端末に、パスワードと鍵は OS の安全なストレージに保存します。",
+    "trust.2.title": "選んで接続",
+    "trust.2.body": "AIには質問と選択したターミナルの文脈を送る場合があります。送信先の案内と同意を確認し、送信前に機密情報を見直してください。",
+    "trust.3.title": "明確な案内",
+    "trust.3.body": "GitHubの暗号化バックアップには認証情報が含まれる場合があります。Gistやコミュニティ共有には別の公開範囲があるため、保存先と共有相手を確認してください。",
+    "pro.title": "このページは無料Coreの紹介です。",
+    "pro.lead": "文書表示、対応質問へのクリック回答、任意のAIを備えたCoreからお試しください。別製品Proの機能とプライバシー情報はProページで確認できます。",
+    "pro.link": "別製品Proの案内を見る →",
+    "download.label": "Free Core edition",
+    "download.title": "今すぐ無料で始めましょう。",
+    "download.lead": "デスクトップはGitHub Releases、AndroidはGoogle Playから始められます。このページのデスクトップ案内はCore 0.25.8が基準です。配布先によりバージョンや条件が異なります。",
+    "download.run": "Core リリースとサポート",
+    "download.repo": "Core リリースを入手",
+    "capture.note": "画面について：文書表示と対応するターミナルは、実際のCore 0.25.8 Linux版でデモコマンドを実行して撮影したもので、AIの回答ではありません。その他はCore 0.20とデモサーバーの画面で、現在のUIと異なる場合があります。AI Chat例はOllama経由でollama.comのgemma4:31b-cloudがデモログから生成しました。スマートフォン画像はデスクトップ版の狭いレイアウト、動画は実際のAndroid Coreです。",
+    "alt.hero": "Vibe Terminal Core で build-box と api-prod の 2 つの SSH セッションを左右に分割し、ビルド結果とアクセスログを表示した画面",
+    "alt.split": "2 つの SSH セッションを左右に分割した Vibe Terminal の画面",
+    "alt.resume": "セッション情報パネルに切断、再接続試行、再接続成功のイベントが記録された画面",
+    "alt.hostform": "ホスト追加画面で作業の継続をオンにし、ユーザーとパスワード認証を入力した様子",
+    "alt.hostkey": "api-prod の新しいホストキーを信頼するダイアログに SHA256 指紋が表示された様子",
+    "alt.snippetvar": "Tail access log スニペットを実行すると lines 変数の値を尋ねるダイアログが表示された画面",
+    "alt.snippetrun": "値を埋めた tail コマンドが実行され、直近 8 行のログが表示された画面",
+    "alt.memo": "api-prod セッションの横のメモパネルにデプロイ時間とリリースチェックリストが書かれた画面",
+    "alt.ai": "DB 接続タイムアウトのログの横で AI Chat が接続プールの枯渇と分析した画面",
+    "alt.aiprovider": "AI 設定で OpenAI 互換プロバイダーに Ollama のアドレスと gemma4:31b-cloud モデルを入力し、接続テストに成功した画面",
+    "alt.aiconsent": "AI データ送信の同意ダイアログに送信先と送信内容が案内された画面",
+    "alt.agent": "Core 0.25.8の文書表示：見出し、一覧、コピーボタン付きコードブロック、URL",
+    "alt.sync": "GitHub 同期設定にログインとアプリのインストール手順が案内された画面",
+    "alt.style": "端末の表示設定でテーマ・フォント・サイズをプレビューしながら選ぶ様子",
+    "alt.mobile1": "狭い画面レイアウトで api-prod の端末と補助キーバーが表示された画面",
+    "alt.mobile2": "狭い画面でセッションドロワーを開き api-prod と build-box を選ぶ画面",
+    "nav.document": "文書表示",
+    "nav.faq": "よくある質問",
+    "intro.label": "Your everyday terminal workspace",
+    "intro.title": "コマンドの、その先の作業まで。",
+    "intro.lead": "サーバーを探し、ログを読み、コマンドを再利用し、AI CLIの質問に答える流れを1か所に。日々このように作業する方のためのCoreです。",
+    "intro.1.title": "開発者・AI CLIユーザー",
+    "intro.1.body": "ローカルや開発サーバーでCLIを実行。長い出力は文書として読み、コードをコピーし、検出された質問にクリックで答えます。",
+    "intro.2.title": "サーバー運用・デプロイ担当者",
+    "intro.2.body": "ビルド結果とサービスログを並べて確認。ホストのメモに点検順序を残し、変数だけを変えて定型コマンドを再利用できます。",
+    "intro.3.title": "個人サーバー・外出先での確認",
+    "intro.3.body": "複数のSSHホストをグループ化し、スマートフォンからも接続。ネットワーク復帰後はtmuxで動いている作業に戻れます。",
+    "document.label": "Terminal, easier to read",
+    "document.title": "実行はターミナル。読むときは文書のように。",
+    "document.lead": "同じセッションの出力を2つの表示で。直接操作するならターミナル、長い説明やコードを読むならGUI文書表示へ。どちらもCoreに含まれます。",
+    "document.a.title": "選択とコピーを快適に",
+    "document.a.body": "通常の文書のようにテキストを選択してスクロール。認識した見出し・一覧・コードブロックを読みやすく表示し、コードにはコピーボタンを用意します。",
+    "document.b.title": "リンクと入力も自然に",
+    "document.b.body": "URLのメニューからブラウザーで開くかリンクをコピー。入力欄はEnterで送信、Shift+Enterで改行します。IME変換中のEnterでは送信しません。",
+    "document.note": "文書表示は実際のターミナル出力を読みやすく表現する機能です。独立したAI会話履歴やAgent実行エンジンではありません。全画面TUIはターミナル表示のほうが適する場合があります。",
+    "document.terminal": "ターミナル · コマンドと元の出力",
+    "document.gui": "文書 · 同じ出力を見出し・一覧・コードで表示",
+    "document.caption": "実際のCore 0.25.8 · 同じデモコマンド出力を比較しています。画像を押すと拡大できます。",
+    "alt.terminal.current": "Core 0.25.8の実際のターミナルに表示したMarkdown形式のデモ出力",
+    "interaction.label": "You stay in the loop",
+    "interaction.title": "CLIの質問にはクリックで。判断は自分で。",
+    "interaction.lead": "Claude Code、Codex、OpenCodeの対応する選択画面を検出し、文書表示に選択肢と自由入力欄を表示。小さな画面で矢印キーを使い続ける手間を減らします。",
+    "interaction.1.title": "01 · 質問を開く",
+    "interaction.1.body": "認識した質問の選択肢をタップ・クリック。対応するCodex画面では折りたたまれた待機中の質問も開いて確認できます。",
+    "interaction.2.title": "02 · 自分の言葉で回答",
+    "interaction.2.body": "選択肢だけでは足りないときは自分でメッセージを入力。CLIや画面形式によって利用できる操作は異なります。",
+    "interaction.3.title": "03 · 必要なときにAI候補",
+    "interaction.3.body": "AI Chatを設定済みなら、入力欄左のAIボタンで2〜4件の回答候補を取得。候補をクリックすると、その回答が直ちにセッションに送信されます。",
+    "interaction.note": "回答候補は要求したときだけ生成します。質問や出力の文脈が設定したLLMへ送られ、提供元の料金が発生する場合があります。検出はCLIのバージョンや表示形式に依存するため、必要ならターミナルで直接操作してください。",
+    "workflow.label": "A day with Core",
+    "workflow.title": "3つの作業を、ひとつの場所で。",
+    "workflow.1.title": "デプロイの前後を一覧で",
+    "workflow.1.body": "ビルドとサービスのサーバーを分割表示。ホストの点検メモに沿って確認し、スニペットのサービス名だけを変えてログコマンドを再利用します。",
+    "workflow.2.title": "長いAI CLIの出力を読みながら",
+    "workflow.2.body": "ターミナルでCLIを起動して文書表示へ。説明をスクロールし、コードをコピー。検出された質問には選択肢か自分のメッセージで答えます。",
+    "workflow.3.title": "移動中にサーバーを確認",
+    "workflow.3.body": "Androidで保存済みホストを開いて状態を確認。サーバーのtmuxで続いている作業に再接続して結果を見たら、次回のためにメモを残します。",
+    "start.label": "Start in four steps",
+    "start.title": "最初の接続から、自分の作業場へ。",
+    "start.1.title": "01 · インストール",
+    "start.1.body": "OSに合うデスクトップ用アーカイブを取得するか、AndroidでGoogle Playを開きます。デスクトップは展開し、同梱ライブラリと一緒に実行します。",
+    "start.2.title": "02 · 接続",
+    "start.2.body": "ホストのアドレス・ポート・ユーザー・認証方式を保存。初回のSSHホスト鍵指紋を信頼できる経路で確認します。デスクトップならローカルシェルでも始められます。",
+    "start.3.title": "03 · 整理",
+    "start.3.body": "セッションをグループと分割画面で整理し、よく使うコマンドやホスト別メモを保存。作業継続にはサーバーのtmuxとホスト設定を確認します。",
+    "start.4.title": "04 · 必要に応じて追加",
+    "start.4.body": "文書アイコンで表示を切り替え、必要な場合だけAI提供元やGitHub同期を接続。AIなしでもSSH・文書表示・スニペットを利用できます。",
+    "platform.title": "環境に合うビルドを選ぶ。",
+    "platform.os": "プラットフォーム",
+    "platform.requirement": "配布ファイル・動作条件",
+    "platform.link": "入手先",
+    "platform.windows": "Windows x64 · 展開したフォルダー全体から実行",
+    "platform.macos": "Apple Silicon ARM64 · Intel Mac向けビルドではありません",
+    "platform.linux": "Linux x64 · glibc 2.38以上（例：Ubuntu 24.04）· GUI環境、日本語・韓国語にはCJKフォント",
+    "platform.android": "Google Playの公開Core · ストアで対応端末と配布バージョンを確認",
+    "platform.release": "GitHub Releases",
+    "platform.note": "デスクトップの基準：v0.25.8。変更履歴とSHA256SUMSも確認してください。実行ファイルだけを移動すると同梱のライブラリやツールが見つからない場合があります。",
+    "faq.title": "始める前によくある質問。",
+    "faq.1.q": "Coreは無料ですか？AI利用料も含まれますか？",
+    "faq.1.a": "Coreアプリは無料で利用できます。AIは任意機能で、設定した提供元のアカウント・APIキー・モデルと料金が適用されます。CLIの契約や利用料も別です。AIなしでもターミナルと文書表示は使えます。",
+    "faq.2.q": "GUI文書表示は別のAIチャットアプリですか？",
+    "faq.2.a": "同じターミナルセッションの実際の出力を読みやすくする表示です。新しいAIモデルを動かしたり、CLIの会話状態全体を取得する機能ではありません。読む・コピーするなら文書表示、全画面ツールの細かい操作にはターミナルを選んでください。",
+    "faq.3.q": "すべてのCLIの質問にクリックで答えられますか？",
+    "faq.3.a": "対応するClaude Code・Codex・OpenCodeの画面を検出するため、ツールのバージョンや表示形式で結果が異なります。未認識の質問はターミナルで直接回答できます。AI候補の生成にはAI Chatの設定とボタン操作が必要です。",
+    "faq.4.q": "切断やアプリ終了後、作業はどうなりますか？",
+    "faq.4.a": "リモート作業はサーバーのtmuxと作業継続設定で、動き続けている処理に再接続できます。再起動・プロセス終了・tmux削除は別です。対応するローカルシェルも同梱デーモンで再接続を支援しますが、すべての終了条件での保持を保証するものではありません。",
+    "faq.5.q": "会員登録やクラウド同期は必須ですか？",
+    "faq.5.a": "アプリの会員登録なしでSSHとローカル機能を利用できます。AI・GitHub同期・外部共有には各サービスの認証や設定が必要な場合があります。同期は任意です。バックアップには認証情報を含む場合があるため、保存先と暗号化設定を確認してください。",
+    "faq.6.q": "ソース公開なら自由に再配布できますか？",
+    "faq.6.a": "公開リポジトリでソースを閲覧でき、Vibe Terminal Source-Available License 1.0が適用されます。無制限の変更・再配布を認めるオープンソースライセンスとは異なります。利用・複製・変更・再配布の条件はLICENSEを確認してください。",
+    "faq.7.q": "CoreとProの機能範囲は？",
+    "faq.7.a": "SSH・ローカルシェル・分割・文書表示・対応質問へのクリック回答・AI Chat・回答候補・スニペット・メモ・GitHub同期はCoreです。新規Agentセッションとworktreeの自動作成、Agent Chat、SFTPとポート転送UI、Vault、ブラウザーパネル、高度な自動化、実験用カスタムアプリはProの範囲です。このページのダウンロードはCoreです。",
+    "faq.8.q": "踏み台ホストやKubernetes接続に必要なものは？",
+    "faq.8.a": "権限を持つSSH踏み台ホストやKubernetesゲートウェイを用意します。Kubernetes経由の接続には利用可能なkubectlと有効なクラスター接続設定が必要です。Coreがサーバーやクラスターの権限を発行するわけではありません。",
+    "license.link": "利用・再配布ライセンスを確認"
+  }
+};
+
+      const htmlCopy = {
+        "ko": { "f4.body": "자주 쓰는 명령을 전역 또는 호스트별 스니펫으로 저장합니다. 본문에 <span class=\"mono\">{{lines}}</span> 같은 변수를 넣으면 실행 직전에 값만 물어보고 바로 실행하거나 붙여 넣습니다." },
+        "en": { "f4.body": "Save frequent commands as global or per-host snippets. Put variables such as <span class=\"mono\">{{lines}}</span> in the body and the app asks only for the values right before running or pasting." },
+        "ja": { "f4.body": "よく使うコマンドを全体またはホスト別のスニペットとして保存。本文に <span class=\"mono\">{{lines}}</span> のような変数を入れると、実行直前に値だけを尋ね、そのまま実行または貼り付けます。" }
+      };
+
+      function readPreference(key, fallback) {
+        try { return localStorage.getItem(key) || fallback; } catch { return fallback; }
+      }
+      function savePreference(key, value) {
+        try { localStorage.setItem(key, value); } catch { /* Private browsing may disable storage. */ }
+      }
+
+      function applyLanguage(language) {
+        const dictionary = copy[language] || copy.ko;
+        const markup = htmlCopy[language] || htmlCopy.ko;
+        document.documentElement.lang = language;
+        document.querySelectorAll("[data-i18n]").forEach((node) => {
+          const key = node.getAttribute("data-i18n");
+          if (markup[key]) node.innerHTML = markup[key];
+          else if (dictionary[key]) node.textContent = dictionary[key];
+        });
+        document.querySelectorAll("[data-i18n-alt]").forEach((node) => {
+          const key = node.getAttribute("data-i18n-alt");
+          if (dictionary[key]) node.setAttribute("alt", dictionary[key]);
+        });
+        document.querySelectorAll("[data-lang]").forEach((button) => {
+          button.setAttribute("aria-pressed", String(button.dataset.lang === language));
+        });
+        savePreference("vibe-terminal-lang", language);
+      }
+
+      function applyTheme(theme) {
+        document.documentElement.dataset.theme = theme;
+        document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+          button.setAttribute("aria-pressed", String(button.dataset.themeChoice === theme));
+        });
+        savePreference("vibe-terminal-theme", theme);
+      }
+
+      document.querySelectorAll("[data-lang]").forEach((button) => {
+        button.addEventListener("click", () => applyLanguage(button.dataset.lang));
+      });
+      document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+        button.addEventListener("click", () => applyTheme(button.dataset.themeChoice));
+      });
+
+      applyLanguage(readPreference("vibe-terminal-lang", "ko"));
+      applyTheme(readPreference("vibe-terminal-theme", "system"));
+    </script>
+  </body>
+</html>
