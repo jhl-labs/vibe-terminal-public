@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 
 import '../core/result.dart';
 import '../data/models/host.dart';
@@ -562,9 +562,9 @@ class SshService {
               final credential = SshCredentialPayload.publicKeyFromSecret(
                 secret,
               );
-              identities = SSHKeyPair.fromPem(
-                credential.privateKeyPem,
-                credential.passphrase,
+              identities = await compute(
+                _decodeSshIdentities,
+                (credential.privateKeyPem, credential.passphrase),
               );
             } catch (e) {
               await socket.close();
@@ -737,3 +737,6 @@ class SshService {
     }
   }
 }
+
+List<SSHKeyPair> _decodeSshIdentities((String, String?) input) =>
+    SSHKeyPair.fromPem(input.$1, input.$2);

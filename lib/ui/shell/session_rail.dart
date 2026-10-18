@@ -365,6 +365,23 @@ class SessionRail extends ConsumerWidget {
     final archiveTabs = archiveState.tabs.where(
       (tab) => tab.groupId == activeGroupId,
     );
+    final archiveTiles = [
+      for (final tab in archiveTabs)
+        if (tab.connection(allSessions) case final connection?)
+          _ServerWorkTabTile(
+            key: ValueKey('server-work-tab-${tab.id}'),
+            hostAlias: connection.host.alias,
+            selected: archiveState.activeId == tab.id,
+            busy: archiveState.busyIds.contains(tab.id),
+            onTap: () {
+              FocusScope.of(context).unfocus();
+              ref.read(serverWorkTabsProvider.notifier).select(tab.id);
+              onSessionSelected?.call();
+            },
+            onClose: () =>
+                ref.read(serverWorkTabsProvider.notifier).close(tab.id),
+          ),
+    ];
     final mgr = ref.read(sessionManagerProvider.notifier);
     final sessionCounts = <String, int>{};
     for (final session in allSessions) {
@@ -448,81 +465,92 @@ class SessionRail extends ConsumerWidget {
             ),
             const Divider(height: 1, color: VibeColors.borderSoft),
             Expanded(
-              child: sessions.isEmpty
-                  ? const _EmptyRail()
-                  : _SessionList(
-                      groupId: activeGroupId,
-                      sessions: sessions,
-                      trailing: [
-                        for (final tab in archiveTabs)
-                          if (tab.connection(allSessions)
-                              case final connection?)
-                            _ServerWorkTabTile(
-                              key: ValueKey('server-work-tab-${tab.id}'),
-                              hostAlias: connection.host.alias,
-                              selected: archiveState.activeId == tab.id,
-                              busy: archiveState.busyIds.contains(tab.id),
-                              onTap: () {
-                                FocusScope.of(context).unfocus();
-                                ref
-                                    .read(serverWorkTabsProvider.notifier)
-                                    .select(tab.id);
-                                onSessionSelected?.call();
-                              },
-                              onClose: () => ref
-                                  .read(serverWorkTabsProvider.notifier)
-                                  .close(tab.id),
+              child: LayoutBuilder(
+                builder: (context, constraints) => Column(
+                  children: [
+                    Expanded(
+                      child: sessions.isEmpty
+                          ? const _EmptyRail()
+                          : _SessionList(
+                              groupId: activeGroupId,
+                              sessions: sessions,
+                              onReorder: (oldIndex, slot) =>
+                                  mgr.moveSessionInGroup(
+                                    activeGroupId,
+                                    oldIndex,
+                                    slot > oldIndex ? slot - 1 : slot,
+                                  ),
+                              tileBuilder: (context, s, tileKey) => Consumer(
+                                builder: (context, tileRef, child) =>
+                                    _SessionTile(
+                                      key: tileKey,
+                                      session: s,
+                                      paneNumber: tileRef.watch(
+                                        sessionPaneLayoutsProvider.select(
+                                          (layouts) =>
+                                              (layouts[activeGroupId]?.panes
+                                                      .indexWhere(
+                                                        (p) =>
+                                                            p.sessionId == s.id,
+                                                      ) ??
+                                                  -1) +
+                                              1,
+                                        ),
+                                      ),
+                                      selected:
+                                          archiveState.activeId == null &&
+                                          s.id == activeId,
+                                      statusColor: _statusColor(s.status),
+                                      busy: tileRef.watch(
+                                        sessionActivityProvider.select(
+                                          (activity) => activity[s.id] ?? false,
+                                        ),
+                                      ),
+                                      attention: tileRef.watch(
+                                        sessionAttentionProvider.select(
+                                          (attention) => attention[s.id],
+                                        ),
+                                      ),
+                                      onTap: () {
+                                        ref
+                                            .read(
+                                              serverWorkTabsProvider.notifier,
+                                            )
+                                            .showTerminal();
+                                        ref
+                                            .read(
+                                              activeSessionIdProvider.notifier,
+                                            )
+                                            .set(s.id);
+                                        onSessionSelected?.call();
+                                      },
+                                      onShowMenu: (position) =>
+                                          _showSessionMenu(
+                                            railContext,
+                                            ref,
+                                            s,
+                                            position,
+                                          ),
+                                      onClose: () => unawaited(
+                                        requestCloseSession(
+                                          railContext,
+                                          ref,
+                                          s,
+                                        ),
+                                      ),
+                                    ),
+                              ),
                             ),
-                      ],
-                      onReorder: (oldIndex, slot) => mgr.moveSessionInGroup(
-                        activeGroupId,
-                        oldIndex,
-                        slot > oldIndex ? slot - 1 : slot,
-                      ),
-                      tileBuilder: (context, s, tileKey) => Consumer(
-                        builder: (context, tileRef, child) => _SessionTile(
-                          key: tileKey,
-                          session: s,
-                          paneNumber: tileRef.watch(
-                            sessionPaneLayoutsProvider.select(
-                              (layouts) =>
-                                  (layouts[activeGroupId]?.panes.indexWhere(
-                                        (p) => p.sessionId == s.id,
-                                      ) ??
-                                      -1) +
-                                  1,
-                            ),
-                          ),
-                          selected:
-                              archiveState.activeId == null && s.id == activeId,
-                          statusColor: _statusColor(s.status),
-                          busy: tileRef.watch(
-                            sessionActivityProvider.select(
-                              (activity) => activity[s.id] ?? false,
-                            ),
-                          ),
-                          attention: tileRef.watch(
-                            sessionAttentionProvider.select(
-                              (attention) => attention[s.id],
-                            ),
-                          ),
-                          onTap: () {
-                            ref
-                                .read(serverWorkTabsProvider.notifier)
-                                .showTerminal();
-                            ref
-                                .read(activeSessionIdProvider.notifier)
-                                .set(s.id);
-                            onSessionSelected?.call();
-                          },
-                          onShowMenu: (position) =>
-                              _showSessionMenu(railContext, ref, s, position),
-                          onClose: () => unawaited(
-                            requestCloseSession(railContext, ref, s),
-                          ),
-                        ),
-                      ),
                     ),
+                    if (archiveTiles.isNotEmpty)
+                      _ServerWorkTabsFooter(
+                        groupId: activeGroupId,
+                        maxHeight: constraints.maxHeight * 0.4,
+                        tabs: archiveTiles,
+                      ),
+                  ],
+                ),
+              ),
             ),
           ],
         ),
@@ -1575,12 +1603,10 @@ class _SessionList extends StatefulWidget {
     required this.sessions,
     required this.tileBuilder,
     required this.onReorder,
-    this.trailing = const [],
   });
 
   final String groupId;
   final List<SessionInfo> sessions;
-  final List<Widget> trailing;
 
   final Widget Function(
     BuildContext context,
@@ -1852,16 +1878,40 @@ class _SessionListState extends State<_SessionList>
       builder: (context, _, _) => ListView.builder(
         controller: _scroll,
         padding: const EdgeInsets.all(10),
-        itemCount: widget.sessions.length + widget.trailing.length,
-        itemBuilder: (context, index) => index < widget.sessions.length
-            ? _row(context, index)
-            : Padding(
-                padding: const EdgeInsets.only(top: _gap),
-                child: widget.trailing[index - widget.sessions.length],
-              ),
+        itemCount: widget.sessions.length,
+        itemBuilder: _row,
       ),
     );
   }
+}
+
+class _ServerWorkTabsFooter extends StatelessWidget {
+  const _ServerWorkTabsFooter({
+    required this.groupId,
+    required this.maxHeight,
+    required this.tabs,
+  });
+
+  final String groupId;
+  final double maxHeight;
+  final List<Widget> tabs;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    constraints: BoxConstraints(maxHeight: maxHeight),
+    decoration: const BoxDecoration(
+      border: Border(top: BorderSide(color: VibeColors.borderSoft)),
+    ),
+    child: ListView.separated(
+      key: PageStorageKey('server-work-tabs-$groupId'),
+      primary: false,
+      shrinkWrap: true,
+      padding: const EdgeInsets.all(10),
+      itemCount: tabs.length,
+      separatorBuilder: (context, index) => const SizedBox(height: 8),
+      itemBuilder: (context, index) => tabs[index],
+    ),
+  );
 }
 
 class _ServerWorkTabTile extends StatelessWidget {

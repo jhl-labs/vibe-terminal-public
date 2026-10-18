@@ -248,7 +248,7 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
       final existing = widget.existing;
       final id =
           existing?.id ?? DateTime.now().microsecondsSinceEpoch.toString();
-      final secureStore = ref.read(secureStoreProvider);
+      final secureStore = ref.read(sharedSecretStoreProvider);
       final previousRef = existing?.credentialRef;
 
       // 자격증명은 secureStore에만 저장하고 DB에는 credentialRef만 기록한다.

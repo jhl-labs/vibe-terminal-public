@@ -181,7 +181,12 @@ class _GitHubSyncSettingsTabState
         settings: settings,
         deviceCode: code,
       );
-      settingsController.setGitHubSyncAuthorization(authorization);
+      if (!settingsController.setGitHubSyncAuthorization(
+        authorization,
+        expected: settings,
+      )) {
+        throw const GitHubSyncException('인증 중 서버 설정이 변경되었습니다. 다시 로그인하세요.');
+      }
       if (!mounted) return;
       setState(() => _deviceCode = null);
       _showStatus('GitHub에 로그인했습니다. 다음 단계에서 앱을 저장소에 설치하세요.', ok: true, step: 1);

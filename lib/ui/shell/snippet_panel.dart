@@ -227,7 +227,12 @@ class _SnippetPanelState extends ConsumerState<SnippetPanel> {
 
   /// 로그인 토큰이 없으면 안내만 하고 null을 돌려준다.
   String? _requireGitHubToken() {
-    final token = ref.read(appSettingsProvider).cloudSync.github.token.trim();
+    final github = ref.read(appSettingsProvider).cloudSync.github;
+    if (!github.isGitHubDotCom) {
+      _showError('GitHub.com 로그인이 필요합니다', 'Enterprise 인증정보는 Gist에 전송하지 않습니다.');
+      return null;
+    }
+    final token = github.token.trim();
     if (token.isEmpty) {
       _showError('GitHub 로그인이 필요합니다', '설정 > GitHub 탭에서 먼저 로그인해주세요.');
       return null;

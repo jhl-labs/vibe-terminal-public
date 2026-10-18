@@ -514,41 +514,52 @@ class LocalLineSessionHandle implements TerminalSessionHandle {
   _CompletionToken _currentToken(String line) {
     var start = 0;
     String? quote;
+    final value = StringBuffer();
     for (var i = 0; i < line.length; i++) {
       final char = line[i];
       if (quote != null) {
-        if (char == quote) quote = null;
+        if (char == quote) {
+          if (_shell == LocalShellType.powershell &&
+              quote == "'" &&
+              i + 1 < line.length &&
+              line[i + 1] == "'") {
+            value.write(char);
+            i++;
+          } else {
+            quote = null;
+          }
+        } else {
+          value.write(char);
+        }
         continue;
       }
-      if (char == '"' || char == "'") {
+      if (char == '"' || (char == "'" && _shell != LocalShellType.cmd)) {
         quote = char;
         continue;
       }
-      if (_isWhitespace(char)) start = i + 1;
+      if (_isWhitespace(char)) {
+        start = i + 1;
+        value.clear();
+      } else {
+        value.write(char);
+      }
     }
 
-    final raw = line.substring(start);
     final commandPosition = line.substring(0, start).trim().isEmpty;
-    var tokenQuote = raw.isNotEmpty && (raw[0] == '"' || raw[0] == "'")
-        ? raw[0]
-        : null;
-    var value = tokenQuote == null ? raw : raw.substring(1);
-    if (tokenQuote != null && value.endsWith(tokenQuote)) {
-      value = value.substring(0, value.length - 1);
-    }
-
-    final separatorIndex = _lastSeparatorIndex(value);
+    // A completed literal may be followed by more path text before the next
+    // Tab (for example 'work 'o). Decode both parts as one path, keeping the
+    // emitted command fully quoted and PowerShell's doubled apostrophes literal.
+    final path = value.toString();
+    final separatorIndex = _lastSeparatorIndex(path);
     final pathPrefix = separatorIndex < 0
         ? ''
-        : value.substring(0, separatorIndex + 1);
+        : path.substring(0, separatorIndex + 1);
     final namePrefix = separatorIndex < 0
-        ? value
-        : value.substring(separatorIndex + 1);
+        ? path
+        : path.substring(separatorIndex + 1);
     return _CompletionToken(
       start: start,
-      raw: raw,
-      quote: tokenQuote,
-      value: value,
+      value: path,
       commandPosition: commandPosition,
       pathPrefix: pathPrefix,
       namePrefix: namePrefix,
@@ -641,7 +652,7 @@ class LocalLineSessionHandle implements TerminalSessionHandle {
     return Directory(p.normalize(path));
   }
 
-  String _formatCompletionToken(
+  String? _formatCompletionToken(
     _CompletionToken token,
     String value, {
     required bool isDirectory,
@@ -650,15 +661,31 @@ class LocalLineSessionHandle implements TerminalSessionHandle {
     final completed = isDirectory
         ? _appendSeparator(value, token.preferredSeparator)
         : value;
-    final quote = token.quote ?? (_containsWhitespace(completed) ? '"' : null);
-    if (quote != null) {
-      if (!exact) return '$quote$completed';
-      return isDirectory ? '$quote$completed$quote' : '$quote$completed$quote ';
+    if (RegExp(r'[\x00-\x1f\x7f]').hasMatch(completed)) return null;
+    final safe = RegExp(r'^[A-Za-z0-9_./\\:-]+$').hasMatch(completed);
+    final String literal;
+    if (safe) {
+      literal = completed;
+    } else if (_shell == LocalShellType.powershell) {
+      literal = "'${completed.replaceAll("'", "''")}'";
+    } else if (_shell == LocalShellType.cmd &&
+        !RegExp(r'[%!^"&|<>]').hasMatch(completed)) {
+      literal = '"$completed"';
+    } else {
+      return null;
     }
-    return exact && !isDirectory ? '$completed ' : completed;
+    final prefix =
+        token.commandPosition && !safe && _shell == LocalShellType.powershell
+        ? '& '
+        : '';
+    return '$prefix$literal${exact && !isDirectory ? ' ' : ''}';
   }
 
-  void _replaceInputSuffix(int start, String replacement) {
+  void _replaceInputSuffix(int start, String? replacement) {
+    if (replacement == null) {
+      _emit('\x07');
+      return;
+    }
     final line = _input.toString();
     final oldSuffix = line.substring(start);
     for (final _ in oldSuffix.runes) {
@@ -737,11 +764,6 @@ class LocalLineSessionHandle implements TerminalSessionHandle {
       : value.lastIndexOf(r'\');
 
   bool _isWhitespace(String char) => char.trim().isEmpty;
-
-  bool _containsWhitespace(String value) => value.runes.any((rune) {
-    final char = String.fromCharCode(rune);
-    return char.trim().isEmpty;
-  });
 
   bool get _caseInsensitiveCompletion =>
       Platform.isWindows || _shell != LocalShellType.wsl;
@@ -930,7 +952,10 @@ class LocalLineSessionHandle implements TerminalSessionHandle {
       final first = trimmed[0];
       final last = trimmed[trimmed.length - 1];
       if ((first == '"' && last == '"') || (first == "'" && last == "'")) {
-        return trimmed.substring(1, trimmed.length - 1);
+        final content = trimmed.substring(1, trimmed.length - 1);
+        return first == "'" && _shell == LocalShellType.powershell
+            ? content.replaceAll("''", "'")
+            : content;
       }
     }
     return trimmed;
@@ -1007,8 +1032,6 @@ class LocalLineSessionHandle implements TerminalSessionHandle {
 class _CompletionToken {
   const _CompletionToken({
     required this.start,
-    required this.raw,
-    required this.quote,
     required this.value,
     required this.commandPosition,
     required this.pathPrefix,
@@ -1016,8 +1039,6 @@ class _CompletionToken {
   });
 
   final int start;
-  final String raw;
-  final String? quote;
   final String value;
   final bool commandPosition;
   final String pathPrefix;

@@ -142,7 +142,7 @@ class HostListPage extends ConsumerWidget {
       if (hostScoped &&
           host.authType == HostAuthType.password &&
           host.credentialRef != null) {
-        final secureStore = ref.read(secureStoreProvider);
+        final secureStore = ref.read(sharedSecretStoreProvider);
         final secret = await secureStore.readSecret(host.credentialRef!);
         credentialRef = null;
         if (secret != null) {
@@ -189,7 +189,7 @@ class HostListPage extends ConsumerWidget {
       final keepCredential =
           _isHostScoped(host) && host.authType == HostAuthType.password;
       final credential = keepCredential && credentialRef != null
-          ? await ref.read(secureStoreProvider).readSecret(credentialRef)
+          ? await ref.read(sharedSecretStoreProvider).readSecret(credentialRef)
           : null;
 
       await repository.delete(host.id);

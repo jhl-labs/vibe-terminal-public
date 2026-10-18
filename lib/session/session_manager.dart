@@ -153,7 +153,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     );
   }
 
-  bool _restoreStarted = false;
+  Future<void>? _restoreFuture;
+  bool _restoreCompleted = false;
 
   Future<void>? _agentWorktreeInitialization;
 
@@ -2256,9 +2257,19 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   /// Android가 Activity/Flutter 상태를 재생성하면 인메모리 세션 목록과 SSH
   /// 소켓은 사라진다. 마지막으로 연결됐던 원격 세션 탭을 복원하고, 이미 핀된
   /// 호스트키가 일치하는 경우에만 자동 재연결한다.
-  Future<void> restoreSavedSessions() async {
-    if (_restoreStarted || state.isNotEmpty) return;
-    _restoreStarted = true;
+  Future<void> restoreSavedSessions() {
+    final restoreFuture = _restoreFuture;
+    if (restoreFuture != null) return restoreFuture;
+    if (state.isNotEmpty) {
+      _restoreCompleted = true;
+      return Future<void>.value();
+    }
+    return _restoreFuture = _restoreSavedSessions().then((_) {
+      _restoreCompleted = true;
+    });
+  }
+
+  Future<void> _restoreSavedSessions() async {
     await _agentWorktreeInitialization;
 
     // 저장된 세션 값은 저장 당시 기본값 기준이다. 설정을 읽기 전에 만들면
@@ -2699,8 +2710,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   /// keepalive 박자([KeepalivePulse])가 울릴 때 호출. 연결된 원격 세션마다
   /// SSH keepalive ping을 보내 NAT/서버 유휴 타임아웃을 막는다.
   ///
-  /// ping이 5초 안에 완료되지 않거나 예외가 나면 죽은 연결로 간주하고
-  /// 즉시 끊김 처리한다(감지가 빨라지는 부수효과). dartssh2 내장 keepalive
+  /// ping 시간 초과가 연속 두 번이면 끊김 처리한다. 전송 종료 등의 오류는
+  /// 즉시 끊김 처리한다. dartssh2 내장 keepalive
   /// (15초)는 별도로 도는데, 백그라운드에서 Dart 타이머가 굶겨질 수 있어
   /// 이 박자가 보증 레이어 역할을 한다.
   Future<void> pingActiveSessions() async {
@@ -2733,11 +2744,20 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     SSHClient client,
     SessionDiagnostics diag,
   ) async {
+    // A transport can be replaced while its ping is pending. Its late result
+    // must not change the new connection's status, miss count or diagnostics.
+    bool isCurrentConnection() =>
+        ref.mounted &&
+        !_closedWith.containsKey(id) &&
+        identical(_sshHandles[id]?.client, client);
+
     try {
       await client.ping().timeout(_pingTimeout);
+      if (!isCurrentConnection()) return;
       _pingMisses.recordSuccess(id);
       diag.record(id, SessionEventType.pingSent);
     } on TimeoutException catch (e) {
+      if (!isCurrentConnection()) return;
       final dropped = _pingMisses.recordMiss(id);
       final count = dropped ? _pingMisses.threshold : _pingMisses.missesFor(id);
       final progress = '$count/${_pingMisses.threshold}';
@@ -2745,6 +2765,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       debugPrint('[keepalive] $id 응답 없음 ($progress)');
       if (dropped) handleSessionDropped(id, reason: 'keepalive 응답 없음');
     } catch (e) {
+      if (!isCurrentConnection()) return;
       // 전송이 이미 닫혔다는 오류는 기다릴 필요 없이 끊긴 것이다.
       _pingMisses.forget(id);
       diag.record(id, SessionEventType.pingFailed, detail: '$e');
@@ -3548,6 +3569,9 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   }
 
   Future<void> _saveOpenSessionsSnapshot() {
+    // 시작 직후 lifecycle 이벤트가 복원보다 먼저 오면 빈 목록으로 기존
+    // 스냅샷을 덮어쓸 수 있다. 복원 전에는 빈 상태를 저장하지 않는다.
+    if (!_restoreCompleted && state.isEmpty) return Future<void>.value();
     final snapshot = SessionRestoreSnapshot(
       activeId: ref.read(activeSessionIdProvider),
       groups: ref.read(sessionGroupProvider).groups,

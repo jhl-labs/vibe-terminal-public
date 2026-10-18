@@ -439,9 +439,23 @@ class RelaySshSocket implements SSHSocket {
   RelaySshSocket._(this._endpoint) {
     _stdoutSubscription = _endpoint.stdout.listen(
       (data) {
+        if (_closed) return;
+        if (_queuedBytes + data.length > maxQueuedBytes) {
+          final error = StateError('SSH relay receive backlog exceeded');
+          if (!_firstData.isCompleted) {
+            _firstData.completeError(error);
+          } else if (!_output.isClosed) {
+            _output.addError(error);
+          }
+          unawaited(close());
+          return;
+        }
         final bytes = data is Uint8List ? data : Uint8List.fromList(data);
+        _queuedBytes += bytes.length;
         if (!_firstData.isCompleted) _firstData.complete();
         if (!_output.isClosed) _output.add(bytes);
+        // Keep the readiness byte, then stop upstream until SSH subscribes.
+        if (!_output.hasListener) _pauseOutput();
       },
       onError: (Object error, StackTrace stackTrace) {
         if (!_output.isClosed) _output.addError(error, stackTrace);
@@ -463,7 +477,13 @@ class RelaySshSocket implements SSHSocket {
   }
 
   final _RelayEndpoint _endpoint;
-  final _output = StreamController<Uint8List>();
+  static const maxQueuedBytes = 1024 * 1024;
+  int _queuedBytes = 0;
+  late final _output = StreamController<Uint8List>(
+    onListen: _resumeOutput,
+    onPause: _pauseOutput,
+    onResume: _resumeOutput,
+  );
   final _input = StreamController<List<int>>();
   final _firstData = Completer<void>();
   final _done = Completer<void>();
@@ -475,7 +495,18 @@ class RelaySshSocket implements SSHSocket {
   Future<void> get firstData => _firstData.future;
 
   @override
-  Stream<Uint8List> get stream => _output.stream;
+  Stream<Uint8List> get stream => _output.stream.map((data) {
+    _queuedBytes -= data.length;
+    return data;
+  });
+
+  void _pauseOutput() {
+    if (!_closed && !_stdoutSubscription.isPaused) _stdoutSubscription.pause();
+  }
+
+  void _resumeOutput() {
+    if (!_closed && _stdoutSubscription.isPaused) _stdoutSubscription.resume();
+  }
 
   @override
   StreamSink<List<int>> get sink => _input.sink;

@@ -1437,6 +1437,17 @@ class _AppShellState extends ConsumerState<AppShell> {
       return CallbackShortcuts(bindings: bindings, child: child);
     }
 
+    // OS가 서비스를 중지해도 세션 목록은 그대로일 수 있다. 사용자 복귀 때
+    // 현재 개수로 재시도한다. 정상 서비스의 중복 시작은 keepAlive가 막는다.
+    ref.listen<bool>(appForegroundProvider, (_, foreground) {
+      if (!foreground) return;
+      unawaited(
+        ref
+            .read(backgroundKeepAliveProvider)
+            .update(ref.read(sessionManagerProvider).length),
+      );
+    });
+
     // 열린 세션 수가 바뀔 때마다 백그라운드 keep-alive(포그라운드 서비스)와
     // keepalive 박자를 갱신한다. 세션이 있으면 켜고, 모두 닫히면 끈다.
     ref.listen<String>(

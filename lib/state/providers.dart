@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:ui' show Locale, PlatformDispatcher;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../ai/ai_chat_service.dart';
+import '../ai/ai_consent_store.dart';
 import '../app/background_keep_alive.dart';
 import '../app/build_features.dart';
 import '../app/error_reporter.dart';
@@ -31,6 +33,7 @@ import '../kubernetes/kubernetes_exec_relay.dart';
 import '../notifications/notification_service.dart';
 import '../security/host_key_store.dart';
 import '../security/secure_store.dart';
+import '../security/shared_secret_store.dart';
 import '../session/session.dart';
 import '../snippets/gist_sync_service.dart';
 import '../session/session_diagnostics.dart';
@@ -63,6 +66,10 @@ final secureStoreProvider = Provider<SecureStore>(
   (ref) => FlutterSecureStoreImpl(),
 );
 
+final sharedSecretStoreProvider = Provider<SecureStore>(
+  (ref) => SharedSecretStore(ref.watch(secureStoreProvider)),
+);
+
 final remoteSessionIdentityStoreProvider = Provider<RemoteSessionIdentityStore>(
   (ref) => RemoteSessionIdentityStore(),
 );
@@ -90,21 +97,21 @@ final knownHostListProvider = FutureProvider<List<HostKeyRow>>(
 final sshKeyRepositoryProvider = Provider<SshKeyRepository>(
   (ref) => SshKeyRepository(
     ref.watch(appDatabaseProvider),
-    ref.watch(secureStoreProvider),
+    ref.watch(sharedSecretStoreProvider),
   ),
 );
 
 final identityRepositoryProvider = Provider<IdentityRepository>(
   (ref) => IdentityRepository(
     ref.watch(appDatabaseProvider),
-    ref.watch(secureStoreProvider),
+    ref.watch(sharedSecretStoreProvider),
   ),
 );
 
 final hostRepositoryProvider = Provider<HostRepository>(
   (ref) => HostRepository(
     ref.watch(appDatabaseProvider),
-    secureStore: ref.watch(secureStoreProvider),
+    secureStore: ref.watch(sharedSecretStoreProvider),
   ),
 );
 
@@ -118,7 +125,7 @@ final identityListProvider = FutureProvider<List<Identity>>(
 
 final sshServiceProvider = Provider<SshService>(
   (ref) => SshService(
-    secureStore: ref.watch(secureStoreProvider),
+    secureStore: ref.watch(sharedSecretStoreProvider),
     hostKeyStore: ref.watch(hostKeyStoreProvider),
   ),
 );
@@ -141,7 +148,13 @@ final kubernetesRelayServiceProvider = Provider<KubernetesRelayService>(
   (ref) => ProcessKubernetesRelayService(),
 );
 
-final aiChatServiceProvider = Provider<AiChatService>((ref) => AiChatService());
+final aiChatServiceProvider = Provider<AiChatService>(
+  (ref) => AiChatService(
+    hasDataConsent: (settings) => ref
+        .read(aiConsentStoreProvider)
+        .isApproved(AiConsentStore.destinationKey(settings)),
+  ),
+);
 
 final buildFeaturesProvider = Provider<BuildFeatures>(
   (ref) => BuildFeatures.current,
@@ -159,7 +172,18 @@ final gitHubSyncServiceProvider = Provider<GitHubSyncService>(
 final gitHubTokenRefresherProvider = Provider<GitHubTokenRefresher>(
   (ref) => GitHubTokenRefresher(
     service: ref.watch(gitHubSyncServiceProvider),
-    save: ref.read(appSettingsProvider.notifier).setGitHubSyncAuthorization,
+    save: (authorization) {
+      ref
+          .read(appSettingsProvider.notifier)
+          .setGitHubSyncAuthorization(authorization);
+    },
+    isCurrent: (settings) =>
+        ref.mounted &&
+        ref
+            .read(appSettingsProvider)
+            .cloudSync
+            .github
+            .sameAuthorization(settings),
   ),
 );
 
@@ -563,22 +587,47 @@ class AppSettingsController extends Notifier<AppSettings> {
       store,
       AiSettings.customHeadersSecretRef,
     );
-    final githubToken = await _readSecret(
+    final githubCredential = await _readSecret(
       store,
-      CloudSyncSettings.githubTokenSecretRef,
+      CloudSyncSettings.githubCredentialSecretRef,
     );
-    final githubRefreshToken = await _readSecret(
-      store,
-      CloudSyncSettings.githubRefreshTokenSecretRef,
+    final githubBase = (loaded ?? AppSettings.defaultSettings).cloudSync.github;
+    var github = githubBase.copyWith(
+      token: '',
+      refreshToken: '',
+      tokenExpiresAt: null,
+      refreshTokenExpiresAt: null,
     );
+    if (githubCredential != null) {
+      try {
+        final credential = jsonDecode(githubCredential);
+        if (credential is Map &&
+            credential['issuer'] == githubBase.authorizationKey &&
+            credential['token'] is String &&
+            credential['refreshToken'] is String) {
+          github = githubBase.copyWith(
+            token: credential['token'] as String,
+            refreshToken: credential['refreshToken'] as String,
+            tokenExpiresAt: DateTime.tryParse(
+              credential['tokenExpiresAt']?.toString() ?? '',
+            ),
+            refreshTokenExpiresAt: DateTime.tryParse(
+              credential['refreshTokenExpiresAt']?.toString() ?? '',
+            ),
+          );
+        }
+      } on FormatException {
+        // Unbound legacy tokens and invalid receipts require fresh login.
+      }
+    }
     final syncEncryptionKey = await _readSecret(
       store,
       CloudSyncSettings.encryptionKeySecretRef,
     );
-    if (token != null ||
+    if (loaded != null ||
+        token != null ||
         customHeaders != null ||
-        githubToken != null ||
-        githubRefreshToken != null ||
+        githubCredential != null ||
         syncEncryptionKey != null) {
       final base = loaded ?? AppSettings.defaultSettings;
       loaded = base.copyWith(
@@ -588,11 +637,7 @@ class AppSettingsController extends Notifier<AppSettings> {
         ),
         cloudSync: base.cloudSync.copyWith(
           encryptionKey: syncEncryptionKey ?? base.cloudSync.encryptionKey,
-          github: base.cloudSync.github.copyWith(
-            token: githubToken ?? base.cloudSync.github.token,
-            refreshToken:
-                githubRefreshToken ?? base.cloudSync.github.refreshToken,
-          ),
+          github: github,
         ),
       );
     }
@@ -665,11 +710,16 @@ class AppSettingsController extends Notifier<AppSettings> {
     );
   }
 
+  String? _persistedGitHubIssuer;
+
   void _commit(AppSettings settings) {
     final previousToken = state.ai.apiToken;
     final previousCustomHeaders = state.ai.customHeaders;
     final previousGithubToken = state.cloudSync.github.token;
     final previousGithubRefreshToken = state.cloudSync.github.refreshToken;
+    final previousGithubExpiry = state.cloudSync.github.tokenExpiresAt;
+    final previousGithubRefreshExpiry =
+        state.cloudSync.github.refreshTokenExpiresAt;
     final previousSyncEncryptionKey = state.cloudSync.encryptionKey;
     final previousTelemetry = state.telemetry;
     state = settings;
@@ -687,19 +737,25 @@ class AppSettingsController extends Notifier<AppSettings> {
         ),
       );
     }
-    if (settings.cloudSync.github.token != previousGithubToken) {
+    if (settings.cloudSync.github.token != previousGithubToken ||
+        settings.cloudSync.github.refreshToken != previousGithubRefreshToken ||
+        settings.cloudSync.github.tokenExpiresAt != previousGithubExpiry ||
+        settings.cloudSync.github.refreshTokenExpiresAt !=
+            previousGithubRefreshExpiry ||
+        settings.cloudSync.github.authorizationKey != _persistedGitHubIssuer) {
+      final github = settings.cloudSync.github;
+      _persistedGitHubIssuer = github.authorizationKey;
       unawaited(
         _saveSecret(
-          CloudSyncSettings.githubTokenSecretRef,
-          settings.cloudSync.github.token,
-        ),
-      );
-    }
-    if (settings.cloudSync.github.refreshToken != previousGithubRefreshToken) {
-      unawaited(
-        _saveSecret(
-          CloudSyncSettings.githubRefreshTokenSecretRef,
-          settings.cloudSync.github.refreshToken,
+          CloudSyncSettings.githubCredentialSecretRef,
+          jsonEncode({
+            'issuer': github.authorizationKey,
+            'token': github.token,
+            'refreshToken': github.refreshToken,
+            'tokenExpiresAt': github.tokenExpiresAt?.toIso8601String(),
+            'refreshTokenExpiresAt': github.refreshTokenExpiresAt
+                ?.toIso8601String(),
+          }),
         ),
       );
     }
@@ -1026,7 +1082,14 @@ class AppSettingsController extends Notifier<AppSettings> {
     );
   }
 
-  void setGitHubSyncAuthorization(GitHubAppAuthorization authorization) {
+  bool setGitHubSyncAuthorization(
+    GitHubAppAuthorization authorization, {
+    GitHubSyncSettings? expected,
+  }) {
+    if (expected != null &&
+        !state.cloudSync.github.sameAuthorization(expected)) {
+      return false;
+    }
     update(
       state.copyWith(
         cloudSync: state.cloudSync.copyWith(
@@ -1039,6 +1102,7 @@ class AppSettingsController extends Notifier<AppSettings> {
         ),
       ),
     );
+    return true;
   }
 
   void setAiProvider(AiProviderType provider) {

@@ -382,6 +382,23 @@ class GitHubSyncSettings {
 
   bool get isSignedIn => token.trim().isNotEmpty;
 
+  String get authorizationKey {
+    final raw = effectiveServerUrl.trim();
+    final uri = Uri.tryParse(raw.contains('://') ? raw : 'https://$raw');
+    final normalized = uri == null
+        ? raw
+        : uri
+              .replace(path: uri.path.replaceAll(RegExp(r'/+$'), ''))
+              .removeFragment()
+              .toString();
+    return '${hostType.name}\n$normalized\n$effectiveAppClientId';
+  }
+
+  bool sameAuthorization(GitHubSyncSettings other) =>
+      authorizationKey == other.authorizationKey &&
+      token == other.token &&
+      refreshToken == other.refreshToken;
+
   /// 동기화 대상을 구분하는 값. 바뀌면 처음 동기화로 다시 확인한다.
   String get targetKey => [
     effectiveServerUrl,
@@ -405,23 +422,40 @@ class GitHubSyncSettings {
     String? refreshToken,
     Object? tokenExpiresAt = _unset,
     Object? refreshTokenExpiresAt = _unset,
-  }) => GitHubSyncSettings(
-    hostType: hostType ?? this.hostType,
-    serverUrl: serverUrl ?? this.serverUrl,
-    appClientId: appClientId ?? this.appClientId,
-    owner: owner ?? this.owner,
-    repo: repo ?? this.repo,
-    branch: branch ?? this.branch,
-    path: path ?? this.path,
-    token: token ?? this.token,
-    refreshToken: refreshToken ?? this.refreshToken,
-    tokenExpiresAt: identical(tokenExpiresAt, _unset)
-        ? this.tokenExpiresAt
-        : tokenExpiresAt as DateTime?,
-    refreshTokenExpiresAt: identical(refreshTokenExpiresAt, _unset)
-        ? this.refreshTokenExpiresAt
-        : refreshTokenExpiresAt as DateTime?,
-  );
+  }) {
+    final next = GitHubSyncSettings(
+      hostType: hostType ?? this.hostType,
+      serverUrl: serverUrl ?? this.serverUrl,
+      appClientId: appClientId ?? this.appClientId,
+      owner: owner ?? this.owner,
+      repo: repo ?? this.repo,
+      branch: branch ?? this.branch,
+      path: path ?? this.path,
+      token: token ?? this.token,
+      refreshToken: refreshToken ?? this.refreshToken,
+      tokenExpiresAt: identical(tokenExpiresAt, _unset)
+          ? this.tokenExpiresAt
+          : tokenExpiresAt as DateTime?,
+      refreshTokenExpiresAt: identical(refreshTokenExpiresAt, _unset)
+          ? this.refreshTokenExpiresAt
+          : refreshTokenExpiresAt as DateTime?,
+    );
+    if (next.authorizationKey == authorizationKey) return next;
+    // Explicit new credentials may be provisioned with a new configuration.
+    // A copied existing controller value never grants a different issuer.
+    final freshToken = token != null && token != this.token;
+    return next.copyWith(
+      token: freshToken ? token : '',
+      refreshToken: freshToken ? (refreshToken ?? '') : '',
+      tokenExpiresAt: freshToken && !identical(tokenExpiresAt, _unset)
+          ? tokenExpiresAt
+          : null,
+      refreshTokenExpiresAt:
+          freshToken && !identical(refreshTokenExpiresAt, _unset)
+          ? refreshTokenExpiresAt
+          : null,
+    );
+  }
 
   Map<String, Object?> toJson() => {
     'hostType': hostType.name,
@@ -458,21 +492,24 @@ class GitHubSyncSettings {
         ? GitHubSyncHostType.githubDotCom
         : GitHubSyncHostType.enterprise;
 
-    return defaults.copyWith(
-      hostType: enumValue(
-        GitHubSyncHostType.values,
-        json['hostType'] as String?,
-        inferredHostType,
-      ),
-      serverUrl: serverUrl,
-      appClientId: json['appClientId'] as String?,
-      owner: json['owner'] as String?,
-      repo: json['repo'] as String?,
-      branch: json['branch'] as String?,
-      path: json['path'] as String?,
-      tokenExpiresAt: dateTime(json['tokenExpiresAt']),
-      refreshTokenExpiresAt: dateTime(json['refreshTokenExpiresAt']),
-    );
+    return defaults
+        .copyWith(
+          hostType: enumValue(
+            GitHubSyncHostType.values,
+            json['hostType'] as String?,
+            inferredHostType,
+          ),
+          serverUrl: serverUrl,
+          appClientId: json['appClientId'] as String?,
+          owner: json['owner'] as String?,
+          repo: json['repo'] as String?,
+          branch: json['branch'] as String?,
+          path: json['path'] as String?,
+        )
+        .copyWith(
+          tokenExpiresAt: dateTime(json['tokenExpiresAt']),
+          refreshTokenExpiresAt: dateTime(json['refreshTokenExpiresAt']),
+        );
   }
 }
 
@@ -491,6 +528,8 @@ class CloudSyncSettings {
     this.lastSyncedTarget = '',
   });
 
+  static const githubCredentialSecretRef =
+      'vibe_terminal.sync.github.credential.v1';
   static const githubTokenSecretRef = 'vibe_terminal.sync.github.token';
   static const githubRefreshTokenSecretRef =
       'vibe_terminal.sync.github.refresh_token';
@@ -694,8 +733,7 @@ class NotificationSettings {
   final bool enabled;
   final bool taskCompleteEnabled;
 
-  /// Agent Chat loop가 승인·답변·연장을 기다리거나 예약 실행이 끝났을 때
-  /// 시스템 알림을 보낼지.
+  /// 작업에 사용자 확인이 필요할 때 시스템 알림을 보낼지.
   final bool agentAttentionEnabled;
 
   static const defaultSettings = NotificationSettings(

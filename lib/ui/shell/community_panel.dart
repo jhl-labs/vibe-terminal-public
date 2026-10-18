@@ -92,6 +92,7 @@ class _CommunityPanelState extends ConsumerState<CommunityPanel> {
   }
 
   Future<void> _load(String token) async {
+    if (!ref.read(appSettingsProvider).cloudSync.github.isGitHubDotCom) return;
     final normalizedToken = token.trim();
     if (normalizedToken.isEmpty) return;
     setState(() {
@@ -240,7 +241,10 @@ class _CommunityPanelState extends ConsumerState<CommunityPanel> {
   /// 설정 화면과 같은 GitHub App device flow로 로그인한다. 인증 코드와 URL을
   /// 다이얼로그로 보여주고, 승인이 끝나면 설정 화면과 같은 방식으로 저장한다.
   Future<void> _loginWithGitHubApp() async {
-    if (_authorizing) return;
+    if (_authorizing ||
+        !ref.read(appSettingsProvider).cloudSync.github.isGitHubDotCom) {
+      return;
+    }
     setState(() {
       _authorizing = true;
       _error = null;
@@ -288,7 +292,11 @@ class _CommunityPanelState extends ConsumerState<CommunityPanel> {
         return;
       }
       if (!mounted) return;
-      ref.read(appSettingsProvider.notifier).setGitHubSyncAuthorization(result);
+      if (!ref
+          .read(appSettingsProvider.notifier)
+          .setGitHubSyncAuthorization(result, expected: settings)) {
+        throw const GitHubSyncException('인증 중 서버 설정이 변경되었습니다.');
+      }
       closeDialog();
       setState(() {
         _authRequired = false;
@@ -397,7 +405,18 @@ class _CommunityPanelState extends ConsumerState<CommunityPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final token = ref.watch(appSettingsProvider).cloudSync.github.token.trim();
+    final github = ref.watch(appSettingsProvider).cloudSync.github;
+    if (!github.isGitHubDotCom) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(20),
+          child: Text(
+            '커뮤니티는 GitHub.com 로그인이 필요합니다. Enterprise 인증정보는 전송하지 않습니다.',
+          ),
+        ),
+      );
+    }
+    final token = github.token.trim();
     if (token.isNotEmpty && _loadedToken != token && !_loading) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) unawaited(_load(token));

@@ -1,7 +1,7 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
+import 'package:flutter/foundation.dart';
 
 class PublicKeyCredential {
   const PublicKeyCredential({required this.privateKeyPem, this.passphrase});
@@ -17,6 +17,11 @@ class SshCredentialPayload {
   static const _passphraseKey = 'passphrase';
 
   static String password(String password) => password;
+
+  static Future<String> publicKeyAsync({
+    required String privateKeyPem,
+    String? passphrase,
+  }) => compute(_encodePublicKeyCredential, (privateKeyPem, passphrase));
 
   static String publicKey({required String privateKeyPem, String? passphrase}) {
     try {
@@ -68,3 +73,9 @@ class SshCredentialPayload {
     );
   }
 }
+
+String _encodePublicKeyCredential((String, String?) input) =>
+    SshCredentialPayload.publicKey(
+      privateKeyPem: input.$1,
+      passphrase: input.$2,
+    );

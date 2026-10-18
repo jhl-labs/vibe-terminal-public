@@ -2,6 +2,7 @@ import 'package:drift/drift.dart';
 
 import '../data/db/app_database.dart';
 import '../security/secure_store.dart';
+import '../security/shared_secret_store.dart';
 import 'sync_merge.dart';
 import 'sync_snapshot.dart';
 
@@ -34,10 +35,20 @@ abstract interface class SyncSection {
 /// 직접 쓴다. 저장소의 쓰기는 변경 시각을 지금으로 바꾸는 등 부수효과가 있어,
 /// 받은 레코드를 그대로 재현하지 못한다.
 abstract class RowSyncSection<R> implements SyncSection {
-  RowSyncSection(this.db, this.secureStore);
+  RowSyncSection(this.db, SecureStore secureStore)
+    : secureStore = SharedSecretStore(secureStore);
 
   final AppDatabase db;
   final SecureStore secureStore;
+
+  void _validateReferences(Map<String, Object?> data) {
+    for (final field in const ['secretRef', 'credentialRef', 'passwordRef']) {
+      final value = data[field];
+      if (value == null) continue;
+      if (value is! String) throw const FormatException('잘못된 인증정보 참조 형식입니다.');
+      SharedSecretStore.validate(value);
+    }
+  }
 
   TableInfo<Table, R> get table;
   Future<List<R>> loadRows();
@@ -91,6 +102,7 @@ abstract class RowSyncSection<R> implements SyncSection {
     for (final row in await loadRows()) {
       if (!includes(row)) continue;
       final data = encode(row);
+      _validateReferences(data);
       final ref = includeSecrets ? secretRefOf(row) : null;
       if (ref != null) {
         final secret = await secureStore.readSecret(ref);
@@ -112,6 +124,7 @@ abstract class RowSyncSection<R> implements SyncSection {
       final current = existing[record.id];
       if (current != null && !includes(current)) continue;
       if (!accepts(record)) continue;
+      _validateReferences(record.data);
       final secret = record.data[kSyncSecretField];
       final ref = secretRefOfRecord(record);
       if (secret is String && ref != null) {
@@ -136,6 +149,7 @@ abstract class RowSyncSection<R> implements SyncSection {
     for (final id in ids) {
       final row = existing[id];
       if (row == null || !includes(row)) continue;
+      _validateReferences(encode(row));
       // 다른 기기에서 지웠지만 이 기기의 호스트가 아직 쓰고 있다(오프라인 중에
       // 연결한 경우 등). 지우면 접속 정보가 끊기므로 남기고 다시 올린다.
       if (await isReferenced(id)) {

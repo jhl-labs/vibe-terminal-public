@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
 import 'package:dartssh2/dartssh2.dart';
+import 'package:flutter/foundation.dart';
 
 /// 개인키 PEM에서 목록·지문·서버 등록에 필요한 공개 정보만 뽑아낸다.
 class SshKeyMaterial {
@@ -20,6 +21,9 @@ class SshKeyMaterial {
   /// `SHA256:<unpadded-base64>` — HostKeyStore.fingerprintOf와 같은 형식.
   final String fingerprint;
   final String comment;
+
+  static Future<SshKeyMaterial> parseAsync(String pem, {String? passphrase}) =>
+      compute(_parseMaterial, (pem, passphrase));
 
   static SshKeyMaterial parse(String pem, {String? passphrase}) {
     final normalized = passphrase == null || passphrase.isEmpty
@@ -51,3 +55,6 @@ class SshKeyMaterial {
     );
   }
 }
+
+SshKeyMaterial _parseMaterial((String, String?) input) =>
+    SshKeyMaterial.parse(input.$1, passphrase: input.$2);

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'custom_headers.dart';
+import 'ai_consent_store.dart';
 import 'secret_masker.dart';
 import 'session_log_request.dart';
 import '../settings/app_settings.dart';
@@ -102,11 +103,16 @@ typedef AiCancelCallback = void Function();
 class AiChatService {
   AiChatService({
     Future<void> Function(Duration)? retryDelay,
+    Future<bool> Function(AiSettings)? hasDataConsent,
     this.requestTimeout = const Duration(seconds: 60),
-  }) : _retryDelay = retryDelay ?? _realDelay;
+  }) : _hasDataConsent = hasDataConsent ?? _storedConsent,
+       _retryDelay = retryDelay ?? _realDelay;
 
   /// 연결·헤더·본문을 합친 HTTP 시도 한 번의 전체 제한 시간.
   final Duration requestTimeout;
+  final Future<bool> Function(AiSettings) _hasDataConsent;
+  static Future<bool> _storedConsent(AiSettings settings) =>
+      AiConsentStore().isApproved(AiConsentStore.destinationKey(settings));
   static const _maxOutputTokens = 2048;
 
   /// 서버가 응답 헤더도 보내기 전에 연결을 끊었을 때 한 번 더 시도하기 전 대기.
@@ -152,9 +158,10 @@ class AiChatService {
       );
     }
 
-    final reply = await complete(
+    final reply = await _completeRequest(
       settings: settings,
       sessionLabel: 'Settings connection test',
+      systemPromptOverride: 'Connection test only. Reply with a short OK.',
       terminalContext: '',
       messages: [
         AiChatMessage(
@@ -185,43 +192,83 @@ class AiChatService {
       );
     }
 
-    // Agent Chat 오케스트레이터처럼 시스템 프롬프트를 전적으로 제어해야 하는
-    // 호출자는 systemPromptOverride로 기본(터미널 편집) 프롬프트를 대체한다.
-    final systemPrompt =
-        systemPromptOverride ??
-        _buildSystemPrompt(
-          settings: settings,
-          sessionLabel: sessionLabel,
-          terminalContext: terminalContext,
-          additionalSystemPrompt: additionalSystemPrompt,
-          sessionLogContext: sessionLogContext,
-        );
+    cancelToken?.throwIfCancelled();
+    if (!await _hasDataConsent(settings)) {
+      throw AiChatException(
+        '이 AI 전송 대상에 먼저 데이터 전송 동의가 필요합니다.',
+        kind: AiChatFailureKind.configuration,
+      );
+    }
+    cancelToken?.throwIfCancelled();
+    return _completeRequest(
+      settings: settings,
+      sessionLabel: sessionLabel,
+      terminalContext: terminalContext,
+      messages: messages,
+      cancelToken: cancelToken,
+      additionalSystemPrompt: additionalSystemPrompt,
+      systemPromptOverride: systemPromptOverride,
+      sessionLogContext: sessionLogContext,
+    );
+  }
+
+  Future<String> _completeRequest({
+    required AiSettings settings,
+    required String sessionLabel,
+    required String terminalContext,
+    required List<AiChatMessage> messages,
+    AiCancelToken? cancelToken,
+    String? additionalSystemPrompt,
+    String? systemPromptOverride,
+    String? sessionLogContext,
+  }) async {
+    // 호출자는 systemPromptOverride로 기본 시스템 프롬프트를 대체할 수 있다.
+    final systemPrompt = maskTerminalSecrets(
+      systemPromptOverride ??
+          _buildSystemPrompt(
+            settings: settings,
+            sessionLabel: sessionLabel,
+            terminalContext: terminalContext,
+            additionalSystemPrompt: additionalSystemPrompt,
+            sessionLogContext: sessionLogContext,
+          ),
+    );
+    final sanitizedMessages = [
+      for (final message in messages)
+        AiChatMessage(
+          role: message.role,
+          content: maskTerminalSecrets(message.content),
+          createdAt: message.createdAt,
+          isError: message.isError,
+          contextNote: message.contextNote,
+        ),
+    ];
 
     return switch (settings.provider) {
       AiProviderType.openai => _completeOpenAi(
         endpoint: Uri.parse('https://api.openai.com/v1/chat/completions'),
         settings: settings,
         systemPrompt: systemPrompt,
-        messages: messages,
+        messages: sanitizedMessages,
         cancelToken: cancelToken,
       ),
       AiProviderType.openAiCompatible => _completeOpenAi(
         endpoint: _compatibleEndpoint(settings.baseUrl),
         settings: settings,
         systemPrompt: systemPrompt,
-        messages: messages,
+        messages: sanitizedMessages,
         cancelToken: cancelToken,
       ),
       AiProviderType.claude => _completeClaude(
         settings: settings,
         systemPrompt: systemPrompt,
-        messages: messages,
+        messages: sanitizedMessages,
         cancelToken: cancelToken,
       ),
       AiProviderType.gemini => _completeGemini(
         settings: settings,
         systemPrompt: systemPrompt,
-        messages: messages,
+        messages: sanitizedMessages,
         cancelToken: cancelToken,
       ),
     };

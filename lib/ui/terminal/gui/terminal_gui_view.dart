@@ -60,18 +60,23 @@ class _TerminalGuiSurfaceState extends ConsumerState<TerminalGuiSurface> {
         if (_visited)
           Offstage(
             offstage: !enabled,
-            child: TickerMode(
-              enabled: enabled,
-              child: TerminalGuiView(
-                active: enabled,
-                terminal: widget.session.engine.terminal,
-                connected: widget.session.status == SessionStatus.connected,
-                theme: widget.theme,
-                fontSize: widget.fontSize,
-                agentTitle: () => widget.session.engine.title ?? '',
-                aiSettings: ref.watch(appSettingsProvider.select((s) => s.ai)),
-                aiService: ref.watch(aiChatServiceProvider),
-                aiConsentStore: ref.watch(aiConsentStoreProvider),
+            child: ExcludeFocus(
+              excluding: !enabled,
+              child: TickerMode(
+                enabled: enabled,
+                child: TerminalGuiView(
+                  active: enabled,
+                  terminal: widget.session.engine.terminal,
+                  connected: widget.session.status == SessionStatus.connected,
+                  theme: widget.theme,
+                  fontSize: widget.fontSize,
+                  agentTitle: () => widget.session.engine.title ?? '',
+                  aiSettings: ref.watch(
+                    appSettingsProvider.select((s) => s.ai),
+                  ),
+                  aiService: ref.watch(aiChatServiceProvider),
+                  aiConsentStore: ref.watch(aiConsentStoreProvider),
+                ),
               ),
             ),
           ),

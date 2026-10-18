@@ -2890,7 +2890,12 @@ class _TerminalImeInputLayer extends StatelessWidget {
             // 일어나지 않아, 엔터 후에도 키보드가 유지된다(깜빡임 방지).
             onEditingComplete: () => onSubmitted(''),
             autocorrect: false,
-            enableSuggestions: false,
+            // Android maps suggestions=false to VISIBLE_PASSWORD as well as
+            // NO_SUGGESTIONS, which can restrict Korean/other IME languages.
+            // Keep normal text input while disabling correction and learning.
+            enableSuggestions: defaultTargetPlatform == TargetPlatform.android,
+            enableIMEPersonalizedLearning:
+                defaultTargetPlatform != TargetPlatform.android,
             maxLines: 1,
             scrollPadding: EdgeInsets.zero,
             contentInsertionConfiguration: ContentInsertionConfiguration(

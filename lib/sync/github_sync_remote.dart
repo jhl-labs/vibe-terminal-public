@@ -11,13 +11,17 @@ class GitHubTokenRefresher {
   GitHubTokenRefresher({
     required this._service,
     required this._save,
+    bool Function(GitHubSyncSettings)? isCurrent,
     DateTime Function()? clock,
-  }) : _clock = clock ?? DateTime.now;
+  }) : _isCurrent = isCurrent ?? _alwaysCurrent,
+       _clock = clock ?? DateTime.now;
 
   final GitHubSyncService _service;
   final void Function(GitHubAppAuthorization authorization) _save;
   final DateTime Function() _clock;
-  Future<GitHubAppAuthorization>? _inflight;
+  final bool Function(GitHubSyncSettings) _isCurrent;
+  static bool _alwaysCurrent(GitHubSyncSettings _) => true;
+  final _inflight = <String, Future<GitHubAppAuthorization>>{};
 
   static const refreshMargin = Duration(minutes: 5);
 
@@ -52,17 +56,27 @@ class GitHubTokenRefresher {
 
   /// 지금 갱신하고 저장한다. 이미 진행 중인 갱신이 있으면 그 결과를 쓴다.
   Future<GitHubAppAuthorization> refreshNow(GitHubSyncSettings settings) {
-    return _inflight ??= () async {
+    if (!_isCurrent(settings)) {
+      return Future.error(
+        const GitHubSyncException('인증 설정이 변경되었습니다. 다시 로그인하세요.'),
+      );
+    }
+    final key =
+        '${settings.authorizationKey}\n${settings.token}\n${settings.refreshToken}';
+    return _inflight.putIfAbsent(key, () async {
       try {
         final authorization = await _service.refreshUserAccessToken(
           settings: settings,
         );
+        if (!_isCurrent(settings)) {
+          throw const GitHubSyncException('인증 설정이 변경되어 이전 갱신 결과를 버렸습니다.');
+        }
         _save(authorization);
         return authorization;
       } finally {
-        _inflight = null;
+        _inflight.remove(key);
       }
-    }();
+    });
   }
 }
 

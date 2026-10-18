@@ -4,7 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
-/// 민감한 화면(Vault, SSH 키 생성·가져오기, 비밀번호 입력)이 떠 있는 동안
+/// 민감한 화면(SSH 키 생성·가져오기, 비밀번호 입력)이 떠 있는 동안
 /// OS 화면 캡처를 막는다.
 ///
 /// Android에서만 동작한다(`FLAG_SECURE`: 최근 앱 썸네일·스크린샷·화면 녹화

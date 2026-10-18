@@ -124,6 +124,24 @@ class _LineReflow {
         cellsToCopy--;
       }
 
+      // A double-width glyph cannot fit in a one-cell viewport. Represent it
+      // with one replacement cell and consume its trailing cell as well.
+      if (cellsToCopy == 0 && newWidth == 1 && _builder.isEmpty) {
+        final replacement = BufferLine(1)..copyFrom(line, from, 0, 1);
+        replacement.setCodePoint(0, 0xfffd);
+        final consumed = cellsLeft >= 2 ? 2 : 1;
+        for (final anchor in line.anchors.toList()) {
+          if (anchor.x >= from && anchor.x < from + consumed) {
+            _builder.addAnchor(anchor, 0);
+          }
+        }
+        _builder.add(replacement, 0, 1);
+        from += consumed;
+        cellsLeft -= consumed;
+        _lines.add(_builder.take(wrapped: _lines.isNotEmpty));
+        continue;
+      }
+
       for (var anchor in line.anchors.toList()) {
         if (anchor.x >= from && anchor.x <= from + cellsToCopy) {
           _builder.addAnchor(anchor, anchor.x - from);

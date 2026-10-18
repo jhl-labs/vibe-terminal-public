@@ -26,6 +26,12 @@ import 'package:xterm/src/utils/circular_buffer.dart';
 /// translating user input into escape sequences that the application can
 /// understand.
 class Terminal with Observable implements TerminalState, EscapeHandler {
+  // Reject unsupported control requests before any callback or allocation.
+  static const maxColumns = 1024;
+  static const maxRows = 512;
+  static const maxScreenCells = 262144;
+  static const maxRepeatCount = 65536;
+
   /// The number of lines that the scrollback buffer can hold. If the buffer
   /// exceeds this size, the lines at the top of the buffer will be removed.
   final int maxLines;
@@ -361,6 +367,11 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   ]) {
     newWidth = max(newWidth, 1);
     newHeight = max(newHeight, 1);
+    if (newWidth > maxColumns ||
+        newHeight > maxRows ||
+        newWidth * newHeight > maxScreenCells) {
+      return;
+    }
 
     onResize?.call(newWidth, newHeight, pixelWidth ?? 0, pixelHeight ?? 0);
 
@@ -488,7 +499,7 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   @override
   void repeatPreviousCharacter(int count) {
-    if (_precedingCodepoint == 0) {
+    if (_precedingCodepoint == 0 || count <= 0 || count > maxRepeatCount) {
       return;
     }
 

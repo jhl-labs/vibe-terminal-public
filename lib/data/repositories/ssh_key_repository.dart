@@ -72,7 +72,7 @@ class SshKeyRepository {
     String? secretRef,
   }) async {
     // 잘못된 PEM이면 FormatException이 그대로 전파된다.
-    final material = SshKeyMaterial.parse(
+    final material = await SshKeyMaterial.parseAsync(
       privateKeyPem,
       passphrase: passphrase,
     );
@@ -85,7 +85,7 @@ class SshKeyRepository {
     if (secretRef == null) {
       await _secureStore.writeSecret(
         ref,
-        SshCredentialPayload.publicKey(
+        await SshCredentialPayload.publicKeyAsync(
           privateKeyPem: privateKeyPem,
           passphrase: passphrase,
         ),
