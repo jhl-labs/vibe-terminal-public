@@ -100,6 +100,7 @@ String? shortcutTokenForKey(LogicalKeyboardKey key) {
     LogicalKeyboardKey.backquote => '`',
     LogicalKeyboardKey.bracketLeft => '[',
     LogicalKeyboardKey.bracketRight => ']',
+    LogicalKeyboardKey.backspace => 'Backspace',
     LogicalKeyboardKey.tab => 'Tab',
     LogicalKeyboardKey.enter || LogicalKeyboardKey.numpadEnter => 'Enter',
     LogicalKeyboardKey.escape => 'Esc',
@@ -158,10 +159,17 @@ LogicalKeyboardKey? _logicalKeyForToken(String token) {
     if (token == ']') return LogicalKeyboardKey.bracketRight;
   }
 
+  final function = RegExp(r'^f([1-9]|1[0-2])$').firstMatch(token);
+  if (function != null) {
+    return LogicalKeyboardKey.findKeyByKeyId(
+      LogicalKeyboardKey.f1.keyId + int.parse(function[1]!) - 1,
+    );
+  }
   return switch (token) {
     'plus' => LogicalKeyboardKey.add,
     'numpadadd' => LogicalKeyboardKey.numpadAdd,
     'numpadsubtract' => LogicalKeyboardKey.numpadSubtract,
+    'backspace' => LogicalKeyboardKey.backspace,
     'tab' => LogicalKeyboardKey.tab,
     'enter' || 'return' => LogicalKeyboardKey.enter,
     'esc' || 'escape' => LogicalKeyboardKey.escape,

@@ -23,6 +23,7 @@ class TerminalGestureHandler extends StatefulWidget {
     required this.terminalController,
     this.child,
     this.onTapUp,
+    this.onDoubleTap,
     this.onSingleTapUp,
     this.onTapDown,
     this.onSecondaryTapDown,
@@ -30,6 +31,7 @@ class TerminalGestureHandler extends StatefulWidget {
     this.onTertiaryTapDown,
     this.onTertiaryTapUp,
     this.readOnly = false,
+    this.tapInputMode = false,
     this.onTouchSelectionChanged,
   });
 
@@ -40,6 +42,8 @@ class TerminalGestureHandler extends StatefulWidget {
   final Widget? child;
 
   final GestureTapUpCallback? onTapUp;
+
+  final bool Function(TapDownDetails)? onDoubleTap;
 
   final GestureTapUpCallback? onSingleTapUp;
 
@@ -55,6 +59,8 @@ class TerminalGestureHandler extends StatefulWidget {
 
   final bool readOnly;
 
+  final bool tapInputMode;
+
   final ValueChanged<bool>? onTouchSelectionChanged;
 
   @override
@@ -67,6 +73,15 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
   RenderTerminal get renderTerminal => terminalView.renderTerminal;
 
   bool _touchSelecting = false;
+  final _tapPointers = <int>{};
+  bool _tapInputArmed = false;
+  bool _tapInputBlocked = false;
+
+  @override
+  void didUpdateWidget(TerminalGestureHandler oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.tapInputMode != widget.tapInputMode) _tapInputArmed = false;
+  }
 
   /// Vibe Terminal patch: the drag anchor as a buffer cell (stable across
   /// scrolling) and the last pointer position, used to re-apply the selection
@@ -129,11 +144,27 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
   @override
   Widget build(BuildContext context) {
     return Listener(
-      onPointerDown: _countClick,
-      onPointerUp: _recordClickUp,
-      onPointerCancel: (_) => _endTouchSelection(),
+      onPointerDown: (event) {
+        if (_tapPointers.isEmpty) {
+          _tapInputBlocked = false;
+          _tapInputArmed = widget.tapInputMode;
+        }
+        _tapPointers.add(event.pointer);
+        if (_tapPointers.length > 1) _tapInputBlocked = true;
+        _countClick(event);
+      },
+      onPointerUp: (event) {
+        _tapPointers.remove(event.pointer);
+        _recordClickUp(event);
+      },
+      onPointerCancel: (event) {
+        _tapPointers.remove(event.pointer);
+        _tapInputArmed = false;
+        _endTouchSelection();
+      },
       onPointerSignal: _onPointerSignal,
       child: TerminalGestureDetector(
+        detectMultiTap: !widget.tapInputMode,
         onTapUp: widget.onTapUp,
         onSingleTapUp: onSingleTapUp,
         onTapDown: onTapDown,
@@ -203,6 +234,12 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
   }
 
   void onTapDown(TapDownDetails details) {
+    if (widget.tapInputMode) {
+      // Defer the complete click until the tap wins the gesture arena. A
+      // scroll, pinch or long press must not press a button in the remote app.
+      widget.onTapDown?.call(details);
+      return;
+    }
     // onTapDown is special, as it will always call the supplied callback.
     // The TerminalView depends on it to bring the terminal into focus.
     _tapDown(
@@ -214,6 +251,35 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
   }
 
   void onSingleTapUp(TapUpDetails details) {
+    if (widget.tapInputMode) {
+      if (!_tapInputArmed || _tapInputBlocked || _touchSelecting) return;
+      _tapInputArmed = false;
+      if (!widget.terminalController.shouldSendPointerInput(PointerInput.tap)) {
+        return;
+      }
+      final terminal = terminalView.widget.terminal;
+      final cell = renderTerminal.getCellOffset(details.localPosition);
+      // Selection coordinates include scrollback. Mouse reports address the
+      // live terminal screen; touching history must not click a live button.
+      final row = cell.y - terminal.buffer.scrollBack;
+      if (row < 0 || row >= terminal.viewHeight) return;
+      final position = CellOffset(cell.x, row);
+      final handled = terminal.mouseInput(
+        TerminalMouseButton.left,
+        TerminalMouseButtonState.down,
+        position,
+      );
+      if (handled) {
+        terminal.mouseInput(
+          TerminalMouseButton.left,
+          TerminalMouseButtonState.up,
+          position,
+        );
+      } else {
+        widget.onSingleTapUp?.call(details);
+      }
+      return;
+    }
     _tapUp(widget.onSingleTapUp, details, TerminalMouseButton.left);
   }
 
@@ -234,6 +300,7 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
   }
 
   void onDoubleTapDown(TapDownDetails details) {
+    if (widget.onDoubleTap?.call(details) == true) return;
     renderTerminal.selectWord(details.localPosition);
   }
 

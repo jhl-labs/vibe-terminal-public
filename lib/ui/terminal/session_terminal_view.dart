@@ -27,6 +27,9 @@ import 'gui/terminal_gui_view.dart';
 import 'terminal_native_ime.dart';
 import 'terminal_native_text_input.dart';
 import 'terminal_selection_overlay.dart';
+import 'terminal_touch_mode.dart';
+import 'terminal_physical_keys.dart';
+import '../../terminal/terminal_mapped_key.dart';
 
 /// 세션 하나의 터미널 화면. 줌(핀치/단축키)과 keep-alive를 담당한다.
 class SessionTerminalView extends ConsumerStatefulWidget {
@@ -74,6 +77,11 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   final _inputController = TextEditingController.fromValue(
     _emptyImeEditingValue,
   );
+  final _mappedInputActivity = ValueNotifier<int>(0);
+  late final _replyInputActivity = Listenable.merge([
+    _inputController,
+    _mappedInputActivity,
+  ]);
   final _editableTextKey = GlobalKey<EditableTextState>();
   // 더블클릭·롱프레스는 URL·파일 경로를 통째로 고른다.
   final _terminalController = TerminalController()
@@ -83,6 +91,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   late final _TerminalShortcutManager _terminalShortcutManager;
   bool get _guiEnabled =>
       ref.read(terminalGuiModesProvider).contains(widget.session.id);
+  bool get _touchControlEnabled =>
+      !_guiEnabled &&
+      ref.read(terminalTouchModesProvider).contains(widget.session.id);
 
   bool _clearingInput = false;
   // 조합(composing) 중이라 아직 서버로 보내지 않은 한글 꼬리.
@@ -387,12 +398,15 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     if (selection == null || render == null) return;
 
     final cell = render.cellSize;
-    // 고정 anchor = 드래그하지 않는 반대쪽 끝의 셀. 제스처 첫 업데이트에서만
-    // 캡처하고 이후엔 그대로 재사용한다. (셀 중심 픽셀을 셀로 되돌려 열 범위
-    // 클램프까지 기존 동작과 같게 맞춘다.)
+    // 고정 anchor는 반대쪽 끝에 포함된 글자다. end는 배타 경계이므로 시작
+    // 핸들을 움직일 때는 그 바로 앞 글자를 고정해야 끝이 한 칸 늘어나지 않는다.
+    // 제스처 첫 업데이트에서만 캡처하고 이후에는 그대로 재사용한다.
     _selectionDragAnchor ??= render.getCellOffset(
       render.getOffset(draggingBegin ? selection.end : selection.begin) +
-          Offset(cell.width / 2, cell.height / 2),
+          Offset(
+            draggingBegin ? -cell.width / 2 : cell.width / 2,
+            cell.height / 2,
+          ),
     );
     _draggingBeginHandle = draggingBegin;
     _lastSelectionDragGlobal = globalPos;
@@ -446,10 +460,15 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     final selection = _terminalController.selection;
     if (selection == null) return null;
     final render = _terminalViewKey.currentState?.renderTerminal;
-    if (render == null) return null;
+    final box = _terminalViewKey.currentContext?.findRenderObject();
+    if (render == null || box is! RenderBox) return null;
+    // The renderer sits inside TerminalView padding. Selection overlays fill
+    // the outer view, so convert its local cell coordinates before painting.
+    Offset viewOffset(CellOffset cell) =>
+        box.globalToLocal(render.localToGlobal(render.getOffset(cell)));
     return SelectionGeometry(
-      begin: render.getOffset(selection.begin),
-      end: render.getOffset(selection.end),
+      begin: viewOffset(selection.begin),
+      end: viewOffset(selection.end),
       cellSize: render.cellSize,
     );
   }
@@ -525,6 +544,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     _selectionGestureActive.dispose();
     _inputFocusNode.dispose();
     _inputController.dispose();
+    _mappedInputActivity.dispose();
     super.dispose();
   }
 
@@ -616,7 +636,11 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     );
   }
 
-  Future<bool> _pasteClipboardText(BuildContext context) async {
+  Future<bool> _pasteClipboardText(
+    BuildContext context, {
+    bool Function()? canPaste,
+  }) async {
+    if (canPaste?.call() == false) return false;
     // 클립보드에 이미지가 있으면 텍스트 대신 업로드 흐름으로 전환한다.
     ClipboardImage? image;
     try {
@@ -624,21 +648,23 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     } catch (_) {
       image = null;
     }
-    if (!mounted || !context.mounted) return false;
+    if (!mounted || !context.mounted || canPaste?.call() == false) return false;
     if (image != null) {
       await handleImagePaste(
         context: context,
         ref: ref,
         session: widget.session,
         image: image,
-        sendText: _sendImagePathToTerminal,
+        sendText: (text) {
+          if (canPaste?.call() != false) _sendImagePathToTerminal(text);
+        },
         showSnack: _showTerminalSnack,
       );
       return true;
     }
 
     final data = await Clipboard.getData(Clipboard.kTextPlain);
-    if (!mounted || !context.mounted) return false;
+    if (!mounted || !context.mounted || canPaste?.call() == false) return false;
     final text = data?.text;
     if (text == null || text.isEmpty) return false;
     final settings = widget.session.terminalPreferences.applyTo(
@@ -646,7 +672,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     );
     if (settings.confirmMultilinePaste && _isMultilineText(text)) {
       final confirmed = await _confirmMultilinePaste(context, text);
-      if (!confirmed) return false;
+      if (!confirmed || canPaste?.call() == false) return false;
     }
 
     _flushTextInputBuffer();
@@ -895,6 +921,76 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     }
   }
 
+  bool _handleConfiguredDoubleTap(TapDownDetails details) {
+    if (_touchControlEnabled) return true;
+    final binding = ref
+        .read(appSettingsProvider)
+        .inputBindings
+        .forTrigger(
+          details.kind == PointerDeviceKind.mouse
+              ? TerminalInputTrigger.mouseDoubleClick
+              : TerminalInputTrigger.touchDoubleTap,
+        );
+    if (binding.action == TerminalInputAction.defaultBehavior) return false;
+    _performInputBinding(binding);
+    return true;
+  }
+
+  bool get _mappedInputAllowed {
+    if (!mounted ||
+        _guiEnabled ||
+        !_isCurrentRoute ||
+        widget.session.status != SessionStatus.connected) {
+      return false;
+    }
+    final active = ref.read(activeSessionIdProvider);
+    return active == null || active == widget.session.id;
+  }
+
+  void _performInputBinding(TerminalInputBinding binding) {
+    if (!_mappedInputAllowed) return;
+    switch (binding.action) {
+      case TerminalInputAction.none || TerminalInputAction.defaultBehavior:
+        return;
+      case TerminalInputAction.copy:
+        unawaited(_copySelectionFromToolbar());
+        return;
+      case TerminalInputAction.paste:
+        _mappedInputActivity.value++;
+        unawaited(
+          _pasteClipboardText(context, canPaste: () => _mappedInputAllowed),
+        );
+        return;
+      case TerminalInputAction.keyboard:
+        if (_inputFocusNode.hasFocus) {
+          _inputFocusNode.unfocus();
+          unawaited(
+            SystemChannels.textInput.invokeMethod<void>('TextInput.hide'),
+          );
+        } else {
+          _requestFocus(explicitKeyboard: true);
+        }
+        return;
+      default:
+        final key = terminalMappedKey(binding.keyBinding ?? '');
+        if (key == null) return;
+        _mappedInputActivity.value++;
+        _cancelPendingHardwareTextInput();
+        if (key.key == TerminalKey.escape ||
+            (key.key == TerminalKey.keyC &&
+                key.activator.control &&
+                !key.activator.alt)) {
+          _releaseTextInputBuffer();
+        } else {
+          _flushTextInputBuffer();
+        }
+        _disableSelectionMode(clearSelection: true);
+        key.send(widget.session.engine.terminal);
+        _forgetSentPrefixAfterTerminalKey();
+        _scrollTerminalToBottomOnInput();
+    }
+  }
+
   void _handlePointerDown(PointerDownEvent event) {
     // 모바일 입력은 키보드 버튼으로 요청하고 마우스 클릭 포커스는 유지한다.
     if (widget.session.status == SessionStatus.connected &&
@@ -1079,6 +1175,13 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     widget.session.engine.terminal.keyInput(TerminalKey.enter);
     _releaseTextInputBuffer();
     _scrollTerminalToBottomOnInput();
+  }
+
+  void _prepareReplyOverlayInput() {
+    _flushTextInputBuffer();
+    _releaseTextInputBuffer();
+    _cancelPendingHardwareTextInput();
+    _inputFocusNode.unfocus();
   }
 
   void _handleCommittedTextInput() {
@@ -2398,9 +2501,38 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     };
   }
 
+  Widget _physicalInputScope(Widget child, AppSettings settings) =>
+      TerminalPhysicalKeyScope(
+        enabled:
+            widget.session.status == SessionStatus.connected &&
+            !ref.watch(terminalGuiModesProvider).contains(widget.session.id) &&
+            ref.watch(activeSessionIdProvider) == widget.session.id &&
+            ref.watch(appForegroundProvider),
+        focusNode: _inputFocusNode,
+        bindings: settings.inputBindings,
+        onBinding: _performInputBinding,
+        child: child,
+      );
+
   @override
   Widget build(BuildContext context) {
     super.build(context); // keep-alive 필수 호출
+    final touchControl = ref.watch(
+      terminalTouchModesProvider.select(
+        (ids) => ids.contains(widget.session.id),
+      ),
+    );
+    final guiMode = ref.watch(
+      terminalGuiModesProvider.select((ids) => ids.contains(widget.session.id)),
+    );
+    ref.listen(
+      terminalTouchModesProvider.select(
+        (ids) => ids.contains(widget.session.id),
+      ),
+      (_, enabled) {
+        if (enabled) _disableSelectionMode(clearSelection: true);
+      },
+    );
     // 보조 키바의 키보드 토글 등 외부에서 포커스를 요청하면, 활성 세션의
     // 터미널만 반응해 소프트키보드를 띄운다.
     ref.listen(keyboardFocusRequestProvider, (_, _) {
@@ -2512,7 +2644,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
           ),
         );
       case SessionStatus.disconnected:
-        return Column(
+        final disconnectedPane = Column(
           children: [
             paneHeader ??
                 _TerminalHeader(
@@ -2527,9 +2659,12 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
               _DirectSshFallbackNotice(onEditHost: widget.onEditHost),
             Expanded(
               child: TerminalGuiSurface(
+                terminalInputActivity: _replyInputActivity,
                 session: widget.session,
                 theme: settings.resolvedTerminalTheme,
                 fontSize: fontSize,
+                onReplyOverlayOpened: _prepareReplyOverlayInput,
+                onReplyOverlayClosed: _requestFocus,
                 terminal: Stack(
                   children: [
                     TerminalView(
@@ -2563,8 +2698,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
             ),
           ],
         );
+        return _physicalInputScope(disconnectedPane, settings);
       case SessionStatus.connected:
-        return Column(
+        final pane = Column(
           children: [
             paneHeader ??
                 _TerminalHeader(
@@ -2579,9 +2715,12 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
               _DirectSshFallbackNotice(onEditHost: widget.onEditHost),
             Expanded(
               child: TerminalGuiSurface(
+                terminalInputActivity: _replyInputActivity,
                 session: widget.session,
                 theme: settings.resolvedTerminalTheme,
                 fontSize: fontSize,
+                onReplyOverlayOpened: _prepareReplyOverlayInput,
+                onReplyOverlayClosed: _requestFocus,
                 terminal: CallbackShortcuts(
                   bindings: _terminalShortcutCallbacks(
                     settings: settings,
@@ -2610,7 +2749,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
                               key: _terminalViewKey,
                               controller: _terminalController,
                               scrollController: _terminalScrollController,
+                              onDoubleTap: _handleConfiguredDoubleTap,
                               readOnly: true,
+                              tapInputMode: touchControl && !guiMode,
                               hardwareKeyboardOnly: true,
                               resizeDebounce: context.isCompact
                                   ? const Duration(milliseconds: 150)
@@ -2708,6 +2849,13 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
                                           _selectionGestureActive.value
                                       ? const SizedBox.shrink()
                                       : SelectionToolbar(
+                                          aboveAnchorGap:
+                                              (56 - geo.cellSize.height).clamp(
+                                                8.0,
+                                                double.infinity,
+                                              ),
+                                          belowAnchorGap:
+                                              geo.cellSize.height + 32,
                                           anchor: Offset(
                                             (geo.begin.dx + geo.end.dx) / 2 +
                                                 geo.cellSize.width / 2,
@@ -2739,6 +2887,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
             ),
           ],
         );
+        return _physicalInputScope(pane, settings);
     }
   }
 }
@@ -3193,17 +3342,29 @@ class _TerminalHeader extends ConsumerWidget {
                 constraints: BoxConstraints(maxWidth: actionsMaxWidth),
                 child: _HeaderActions(
                   children: [
-                    if (!items.contains('retry'))
+                    if (!items.contains('retry')) ...[
+                      TerminalTouchModeButton(
+                        sessionId: session.id,
+                        enabled: session.status == SessionStatus.connected,
+                        iconSize: 18,
+                      ),
                       TerminalGuiModeButton(
                         sessionId: session.id,
                         iconSize: 18,
                       ),
+                    ],
                     for (final token in items) ...[
-                      if (token == 'retry')
+                      if (token == 'retry') ...[
+                        TerminalTouchModeButton(
+                          sessionId: session.id,
+                          enabled: session.status == SessionStatus.connected,
+                          iconSize: 18,
+                        ),
                         TerminalGuiModeButton(
                           sessionId: session.id,
                           iconSize: 18,
                         ),
+                      ],
                       ?headerItem(token),
                     ],
                   ],

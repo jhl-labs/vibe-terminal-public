@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
@@ -10,6 +12,8 @@ class SelectionToolbar extends StatelessWidget {
     required this.anchor,
     required this.onCopy,
     required this.onSelectAll,
+    this.belowAnchorGap = 56,
+    this.aboveAnchorGap = 32,
   });
 
   /// 선택 상단 중앙(로컬 px).
@@ -18,15 +22,16 @@ class SelectionToolbar extends StatelessWidget {
   final VoidCallback onSelectAll;
 
   static const double _height = 40;
-  static const double _belowAnchorGap = 24;
+  final double belowAnchorGap;
+  final double aboveAnchorGap;
 
   @override
   Widget build(BuildContext context) {
     // 선택 상단 위로 띄우되, 화면 최상단이면 아래로 내린다.
-    final showBelow = anchor.dy < _height + 8;
+    final showBelow = anchor.dy < _height + aboveAnchorGap;
     final top = showBelow
-        ? anchor.dy + _belowAnchorGap
-        : anchor.dy - _height - 8;
+        ? anchor.dy + belowAnchorGap
+        : anchor.dy - _height - aboveAnchorGap;
     return Positioned(
       key: const ValueKey('sel-toolbar'),
       left: (anchor.dx - 90).clamp(8.0, double.infinity),
@@ -116,53 +121,112 @@ class TerminalSelectionOverlay extends StatelessWidget {
   final bool showHandles;
 
   static const double _handleRadius = 8;
-  static const double _touchPadding = 14;
+  static const double _touchExtent = 48;
 
   @override
   Widget build(BuildContext context) {
     final geo = geometry;
     if (geo == null) return const SizedBox.shrink();
 
-    // 시작 핸들: 시작 셀 좌하단. 끝 핸들: 끝 셀 우하단.
-    final beginAnchor = Offset(
-      geo.begin.dx,
-      geo.begin.dy + geo.cellSize.height,
-    );
-    final endAnchor = Offset(
-      geo.end.dx + geo.cellSize.width,
-      geo.end.dy + geo.cellSize.height,
-    );
+    // Selection.end is exclusive: its offset is already the right boundary.
+    final beginAnchor = geo.begin + Offset(0, geo.cellSize.height);
+    final endAnchor = geo.end + Offset(0, geo.cellSize.height);
 
-    return Stack(
-      children: [
-        if (showHandles) ...[
-          _handle(
-            const ValueKey('sel-handle-begin'),
-            beginAnchor,
-            begin: true,
-            onDrag: onHandleDragBegin,
-          ),
-          _handle(
-            const ValueKey('sel-handle-end'),
-            endAnchor,
-            begin: false,
-            onDrag: onHandleDragEnd,
-          ),
-        ],
-        toolbar,
-      ],
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final size = constraints.biggest;
+        if (size.isEmpty) return const SizedBox.shrink();
+        // Keep full finger targets in ordinary panes; in a tiny pane choose the
+        // largest targets for which two can still fit on at least one axis.
+        final extent = math.min(
+          _touchExtent,
+          math.max(size.width, size.height) / 2,
+        );
+        final hitSize = Size(
+          math.min(extent, size.width),
+          math.min(extent, size.height),
+        );
+        Offset bounded(Offset point) => Offset(
+          point.dx.clamp(hitSize.width / 2, size.width - hitSize.width / 2),
+          point.dy.clamp(hitSize.height / 2, size.height - hitSize.height / 2),
+        );
+        bool visible(Offset anchor) =>
+            anchor.dy >= 0 && anchor.dy <= size.height;
+        var begin = visible(beginAnchor)
+            ? bounded(beginAnchor - const Offset(_handleRadius, 0))
+            : beginAnchor;
+        var end = visible(endAnchor)
+            ? bounded(endAnchor + const Offset(_handleRadius, 0))
+            : endAnchor;
+        if (showHandles &&
+            visible(beginAnchor) &&
+            visible(endAnchor) &&
+            (begin.dx - end.dx).abs() < hitSize.width &&
+            (begin.dy - end.dy).abs() < hitSize.height) {
+          if (size.width >= hitSize.width * 2) {
+            final middle = ((begin.dx + end.dx) / 2).clamp(
+              hitSize.width,
+              size.width - hitSize.width,
+            );
+            begin = Offset(middle - hitSize.width / 2, begin.dy);
+            end = Offset(middle + hitSize.width / 2, end.dy);
+          } else {
+            final middle = ((begin.dy + end.dy) / 2).clamp(
+              hitSize.height,
+              size.height - hitSize.height,
+            );
+            begin = Offset(begin.dx, middle - hitSize.height / 2);
+            end = Offset(end.dx, middle + hitSize.height / 2);
+          }
+        }
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            if (showHandles) ...[
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: CustomPaint(
+                    painter: _SelectionHandleLinks(
+                      beginAnchor,
+                      begin,
+                      endAnchor,
+                      end,
+                    ),
+                  ),
+                ),
+              ),
+              _handle(
+                const ValueKey('sel-handle-begin'),
+                begin,
+                hitSize,
+                begin: true,
+                onDrag: onHandleDragBegin,
+              ),
+              _handle(
+                const ValueKey('sel-handle-end'),
+                end,
+                hitSize,
+                begin: false,
+                onDrag: onHandleDragEnd,
+              ),
+            ],
+            toolbar,
+          ],
+        );
+      },
     );
   }
 
   Widget _handle(
     Key key,
-    Offset anchor, {
+    Offset anchor,
+    Size hitSize, {
     required bool begin,
     required ValueChanged<Offset> onDrag,
   }) {
     return Positioned(
-      left: anchor.dx - _handleRadius - _touchPadding,
-      top: anchor.dy - _handleRadius - _touchPadding,
+      left: anchor.dx - hitSize.width / 2,
+      top: anchor.dy - hitSize.height / 2,
       child: Listener(
         onPointerSignal: onPointerSignal,
         child: GestureDetector(
@@ -172,14 +236,16 @@ class TerminalSelectionOverlay extends StatelessWidget {
           onPanUpdate: (d) => onDrag(d.globalPosition),
           onPanEnd: (_) => onHandleDragStop?.call(),
           onPanCancel: () => onHandleDragStop?.call(),
-          child: Padding(
-            padding: const EdgeInsets.all(_touchPadding),
-            child: Container(
-              width: _handleRadius * 2,
-              height: _handleRadius * 2,
-              decoration: const BoxDecoration(
-                color: VibeColors.accent,
-                shape: BoxShape.circle,
+          child: SizedBox.fromSize(
+            size: hitSize,
+            child: Center(
+              child: Container(
+                width: math.min(_handleRadius * 2, hitSize.width),
+                height: math.min(_handleRadius * 2, hitSize.height),
+                decoration: const BoxDecoration(
+                  color: VibeColors.accent,
+                  shape: BoxShape.circle,
+                ),
               ),
             ),
           ),
@@ -187,4 +253,33 @@ class TerminalSelectionOverlay extends StatelessWidget {
       ),
     );
   }
+}
+
+class _SelectionHandleLinks extends CustomPainter {
+  const _SelectionHandleLinks(
+    this.beginAnchor,
+    this.begin,
+    this.endAnchor,
+    this.end,
+  );
+  final Offset beginAnchor;
+  final Offset begin;
+  final Offset endAnchor;
+  final Offset end;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = VibeColors.accent
+      ..strokeWidth = 1.5;
+    canvas.drawLine(beginAnchor, begin, paint);
+    canvas.drawLine(endAnchor, end, paint);
+  }
+
+  @override
+  bool shouldRepaint(_SelectionHandleLinks oldDelegate) =>
+      beginAnchor != oldDelegate.beginAnchor ||
+      begin != oldDelegate.begin ||
+      endAnchor != oldDelegate.endAnchor ||
+      end != oldDelegate.end;
 }

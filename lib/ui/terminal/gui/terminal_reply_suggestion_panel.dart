@@ -8,9 +8,13 @@ class TerminalReplySuggestionPanel extends StatelessWidget {
     super.key,
     required this.controller,
     required this.onSelected,
+    this.onClose,
+    this.showHeader = true,
   });
   final TerminalReplySuggestionController controller;
   final void Function(TerminalReplySuggestion) onSelected;
+  final VoidCallback? onClose;
+  final bool showHeader;
 
   @override
   Widget build(BuildContext context) => SingleChildScrollView(
@@ -20,18 +24,21 @@ class TerminalReplySuggestionPanel extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Row(
-          children: [
-            const Icon(Icons.auto_awesome_outlined, size: 16),
-            const SizedBox(width: 6),
-            Expanded(child: Text(controller.busy ? '답변 제안 생성 중…' : '자동 응답 제안')),
-            IconButton(
-              tooltip: '제안 닫기',
-              onPressed: controller.clear,
-              icon: const Icon(Icons.close, size: 16),
-            ),
-          ],
-        ),
+        if (showHeader)
+          Row(
+            children: [
+              const Icon(Icons.auto_awesome_outlined, size: 16),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(controller.busy ? '답변 제안 생성 중…' : '자동 응답 제안'),
+              ),
+              IconButton(
+                tooltip: '제안 닫기',
+                onPressed: onClose ?? controller.clear,
+                icon: const Icon(Icons.close, size: 16),
+              ),
+            ],
+          ),
         if (controller.busy) const LinearProgressIndicator(),
         if (controller.error case final error?) Text(error),
         for (final (index, suggestion) in controller.items.indexed)

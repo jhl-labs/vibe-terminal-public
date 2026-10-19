@@ -838,6 +838,10 @@ class AppSettingsController extends Notifier<AppSettings> {
     update(state.copyWith(terminalHeaderItems: List.unmodifiable(items)));
   }
 
+  void setTerminalInputBindings(TerminalInputBindings bindings) {
+    update(state.copyWith(inputBindings: bindings));
+  }
+
   void setShortcutBinding(String action, List<String> bindings) {
     final next = <String, List<String>>{
       ...state.shortcutBindings,
@@ -1141,6 +1145,12 @@ class AppSettingsController extends Notifier<AppSettings> {
 
   void setAiCustomPrompt(String prompt) {
     update(state.copyWith(ai: state.ai.copyWith(customPrompt: prompt)));
+  }
+
+  void setAiAutoReplySuggestions(bool enabled) {
+    update(
+      state.copyWith(ai: state.ai.copyWith(autoReplySuggestions: enabled)),
+    );
   }
 
   void setAiMaxContextLines(int lines) {

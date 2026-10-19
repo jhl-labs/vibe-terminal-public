@@ -8,6 +8,8 @@ import '../telemetry/telemetry.dart' show TelemetrySettings;
 export 'ai_provider_type.dart';
 
 import 'ai_provider_type.dart';
+import 'terminal_input_bindings.dart';
+export 'terminal_input_bindings.dart';
 
 enum TerminalThemePreset {
   vibeDark,
@@ -138,6 +140,7 @@ class AiSettings {
     required this.maxLogContextLines,
     required this.chatFontFamily,
     required this.chatFontSize,
+    this.autoReplySuggestions = false,
   });
 
   static const apiTokenSecretRef = 'vibe_terminal.ai.api_token';
@@ -162,6 +165,7 @@ class AiSettings {
   final String httpsProxy;
   final String customPrompt;
   final int maxContextLines;
+  final bool autoReplySuggestions;
 
   /// AI Chat이 세션 로그를 붙일 때 로그 끝에서 읽는 최대 줄 수.
   final int maxLogContextLines;
@@ -204,6 +208,7 @@ class AiSettings {
     String? httpProxy,
     String? httpsProxy,
     String? customPrompt,
+    bool? autoReplySuggestions,
     int? maxContextLines,
     int? maxLogContextLines,
     String? chatFontFamily,
@@ -219,6 +224,7 @@ class AiSettings {
       httpProxy: httpProxy ?? this.httpProxy,
       httpsProxy: httpsProxy ?? this.httpsProxy,
       customPrompt: customPrompt ?? this.customPrompt,
+      autoReplySuggestions: autoReplySuggestions ?? this.autoReplySuggestions,
       maxContextLines: (maxContextLines ?? this.maxContextLines)
           .clamp(minContextLines, maxContextLineLimit)
           .toInt(),
@@ -246,6 +252,7 @@ class AiSettings {
     'httpProxy': httpProxy,
     'httpsProxy': httpsProxy,
     'customPrompt': customPrompt,
+    'autoReplySuggestions': autoReplySuggestions,
     'maxContextLines': maxContextLines,
     'maxLogContextLines': maxLogContextLines,
     'chatFontFamily': chatFontFamily,
@@ -277,6 +284,7 @@ class AiSettings {
           httpProxy: json['httpProxy'] as String?,
           httpsProxy: json['httpsProxy'] as String?,
           customPrompt: json['customPrompt'] as String?,
+          autoReplySuggestions: json['autoReplySuggestions'] as bool?,
           maxContextLines: (json['maxContextLines'] as num?)?.round(),
           maxLogContextLines: (json['maxLogContextLines'] as num?)?.round(),
           chatFontFamily: json['chatFontFamily'] as String?,
@@ -1113,6 +1121,7 @@ class AppSettings {
     required this.pinnedCustomAppIds,
     required this.customAppInputAcknowledgedIds,
     this.telemetry = const TelemetrySettings(),
+    this.inputBindings = const TerminalInputBindings(),
   });
 
   final TerminalThemePreset terminalTheme;
@@ -1130,6 +1139,7 @@ class AppSettings {
   final bool rightClickPaste;
   final bool confirmMultilinePaste;
   final CtrlCBehavior ctrlCBehavior;
+  final TerminalInputBindings inputBindings;
 
   /// 하단 보조키바 표시 항목(순서대로). 키보드 토글은 첫칸 고정이라 제외된다.
   final List<String> extraKeysBarItems;
@@ -1251,6 +1261,7 @@ class AppSettings {
     bool? rightClickPaste,
     bool? confirmMultilinePaste,
     CtrlCBehavior? ctrlCBehavior,
+    TerminalInputBindings? inputBindings,
     List<String>? extraKeysBarItems,
     List<String>? terminalHeaderItems,
     Map<String, List<String>>? shortcutBindings,
@@ -1287,6 +1298,7 @@ class AppSettings {
     rightClickPaste: rightClickPaste ?? this.rightClickPaste,
     confirmMultilinePaste: confirmMultilinePaste ?? this.confirmMultilinePaste,
     ctrlCBehavior: ctrlCBehavior ?? this.ctrlCBehavior,
+    inputBindings: inputBindings ?? this.inputBindings,
     extraKeysBarItems: extraKeysBarItems ?? this.extraKeysBarItems,
     terminalHeaderItems: terminalHeaderItems ?? this.terminalHeaderItems,
     shortcutBindings: shortcutBindings ?? this.shortcutBindings,
@@ -1322,6 +1334,7 @@ class AppSettings {
     'rightClickPaste': rightClickPaste,
     'confirmMultilinePaste': confirmMultilinePaste,
     'ctrlCBehavior': ctrlCBehavior.name,
+    'inputBindings': inputBindings.toJson(),
     'extraKeysBarItems': extraKeysBarItems,
     'terminalHeaderItems': terminalHeaderItems,
     'shortcutBindings': shortcutBindings,
@@ -1422,6 +1435,7 @@ class AppSettings {
         json['ctrlCBehavior'] as String?,
         defaults.ctrlCBehavior,
       ),
+      inputBindings: TerminalInputBindings.fromJson(json['inputBindings']),
       extraKeysBarItems: stringList(json['extraKeysBarItems']),
       terminalHeaderItems: terminalHeaderItems,
       shortcutBindings: {

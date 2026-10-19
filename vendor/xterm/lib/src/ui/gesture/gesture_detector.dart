@@ -24,9 +24,12 @@ class TerminalGestureDetector extends StatefulWidget {
     this.onDragCancel,
     this.onDoubleTapDown,
     this.onTripleTapDown,
+    this.detectMultiTap = true,
   });
 
   final Widget? child;
+
+  final bool detectMultiTap;
 
   final GestureTapUpCallback? onTapUp;
 
@@ -80,10 +83,26 @@ class _TerminalGestureDetectorState extends State<TerminalGestureDetector> {
   // Taps in the current quick sequence (Vibe Terminal patch: triple tap).
   int _tapCount = 0;
 
+  @override
+  void didUpdateWidget(TerminalGestureDetector oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.detectMultiTap != widget.detectMultiTap) {
+      _doubleTapTimeout();
+      _isDoubleTap = false;
+    }
+  }
+
+  @override
+  void dispose() {
+    _doubleTapTimer?.cancel();
+    super.dispose();
+  }
+
   // The down handler is force-run on success of a single tap and optimistically
   // run before a long press success.
   void _handleTapDown(TapDownDetails details) {
     widget.onTapDown?.call(details);
+    if (!widget.detectMultiTap) return;
 
     if (_doubleTapTimer != null &&
         _isWithinDoubleTapTolerance(details.globalPosition)) {
@@ -104,6 +123,10 @@ class _TerminalGestureDetectorState extends State<TerminalGestureDetector> {
   }
 
   void _handleTapUp(TapUpDetails details) {
+    if (!widget.detectMultiTap) {
+      widget.onSingleTapUp?.call(details);
+      return;
+    }
     if (!_isDoubleTap) {
       widget.onSingleTapUp?.call(details);
       _tapCount = 1;

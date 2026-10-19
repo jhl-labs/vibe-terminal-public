@@ -16,6 +16,7 @@ import '../../../terminal/gui/terminal_gui_controller.dart';
 import '../../../terminal/gui/terminal_gui_document.dart';
 import '../../../terminal/gui/terminal_interaction_controller.dart';
 import '../../../terminal/gui/terminal_interaction.dart';
+import '../../../terminal/gui/terminal_auto_reply.dart';
 import '../../../terminal/gui/terminal_reply_suggestion_controller.dart';
 import '../../shell/ai_data_consent.dart';
 import 'terminal_interaction_card.dart';
@@ -23,6 +24,7 @@ import 'terminal_gui_mode.dart';
 import '../terminal_native_text_input.dart';
 import 'terminal_gui_links.dart';
 import 'terminal_reply_suggestion_panel.dart';
+import 'terminal_reply_overlay.dart';
 
 class TerminalGuiSurface extends ConsumerStatefulWidget {
   const TerminalGuiSurface({
@@ -31,11 +33,17 @@ class TerminalGuiSurface extends ConsumerStatefulWidget {
     required this.theme,
     required this.fontSize,
     required this.terminal,
+    this.terminalInputActivity,
+    this.onReplyOverlayOpened,
+    this.onReplyOverlayClosed,
   });
   final SessionInfo session;
   final TerminalTheme theme;
   final double fontSize;
   final Widget terminal;
+  final Listenable? terminalInputActivity;
+  final VoidCallback? onReplyOverlayOpened;
+  final VoidCallback? onReplyOverlayClosed;
 
   @override
   ConsumerState<TerminalGuiSurface> createState() => _TerminalGuiSurfaceState();
@@ -43,6 +51,7 @@ class TerminalGuiSurface extends ConsumerStatefulWidget {
 
 class _TerminalGuiSurfaceState extends ConsumerState<TerminalGuiSurface> {
   var _visited = false;
+  final _autoReplyHistory = TerminalAutoReplyHistory();
 
   @override
   Widget build(BuildContext context) {
@@ -55,7 +64,23 @@ class _TerminalGuiSurfaceState extends ConsumerState<TerminalGuiSurface> {
       children: [
         Offstage(
           offstage: enabled,
-          child: ExcludeFocus(excluding: enabled, child: widget.terminal),
+          child: ExcludeFocus(
+            excluding: enabled,
+            child: TerminalReplyOverlay(
+              terminal: widget.session.engine.terminal,
+              connected: widget.session.status == SessionStatus.connected,
+              active: !enabled,
+              agentTitle: () => widget.session.engine.title ?? '',
+              aiSettings: ref.watch(appSettingsProvider.select((s) => s.ai)),
+              aiService: ref.watch(aiChatServiceProvider),
+              aiConsentStore: ref.watch(aiConsentStoreProvider),
+              inputActivity: widget.terminalInputActivity,
+              autoReplyHistory: _autoReplyHistory,
+              onOpened: widget.onReplyOverlayOpened,
+              onClosed: widget.onReplyOverlayClosed,
+              child: widget.terminal,
+            ),
+          ),
         ),
         if (_visited)
           Offstage(
@@ -65,6 +90,7 @@ class _TerminalGuiSurfaceState extends ConsumerState<TerminalGuiSurface> {
               child: TickerMode(
                 enabled: enabled,
                 child: TerminalGuiView(
+                  autoReplyHistory: _autoReplyHistory,
                   active: enabled,
                   terminal: widget.session.engine.terminal,
                   connected: widget.session.status == SessionStatus.connected,
@@ -97,6 +123,7 @@ class TerminalGuiView extends StatefulWidget {
     this.aiSettings,
     this.aiService,
     this.aiConsentStore,
+    this.autoReplyHistory,
   });
 
   final Terminal terminal;
@@ -108,6 +135,7 @@ class TerminalGuiView extends StatefulWidget {
   final AiSettings? aiSettings;
   final AiChatService? aiService;
   final AiConsentStore? aiConsentStore;
+  final TerminalAutoReplyHistory? autoReplyHistory;
 
   @override
   State<TerminalGuiView> createState() => _TerminalGuiViewState();
@@ -119,6 +147,8 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
   late TerminalInteractionController _interaction;
   late TerminalReplySuggestionController _suggestions;
   late AiDataConsent _aiConsent;
+  late TerminalAutoReply _automatic;
+  late AiConsentStore _consentStore;
   late List<TerminalGuiBlock> _blocks;
   TerminalGuiDocument? _projected;
   final _scroll = ScrollController();
@@ -143,7 +173,8 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
     _attach();
     _input.addListener(_draftChanged);
     _replyInput.addListener(_draftChanged);
-    _aiConsent = AiDataConsent(store: widget.aiConsentStore);
+    _consentStore = widget.aiConsentStore ?? AiConsentStore();
+    _aiConsent = AiDataConsent(store: _consentStore);
     _inputFocus.onKeyEvent = _handleInputKey;
     _scroll.addListener(_scrolled);
     _scrollToLatest();
@@ -171,6 +202,31 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
           ? _replyInput.text
           : _input.text,
     )..addListener(_suggestionsChanged);
+    _automatic = TerminalAutoReply(
+      widget.terminal,
+      history: widget.autoReplyHistory,
+      title: () => widget.agentTitle?.call() ?? '',
+      canSuggest: () =>
+          !_suggestions.hasContent &&
+          _input.text.isEmpty &&
+          _replyInput.text.isEmpty &&
+          !_composing,
+      onReady: (current) async {
+        final settings = widget.aiSettings;
+        if (settings == null ||
+            !await _consentStore.isApproved(
+              AiConsentStore.destinationKey(settings),
+            ) ||
+            !current()) {
+          return;
+        }
+        await _suggestions.request(
+          (settings) =>
+              _consentStore.isApproved(AiConsentStore.destinationKey(settings)),
+          isCurrent: current,
+        );
+      },
+    );
     _configureSuggestions();
   }
 
@@ -178,17 +234,35 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
     if (mounted) setState(() {});
   }
 
-  void _draftChanged() => _suggestions.checkCurrent();
+  void _draftChanged() {
+    _automatic.userInput();
+    _suggestions.checkCurrent();
+  }
 
-  void _configureSuggestions() => _suggestions.configure(
-    widget.aiSettings,
-    widget.aiService,
-    enabled: _visible && _appActive && widget.active && widget.connected,
-  );
+  void _dismissSuggestions() {
+    _automatic.dismiss();
+    _suggestions.clear();
+  }
+
+  void _configureSuggestions() {
+    _suggestions.configure(
+      widget.aiSettings,
+      widget.aiService,
+      enabled: _visible && _appActive && widget.active && widget.connected,
+    );
+    _automatic.setEnabled(
+      _visible &&
+          _appActive &&
+          widget.active &&
+          widget.connected &&
+          _suggestions.configured &&
+          widget.aiSettings?.autoReplySuggestions == true,
+    );
+  }
 
   Future<void> _requestSuggestions() async {
     if (_suggestions.busy) {
-      _suggestions.clear();
+      _dismissSuggestions();
       return;
     }
     await _suggestions.request(
@@ -197,64 +271,44 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
   }
 
   Future<void> _applySuggestion(TerminalReplySuggestion suggestion) async {
-    if (_composing ||
-        (_replyInput.value.composing.isValid &&
-            !_replyInput.value.composing.isCollapsed)) {
-      return;
-    }
-    final snapshot = _suggestions.take(suggestion);
-    if (snapshot == null) return;
-    _interaction.refresh();
-    var prompt = _interaction.prompt;
-    if (suggestion.optionNumber != null && prompt != null) {
-      final index = prompt.options.indexWhere(
-        (o) => o.number == suggestion.optionNumber,
-      );
-      if (index < 0) return;
-      final custom = prompt.options[index].custom;
-      final identity = prompt.identity;
-      if (!await _interaction.choose(prompt, index, submit: !custom) ||
-          !mounted ||
-          !custom) {
-        return;
-      }
-      prompt = _interaction.prompt;
-      if (prompt == null || prompt.identity != identity) return;
-      if (!prompt.editing && prompt.canAddNotes) {
-        if (!await _interaction.key(prompt, TerminalKey.tab) || !mounted) {
-          return;
-        }
-        prompt = _interaction.prompt;
-        if (prompt == null || prompt.identity != identity) return;
-      }
-    }
-    if (!mounted) return;
-    if (snapshot.prompt != null &&
-        prompt?.identity != snapshot.prompt!.identity) {
-      return;
-    }
-    if (prompt != null && prompt.editing) {
-      _replyInput.text = suggestion.text;
-      if (await _interaction.sendText(prompt, suggestion.text) && mounted) {
-        _replyInput.clear();
-      }
-    } else if (prompt == null) {
-      _input.text = suggestion.text;
-      _send();
-    }
+    bool canSend() =>
+        mounted &&
+        widget.active &&
+        widget.connected &&
+        _visible &&
+        _appActive &&
+        !_composing &&
+        !(_replyInput.value.composing.isValid &&
+            !_replyInput.value.composing.isCollapsed);
+    await _suggestions.apply(
+      suggestion,
+      canSend: canSend,
+      sendConversation: (text) {
+        _input.text = text;
+        _send();
+      },
+      sendEditing: (prompt, text) async {
+        _replyInput.text = text;
+        final sent = await _interaction.sendText(prompt, text);
+        if (sent && mounted) _replyInput.clear();
+        return sent;
+      },
+    );
   }
 
   @override
   void didUpdateWidget(covariant TerminalGuiView oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.terminal != widget.terminal) {
+      _automatic.dispose();
       _suggestions.dispose();
       _document.dispose();
       _interaction.dispose();
       _attach();
     }
     if (oldWidget.aiConsentStore != widget.aiConsentStore) {
-      _aiConsent = AiDataConsent(store: widget.aiConsentStore);
+      _consentStore = widget.aiConsentStore ?? AiConsentStore();
+      _aiConsent = AiDataConsent(store: _consentStore);
     }
     _configureSuggestions();
     _interaction.setEnabled(
@@ -405,10 +459,17 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
   KeyEventResult _handleInputKey(FocusNode node, KeyEvent event) {
     if ((event.logicalKey != LogicalKeyboardKey.enter &&
             event.logicalKey != LogicalKeyboardKey.numpadEnter) ||
-        HardwareKeyboard.instance.isAltPressed ||
-        _composing) {
-      // Let the platform IME consume Enter while confirming a composition.
+        HardwareKeyboard.instance.isAltPressed) {
+      // Keep unrelated keys and Alt combinations on the normal editor path.
       return KeyEventResult.ignored;
+    }
+    if (_composing) {
+      // Consume the confirming hardware Enter, so Android cannot redispatch
+      // that same key as an editor Send action. Keep all visible text local.
+      if (event is KeyDownEvent) _input.clearComposing();
+      return event is KeyUpEvent
+          ? KeyEventResult.ignored
+          : KeyEventResult.handled;
     }
     if (event is KeyRepeatEvent) return KeyEventResult.handled;
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
@@ -429,7 +490,7 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
     return KeyEventResult.handled;
   }
 
-  void _send() {
+  void _send({bool commitComposition = false}) {
     _interaction.refresh();
     final value = _input.value;
     if (!widget.active ||
@@ -438,9 +499,10 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
         !widget.connected ||
         _interaction.prompt != null ||
         value.text.trim().isEmpty ||
-        _composing) {
+        (_composing && !commitComposition)) {
       return;
     }
+    if (commitComposition && _composing) _input.clearComposing();
     widget.terminal.paste(value.text);
     widget.terminal.keyInput(TerminalKey.enter);
     _input.clear();
@@ -452,6 +514,7 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _document.dispose();
+    _automatic.dispose();
     _suggestions.dispose();
     _interaction.dispose();
     _scroll.dispose();
@@ -594,6 +657,7 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
                       Flexible(
                         child: TerminalReplySuggestionPanel(
                           controller: _suggestions,
+                          onClose: _dismissSuggestions,
                           onSelected: (suggestion) =>
                               unawaited(_applySuggestion(suggestion)),
                         ),
@@ -624,12 +688,12 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
                             widget.connected && _interaction.prompt == null,
                         minLines: 1,
                         maxLines: 4,
-                        keyboardType: TextInputType.multiline,
+                        keyboardType: TextInputType.text,
                         textInputAction: TextInputAction.send,
-                        // Keep the IME and its composing range intact until _send
-                        // checks it; Flutter's default completion clears both.
+                        // Explicit Send commits the visible preedit, while a
+                        // hardware Enter confirming Hangul stays local.
                         onEditingComplete: () {},
-                        onSubmitted: (_) => _send(),
+                        onSubmitted: (_) => _send(commitComposition: true),
                         contextMenuBuilder: (context, state) =>
                             terminalGuiSelectionToolbar(
                               context,
@@ -686,10 +750,8 @@ class _TerminalGuiViewState extends State<TerminalGuiView>
                       onPressed:
                           widget.connected &&
                               _interaction.prompt == null &&
-                              value.text.trim().isNotEmpty &&
-                              (!value.composing.isValid ||
-                                  value.composing.isCollapsed)
-                          ? _send
+                              value.text.trim().isNotEmpty
+                          ? () => _send(commitComposition: true)
                           : null,
                       icon: const Icon(
                         Icons.send_outlined,

@@ -47,7 +47,7 @@ class TerminalReplySuggestionService {
     };
     final result = await chat.complete(
       settings: settings,
-      sessionLabel: 'GUI reply suggestions',
+      sessionLabel: 'Terminal reply suggestions',
       terminalContext: '',
       messages: [
         AiChatMessage(

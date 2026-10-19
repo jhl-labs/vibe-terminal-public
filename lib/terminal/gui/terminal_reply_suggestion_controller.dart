@@ -43,12 +43,14 @@ class TerminalReplySuggestionController extends ChangeNotifier {
   AiCancelToken? _cancel;
   Timer? _timer;
   int _generation = 0;
+  bool _submitting = false;
   TerminalReplySuggestionSnapshot? _snapshot;
   bool get hasContent => busy || error != null || items.isNotEmpty;
   bool get configured => _settings?.isConfigured == true && _service != null;
   bool get canRequest =>
       _enabled &&
       configured &&
+      !_submitting &&
       !interaction.busy &&
       interaction.captureCurrent()?.kind != TerminalInteractionKind.collapsed;
 
@@ -99,7 +101,10 @@ class TerminalReplySuggestionController extends ChangeNotifier {
     });
   }
 
-  Future<void> request(Future<bool> Function(AiSettings) consent) async {
+  Future<void> request(
+    Future<bool> Function(AiSettings) consent, {
+    bool Function()? isCurrent,
+  }) async {
     if (!canRequest || busy) return;
     clear();
     final generation = _generation;
@@ -110,7 +115,7 @@ class TerminalReplySuggestionController extends ChangeNotifier {
     bool valid() => !_disposed && _enabled && generation == _generation;
     try {
       if (!await consent(settings) || !valid()) return;
-      if (!canRequest) return;
+      if (!canRequest || isCurrent?.call() == false) return;
       final snapshot = _capture();
       _snapshot = snapshot;
       final token = _cancel = AiCancelToken();
@@ -123,7 +128,11 @@ class TerminalReplySuggestionController extends ChangeNotifier {
           cancelToken: token,
         ),
       );
-      if (valid() && snapshot.key == _currentKey()) items = result;
+      if (valid() &&
+          isCurrent?.call() != false &&
+          snapshot.key == _currentKey()) {
+        items = result;
+      }
     } on AiChatCancelledException {
       // Explicit cancellation and stale generations leave no failure message.
     } catch (e) {
@@ -150,6 +159,68 @@ class TerminalReplySuggestionController extends ChangeNotifier {
     final snapshot = _snapshot;
     clear();
     return snapshot;
+  }
+
+  /// Both terminal presentations share the same stale-reply and CLI guards.
+  Future<bool> apply(
+    TerminalReplySuggestion suggestion, {
+    required bool Function() canSend,
+    required void Function(String) sendConversation,
+    Future<bool> Function(TerminalInteraction, String)? sendEditing,
+  }) async {
+    if (_submitting || !canSend()) return false;
+    final snapshot = take(suggestion);
+    if (snapshot == null) return false;
+    final generation = _generation;
+    bool valid() =>
+        !_disposed && _enabled && generation == _generation && canSend();
+    _submitting = true;
+    notifyListeners();
+    try {
+      interaction.refresh();
+      var prompt = interaction.prompt;
+      if (suggestion.optionNumber != null && prompt != null) {
+        final index = prompt.options.indexWhere(
+          (o) => o.number == suggestion.optionNumber,
+        );
+        if (index < 0) return false;
+        final custom = prompt.options[index].custom;
+        final identity = prompt.identity;
+        if (!await interaction.choose(prompt, index, submit: !custom) ||
+            !valid()) {
+          return false;
+        }
+        if (!custom) return true;
+        prompt = interaction.prompt;
+        if (prompt == null || prompt.identity != identity) return false;
+        if (!prompt.editing && prompt.canAddNotes) {
+          if (!await interaction.key(prompt, TerminalKey.tab) || !valid()) {
+            return false;
+          }
+          prompt = interaction.prompt;
+          if (prompt == null || prompt.identity != identity) return false;
+        }
+      }
+      if (!valid() ||
+          (snapshot.prompt != null &&
+              prompt?.identity != snapshot.prompt!.identity)) {
+        return false;
+      }
+      if (prompt != null && prompt.editing) {
+        return await (sendEditing ?? interaction.sendText)(
+          prompt,
+          suggestion.text,
+        );
+      }
+      if (prompt == null) {
+        sendConversation(suggestion.text);
+        return true;
+      }
+      return false;
+    } finally {
+      _submitting = false;
+      if (!_disposed) notifyListeners();
+    }
   }
 
   void clear() {

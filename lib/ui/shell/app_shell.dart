@@ -50,6 +50,7 @@ import '../terminal/action_bar_catalog.dart';
 import '../terminal/extra_keys_bar.dart';
 import '../terminal/session_terminal_view.dart';
 import '../terminal/gui/terminal_gui_mode.dart';
+import '../terminal/terminal_touch_mode.dart';
 import 'agent_source_control_dialog.dart';
 import 'agent_worktrees_dialog.dart';
 import 'agent_integration_dialog.dart';
@@ -1484,7 +1485,7 @@ class _AppShellState extends ConsumerState<AppShell> {
     // 수 있다. 같은 포인터 흐름을 guard로 관찰해 세로 의도나 멀티터치가 확인된
     // 제스처에서는 세션 전환만 차단한다.
     Widget centerBody = _center(context, ref);
-    if (compact &&
+    if ((compact || usesSoftKeyboard) &&
         visibleSessions.length > 1 &&
         (ref.watch(sessionPaneLayoutsProvider)[activeGroupId]?.count ?? 1) ==
             1) {
@@ -1495,6 +1496,11 @@ class _AppShellState extends ConsumerState<AppShell> {
         onPointerCancel: _mobileSessionSwipeGuard.onPointerEnd,
         child: GestureDetector(
           behavior: HitTestBehavior.translucent,
+          supportedDevices: const {
+            PointerDeviceKind.touch,
+            PointerDeviceKind.stylus,
+            PointerDeviceKind.invertedStylus,
+          },
           onHorizontalDragEnd: (details) {
             if (archiveOpen || guiOpen) return;
             if (_mobileSessionSwipeGuard.takeShouldBlock()) return;
@@ -1608,8 +1614,13 @@ class _AppShellState extends ConsumerState<AppShell> {
       }
 
       final compactToolActions = <Widget>[
-        if (!archiveOpen && active != null)
+        if (!archiveOpen && active != null) ...[
+          TerminalTouchModeButton(
+            sessionId: active.id,
+            enabled: active.status == SessionStatus.connected,
+          ),
           TerminalGuiModeButton(sessionId: active.id),
+        ],
         // 세션 동작: 헤더 동작 토큰 + 알림 음소거 + 세션 닫기.
         Builder(
           builder: (scaffoldContext) => PopupMenuButton<String>(

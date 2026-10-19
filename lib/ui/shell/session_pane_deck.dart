@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../../session/session.dart';
 import '../terminal/action_bar_catalog.dart';
 import '../terminal/gui/terminal_gui_mode.dart';
+import '../terminal/terminal_touch_mode.dart';
 import '../adaptive/breakpoints.dart';
 import '../../session/session_pane_layout.dart';
 import 'panes/pane_activity_frame.dart';
@@ -501,11 +502,17 @@ class SessionPaneDeckState extends State<SessionPaneDeck> {
                     ? name
                     : _sessionDraggable(session, title, name),
               ),
-              if (session != null && actions.containsKey('terminalGui'))
+              if (session != null && actions.containsKey('terminalGui')) ...[
+                TerminalTouchModeButton(
+                  sessionId: session.id,
+                  enabled: session.status == SessionStatus.connected,
+                  onActivate: () => _focus(pane.id),
+                ),
                 TerminalGuiModeButton(
                   sessionId: session.id,
                   onActivate: () => _focus(pane.id),
                 ),
+              ],
               for (final token in _kHeaderIconActions)
                 if (actions[token] case final callback?)
                   if (resolveHeaderToken(token) case final def?)

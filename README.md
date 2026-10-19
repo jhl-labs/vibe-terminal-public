@@ -12,6 +12,10 @@ A fast, cross-platform SSH terminal app for Linux, Windows, and macOS.
 - **Local terminal** — open a local shell alongside SSH sessions; the bundled helper keeps local sessions available across app restarts.
 - **Snippets panel** — save and reuse frequently used commands.
 - **AI Chat panel** — a side panel for AI-assisted chat while you work.
+- **GUI document mode** — read terminal output as selectable text, copy code blocks, open web links, and write messages in a separate composer.
+- **AI reply suggestions** — use your configured AI connection to request reply choices or suggest them when a supported agent is waiting. A reply is sent only when you select it.
+- **Touch control** — optionally send taps and clicks to terminal programs that support mouse input; keep scrolling and long-press text selection available.
+- **Gesture shortcuts** — customize double-tap and double-click actions, including Tab and key combinations, without changing the default selection behavior until configured.
 - **Memo panel** — quick notes next to your terminal sessions.
 - **Community panel** — discover and share resources with other users.
 - **CLI tool integration** — automatically surfaces settings for Claude Code, Codex, and OpenCode when they're installed on your system.

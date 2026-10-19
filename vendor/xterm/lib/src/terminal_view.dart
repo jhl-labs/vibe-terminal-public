@@ -37,6 +37,7 @@ class TerminalView extends StatefulWidget {
     this.focusNode,
     this.autofocus = false,
     this.onTapUp,
+    this.onDoubleTap,
     this.onSecondaryTapDown,
     this.onSecondaryTapUp,
     this.mouseCursor = SystemMouseCursors.text,
@@ -49,12 +50,16 @@ class TerminalView extends StatefulWidget {
     this.onKeyEvent,
     this.onTouchSelectionChanged,
     this.readOnly = false,
+    this.tapInputMode = false,
     this.hardwareKeyboardOnly = false,
     this.simulateScroll = true,
   });
 
   /// The underlying terminal that this widget renders.
   final Terminal terminal;
+
+  /// Return true to replace word selection for a double tap/click.
+  final bool Function(TapDownDetails)? onDoubleTap;
 
   final TerminalController? controller;
 
@@ -140,6 +145,12 @@ class TerminalView extends StatefulWidget {
 
   /// True if no input should send to the terminal.
   final bool readOnly;
+
+  /// Vibe Terminal patch: opt in to sending completed primary taps as mouse
+  /// clicks, including when keyboard input is managed outside this read-only
+  /// view. Does not enable keyboard input. Swipes and long presses stay local;
+  /// repeated taps send separate clicks instead of selecting words/lines.
+  final bool tapInputMode;
 
   /// True if only hardware keyboard events should be used as input. This will
   /// also prevent any on-screen keyboard to be shown.
@@ -362,12 +373,14 @@ class TerminalViewState extends State<TerminalView> {
         widget.onTouchSelectionChanged?.call(selecting);
       },
       onTapUp: _onTapUp,
+      onDoubleTap: widget.onDoubleTap,
       onTapDown: _onTapDown,
       onSecondaryTapDown:
           widget.onSecondaryTapDown != null ? _onSecondaryTapDown : null,
       onSecondaryTapUp:
           widget.onSecondaryTapUp != null ? _onSecondaryTapUp : null,
       readOnly: widget.readOnly,
+      tapInputMode: widget.tapInputMode,
       child: child,
     );
 

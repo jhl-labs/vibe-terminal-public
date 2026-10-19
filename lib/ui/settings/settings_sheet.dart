@@ -22,6 +22,7 @@ import 'action_bar_editor_page.dart';
 import 'diagnostics_log_page.dart';
 import 'terminal_preferences_editor.dart';
 import 'terminal_font_dropdown.dart';
+import 'terminal_input_settings.dart';
 
 part 'github_sync_settings_tab.dart';
 
@@ -463,6 +464,8 @@ class _ShortcutSettingsTab extends ConsumerWidget {
     final controller = ref.read(appSettingsProvider.notifier);
     return _SettingsTabScroll(
       children: [
+        const TerminalInputSettings(),
+        const SizedBox(height: 24),
         _SettingsSection(
           title: '키보드',
           description: '터미널 입력과 앱 전역 동작에 사용할 키를 사용자가 선택합니다.',
@@ -1020,6 +1023,18 @@ class _AiSettingsTabState extends ConsumerState<_AiSettingsTab> {
           description:
               '화면 컨텍스트, \'로그 포함\'이나 모델 요청으로 붙는 세션 로그 범위, 시스템 프롬프트를 조정합니다.',
           children: [
+            SwitchListTile.adaptive(
+              key: const ValueKey('ai-auto-reply-suggestions'),
+              contentPadding: EdgeInsets.zero,
+              title: const Text('자동 응답 제안'),
+              subtitle: const Text(
+                'Agent의 입력 대기를 감지해 최근 터미널 문맥으로 답변 후보를 만듭니다. '
+                '후보를 눌렀을 때만 전송합니다. AI 데이터 전송에 먼저 동의해야 하며 API 이용 요금이 발생할 수 있습니다.',
+              ),
+              value: ai.autoReplySuggestions,
+              onChanged: controller.setAiAutoReplySuggestions,
+            ),
+
             _SliderSetting(
               label: '터미널 컨텍스트',
               value: ai.maxContextLines.toDouble(),
