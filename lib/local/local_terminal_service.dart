@@ -669,7 +669,7 @@ class LocalLineSessionHandle implements TerminalSessionHandle {
     } else if (_shell == LocalShellType.powershell) {
       literal = "'${completed.replaceAll("'", "''")}'";
     } else if (_shell == LocalShellType.cmd &&
-        !RegExp(r'[%!^"&|<>]').hasMatch(completed)) {
+        !_expandsInCmdQuotes(completed)) {
       literal = '"$completed"';
     } else {
       return null;
@@ -680,6 +680,11 @@ class LocalLineSessionHandle implements TerminalSessionHandle {
         : '';
     return '$prefix$literal${exact && !isDirectory ? ' ' : ''}';
   }
+
+  /// cmd의 큰따옴표 안에서는 `&|<>^`가 글자로 남지만 `%변수%`와 지연 확장
+  /// `!변수!`는 여전히 치환된다. 이런 이름은 따옴표로도 안전하게 넘길 수 없다.
+  static bool _expandsInCmdQuotes(String value) =>
+      value.contains('"') || RegExp(r'%[^%]+%|![^!]+!').hasMatch(value);
 
   void _replaceInputSuffix(int start, String? replacement) {
     if (replacement == null) {

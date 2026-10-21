@@ -11,11 +11,16 @@ import '../../../settings/app_settings.dart';
 import '../../../terminal/gui/terminal_interaction.dart';
 import '../../../terminal/gui/terminal_auto_reply.dart';
 import '../../../terminal/gui/terminal_interaction_controller.dart';
+import '../../../terminal/gui/terminal_recap_controller.dart';
 import '../../../terminal/gui/terminal_reply_suggestion_controller.dart';
 import '../../shell/ai_data_consent.dart';
+import 'terminal_recap_puppy.dart';
 import 'terminal_reply_suggestion_panel.dart';
 
 /// Screen monitoring while closed is opt-in and debounced.
+///
+/// AI가 설정되어 있으면 우측 하단에 퍼피 ReCap 버튼도 함께 띄운다. 답변 제안
+/// 카드와 같은 자리를 쓰므로 카드가 열려 있는 동안에는 퍼피를 숨긴다.
 class TerminalReplyOverlay extends StatefulWidget {
   const TerminalReplyOverlay({
     super.key,
@@ -29,6 +34,7 @@ class TerminalReplyOverlay extends StatefulWidget {
     this.aiConsentStore,
     this.inputActivity,
     this.autoReplyHistory,
+    this.recapInputs,
     this.onOpened,
     this.onClosed,
   });
@@ -43,6 +49,9 @@ class TerminalReplyOverlay extends StatefulWidget {
   final AiConsentStore? aiConsentStore;
   final Listenable? inputActivity;
   final TerminalAutoReplyHistory? autoReplyHistory;
+
+  /// 퍼피 ReCap에 보낼 세션 사용자 입력. 없으면 화면 출력만 요약한다.
+  final TerminalRecapInputLoader? recapInputs;
   final VoidCallback? onOpened;
   final VoidCallback? onClosed;
 
@@ -64,6 +73,7 @@ class _TerminalReplyOverlayState extends State<TerminalReplyOverlay>
   late TerminalAutoReply _automatic;
   bool Function()? _autoCurrent;
   late AiConsentStore _consentStore;
+  late TerminalRecapController _recap;
 
   bool get _available =>
       widget.active && widget.connected && _visible && _appActive;
@@ -77,8 +87,17 @@ class _TerminalReplyOverlayState extends State<TerminalReplyOverlay>
     _consentStore = widget.aiConsentStore ?? AiConsentStore();
     _consent = AiDataConsent(store: _consentStore);
     _attachAutomatic();
+    _attachRecap();
     widget.inputActivity?.addListener(_localInput);
     HardwareKeyboard.instance.addHandler(_hardwareInput);
+  }
+
+  void _attachRecap() {
+    _recap = TerminalRecapController(
+      widget.terminal,
+      // 최신 widget의 loader를 읽어 콜백이 바뀌어도 controller를 유지한다.
+      loadInputs: () => widget.recapInputs?.call() ?? Future.value(const []),
+    )..configure(widget.aiSettings, widget.aiService);
   }
 
   void _attachAutomatic() {
@@ -86,7 +105,8 @@ class _TerminalReplyOverlayState extends State<TerminalReplyOverlay>
       widget.terminal,
       history: widget.autoReplyHistory,
       title: () => widget.agentTitle?.call() ?? '',
-      canSuggest: () => _available && _suggestions == null,
+      // 사용자가 ReCap 말풍선을 읽는 동안에는 자동 카드로 덮지 않는다.
+      canSuggest: () => _available && _suggestions == null && !_recap.open,
       onReady: (current) async {
         final settings = widget.aiSettings;
         if (settings == null ||
@@ -108,9 +128,13 @@ class _TerminalReplyOverlayState extends State<TerminalReplyOverlay>
   );
 
   bool _hardwareInput(KeyEvent event) {
-    if (!_available || event is KeyUpEvent || _overlayFocus.hasFocus) {
-      return false;
+    if (!_available || event is KeyUpEvent) return false;
+    if (_recap.open && event.logicalKey == LogicalKeyboardKey.escape) {
+      // 말풍선을 닫는 Escape는 터미널로 보내지 않는다.
+      _recap.dismiss();
+      return true;
     }
+    if (_overlayFocus.hasFocus) return false;
     final escape =
         _automaticCard && event.logicalKey == LogicalKeyboardKey.escape;
     _localInput();
@@ -127,7 +151,10 @@ class _TerminalReplyOverlayState extends State<TerminalReplyOverlay>
   void didChangeDependencies() {
     super.didChangeDependencies();
     _visible = TickerMode.valuesOf(context).enabled;
-    if (!_available) _detach();
+    if (!_available) {
+      _detach();
+      _recap.dismiss();
+    }
     _configureAutomatic();
   }
 
@@ -147,6 +174,14 @@ class _TerminalReplyOverlayState extends State<TerminalReplyOverlay>
       _automatic.dispose();
       _attachAutomatic();
     }
+    if (oldWidget.terminal != widget.terminal) {
+      // 다른 세션의 터미널로 바뀌면 이전 요약 요청과 응답을 버린다.
+      _recap.dispose();
+      _attachRecap();
+    } else {
+      _recap.configure(widget.aiSettings, widget.aiService);
+    }
+    if (!_available) _recap.dismiss();
     if (!_available ||
         oldWidget.terminal != widget.terminal ||
         oldWidget.aiSettings != widget.aiSettings ||
@@ -159,7 +194,10 @@ class _TerminalReplyOverlayState extends State<TerminalReplyOverlay>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _appActive = state == AppLifecycleState.resumed;
-    if (!_appActive) _detach();
+    if (!_appActive) {
+      _detach();
+      _recap.dismiss();
+    }
     _configureAutomatic();
     if (mounted) setState(() {});
   }
@@ -205,6 +243,9 @@ class _TerminalReplyOverlayState extends State<TerminalReplyOverlay>
 
   Future<void> _open({bool automatic = false, bool Function()? current}) async {
     if (!_available || !_configured || _suggestions != null) return;
+    if (automatic && _recap.open) return;
+    // 답변 제안 카드가 퍼피 자리를 덮으므로 ReCap 말풍선을 먼저 닫는다.
+    _recap.dismiss();
     if (!automatic) widget.onOpened?.call();
     if (!mounted || !_available) return;
     final interaction = TerminalInteractionController(
@@ -284,6 +325,16 @@ class _TerminalReplyOverlayState extends State<TerminalReplyOverlay>
     }
   }
 
+  Future<void> _requestRecap() async {
+    if (!_available || !_configured || _suggestions != null) return;
+    await _recap.request((settings) => _consent.request(context, settings));
+  }
+
+  void _terminalPointerDown(PointerDownEvent _) {
+    if (_suggestions != null) _close(restoreFocus: false);
+    _recap.dismiss();
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -291,6 +342,7 @@ class _TerminalReplyOverlayState extends State<TerminalReplyOverlay>
     widget.inputActivity?.removeListener(_localInput);
     _automatic.dispose();
     _detach();
+    _recap.dispose();
     _overlayFocus.dispose();
     super.dispose();
   }
@@ -304,9 +356,8 @@ class _TerminalReplyOverlayState extends State<TerminalReplyOverlay>
         fit: StackFit.expand,
         children: [
           Listener(
-            onPointerDown: controller == null
-                ? null
-                : (_) => _close(restoreFocus: false),
+            // 터미널을 누르면 제안 카드·ReCap 말풍선을 닫고 입력은 그대로 넘긴다.
+            onPointerDown: _terminalPointerDown,
             child: widget.child,
           ),
           if (_available && controller == null)
@@ -323,6 +374,22 @@ class _TerminalReplyOverlayState extends State<TerminalReplyOverlay>
                   icon: const Icon(Icons.auto_awesome_outlined, size: 18),
                   label: const Text('AI'),
                 ),
+              ),
+            ),
+          // 작은 화면에서 말풍선이 상단 AI 버튼과 겹쳐도 위에 그려지도록 뒤에 둔다.
+          if (_available && _configured && controller == null)
+            Positioned(
+              right: 8,
+              bottom: 8,
+              child: TerminalRecapPuppy(
+                controller: _recap,
+                onRequest: () => unawaited(_requestRecap()),
+                onDismiss: _recap.dismiss,
+                maxBubbleWidth: math.max(
+                  0,
+                  math.min(340, constraints.maxWidth - 16),
+                ),
+                maxBubbleHeight: math.max(0, constraints.maxHeight - 16),
               ),
             ),
           if (_available && controller != null && interaction != null)

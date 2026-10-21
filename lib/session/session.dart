@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:math';
+
 import '../agent/agent_launcher.dart';
 import '../core/result.dart';
 import '../data/models/host.dart';
@@ -77,6 +80,7 @@ class SessionInfo {
     required this.id,
     required this.host,
     required this.engine,
+    String? authorizationId,
     this.status = SessionStatus.connecting,
     this.error,
     this.failure,
@@ -84,6 +88,7 @@ class SessionInfo {
     this.connectedAt,
     this.restoredContext,
     this.groupId = defaultSessionGroupId,
+    this.tabGroupId,
     this.remoteSessionId,
     this.localSessionId,
     this.fellBackToDirectSsh = false,
@@ -91,7 +96,8 @@ class SessionInfo {
     this.appId,
     TerminalPreferences? terminalPreferences,
     TerminalPreferences? terminalDefaults,
-  }) : terminalPreferences =
+  }) : authorizationId = authorizationId ?? _newAuthorizationId(),
+       terminalPreferences =
            (terminalPreferences ?? const TerminalPreferences()).resolved(
              AppSettings.defaultSettings,
            ),
@@ -105,6 +111,12 @@ class SessionInfo {
   final TerminalPreferences terminalDefaults;
 
   final String id;
+  final String authorizationId;
+  static String _newAuthorizationId() {
+    final random = Random.secure();
+    return base64Url.encode(List.generate(16, (_) => random.nextInt(256)));
+  }
+
   final Host host;
   final TerminalEngine engine;
   final SessionStatus status;
@@ -117,6 +129,10 @@ class SessionInfo {
   final DateTime? connectedAt;
   final RestoredSessionContext? restoredContext;
   final String groupId;
+
+  /// 작업공간([groupId]) 안의 탭 그룹 id. null이면 그룹 없는 탭이다.
+  /// 다른 작업공간으로 옮기면 지운다.
+  final String? tabGroupId;
 
   /// 앱 재시작 뒤에도 같은 원격 tmux 세션을 찾기 위한 영속 식별자.
   /// 살아 있는 SSH/PTY 핸들이 아니라 복원 스냅샷에 저장 가능한 문자열이다.
@@ -148,6 +164,7 @@ class SessionInfo {
     Object? connectedAt = _unchanged,
     Object? restoredContext = _unchanged,
     String? groupId,
+    Object? tabGroupId = _unchanged,
     Object? remoteSessionId = _unchanged,
     Object? localSessionId = _unchanged,
     bool? fellBackToDirectSsh,
@@ -159,6 +176,7 @@ class SessionInfo {
     id: id,
     host: host,
     engine: engine,
+    authorizationId: authorizationId,
     terminalPreferences: terminalPreferences ?? this.terminalPreferences,
     terminalDefaults: terminalDefaults ?? this.terminalDefaults,
     status: status ?? this.status,
@@ -172,6 +190,9 @@ class SessionInfo {
         ? this.restoredContext
         : restoredContext as RestoredSessionContext?,
     groupId: groupId ?? this.groupId,
+    tabGroupId: identical(tabGroupId, _unchanged)
+        ? this.tabGroupId
+        : tabGroupId as String?,
     localSessionId: identical(localSessionId, _unchanged)
         ? this.localSessionId
         : localSessionId as String?,

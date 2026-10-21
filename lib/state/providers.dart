@@ -624,6 +624,9 @@ class AppSettingsController extends Notifier<AppSettings> {
       store,
       CloudSyncSettings.encryptionKeySecretRef,
     );
+    if (!ref.mounted) return;
+    await _deleteLegacyGitHubSecrets(store);
+    if (!ref.mounted) return;
     if (loaded != null ||
         token != null ||
         customHeaders != null ||
@@ -651,6 +654,28 @@ class AppSettingsController extends Notifier<AppSettings> {
       if (canPersistDefaults) unawaited(settingsStore.save(loaded));
     }
     if (loaded != null) state = loaded;
+    _persistedGitHubIssuer = state.cloudSync.github.authorizationKey;
+    _secretsLoaded = true;
+  }
+
+  /// issuer에 묶이지 않은 예전 GitHub 토큰은 더 이상 읽지 않으므로 지운다.
+  /// 남겨 두면 쓰이지 않는 자격 증명이 보안 저장소에 계속 남는다.
+  Future<void> _deleteLegacyGitHubSecrets(SecureStore store) async {
+    for (final secretRef in const [
+      CloudSyncSettings.githubTokenSecretRef,
+      CloudSyncSettings.githubRefreshTokenSecretRef,
+    ]) {
+      try {
+        await store.deleteSecret(secretRef);
+      } catch (error, stackTrace) {
+        appErrorReporter.report(
+          error,
+          stackTrace,
+          source: 'secure-store',
+          context: '예전 비밀값 삭제 실패: $secretRef',
+        );
+      }
+    }
   }
 
   /// 비밀값 하나를 읽는다. 없거나 비어 있으면 null. 보안 저장소 오류는
@@ -712,6 +737,10 @@ class AppSettingsController extends Notifier<AppSettings> {
 
   String? _persistedGitHubIssuer;
 
+  /// 저장된 비밀값을 다 읽기 전에는 GitHub 자격 증명을 저장하지 않는다.
+  /// 기본값(빈 토큰)이 저장된 로그인 정보를 덮어쓰지 않게 한다.
+  bool _secretsLoaded = false;
+
   void _commit(AppSettings settings) {
     final previousToken = state.ai.apiToken;
     final previousCustomHeaders = state.ai.customHeaders;
@@ -737,12 +766,15 @@ class AppSettingsController extends Notifier<AppSettings> {
         ),
       );
     }
-    if (settings.cloudSync.github.token != previousGithubToken ||
-        settings.cloudSync.github.refreshToken != previousGithubRefreshToken ||
-        settings.cloudSync.github.tokenExpiresAt != previousGithubExpiry ||
-        settings.cloudSync.github.refreshTokenExpiresAt !=
-            previousGithubRefreshExpiry ||
-        settings.cloudSync.github.authorizationKey != _persistedGitHubIssuer) {
+    if (_secretsLoaded &&
+        (settings.cloudSync.github.token != previousGithubToken ||
+            settings.cloudSync.github.refreshToken !=
+                previousGithubRefreshToken ||
+            settings.cloudSync.github.tokenExpiresAt != previousGithubExpiry ||
+            settings.cloudSync.github.refreshTokenExpiresAt !=
+                previousGithubRefreshExpiry ||
+            settings.cloudSync.github.authorizationKey !=
+                _persistedGitHubIssuer)) {
       final github = settings.cloudSync.github;
       _persistedGitHubIssuer = github.authorizationKey;
       unawaited(
@@ -1180,6 +1212,7 @@ enum RightPanelTool {
   snippets,
   sessionInfo,
   aiChat,
+  agentChat,
   memo,
   claudeSettings,
   codexSettings,

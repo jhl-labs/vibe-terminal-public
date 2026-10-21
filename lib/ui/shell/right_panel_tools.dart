@@ -7,8 +7,8 @@ import '../../cli_config/cli_config_home.dart';
 import '../../state/providers.dart';
 import 'cli_config_panel.dart' show appIconFor;
 
-/// 빌드 피처만으로 정해지는 우측 패널 도구 전체 목록. 설치 여부나 사용자가
-/// 숨긴 항목과 무관하게, "이 빌드에서 켤 수 있는 도구가 무엇인가"를 답한다.
+/// 빌드·플랫폼으로 정해지는 우측 패널 도구 후보 목록.
+/// 설치 여부와 사용자가 개별 도구를 숨긴 설정은 별도로 적용한다.
 /// 설정 화면의 표시/숨김 체크리스트와 앱 셸의 실제 노출 목록이 같은 순서·
 /// 조건을 쓰도록 한곳에 모아 둔다.
 List<RightPanelTool> allRightPanelToolsForBuild(BuildFeatures features) {
@@ -21,6 +21,7 @@ List<RightPanelTool> allRightPanelToolsForBuild(BuildFeatures features) {
     // 스니펫과 같은 표시 설정을 공유한다.
     if (features.snippets) RightPanelTool.sessionInfo,
     if (features.aiChat) RightPanelTool.aiChat,
+    if (features.aiChat) RightPanelTool.agentChat,
     if (features.memo) RightPanelTool.memo,
     // 설치 여부와 무관하게 항상 후보에 포함한다. 미설치 상태는 CliConfigPanel
     // 안에서 안내한다 — 설치 감지는 로컬 PATH 기준이라 WSL 전용 설치를 놓칠
@@ -64,6 +65,7 @@ IconData rightPanelToolIcon(RightPanelTool tool) {
     RightPanelTool.snippets => Icons.code,
     RightPanelTool.sessionInfo => Icons.info_outline,
     RightPanelTool.aiChat => Icons.auto_awesome,
+    RightPanelTool.agentChat => Icons.hub_outlined,
     RightPanelTool.memo => Icons.sticky_note_2_outlined,
     RightPanelTool.claudeSettings => appIconFor(CliConfigApp.claude),
     RightPanelTool.codexSettings => appIconFor(CliConfigApp.codex),
@@ -80,6 +82,7 @@ String rightPanelToolLabel(RightPanelTool tool) {
     RightPanelTool.snippets => '스니펫',
     RightPanelTool.sessionInfo => '세션 정보',
     RightPanelTool.aiChat => 'AI Chat',
+    RightPanelTool.agentChat => 'Agent Chat',
     RightPanelTool.memo => '메모',
     RightPanelTool.claudeSettings => 'Claude Settings',
     RightPanelTool.codexSettings => 'Codex Settings',

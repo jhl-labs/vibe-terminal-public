@@ -741,7 +741,8 @@ class NotificationSettings {
   final bool enabled;
   final bool taskCompleteEnabled;
 
-  /// 작업에 사용자 확인이 필요할 때 시스템 알림을 보낼지.
+  /// Agent Chat loop가 승인·답변·연장을 기다리거나 예약 실행이 끝났을 때
+  /// 시스템 알림을 보낼지.
   final bool agentAttentionEnabled;
 
   static const defaultSettings = NotificationSettings(

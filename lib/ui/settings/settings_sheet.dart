@@ -631,6 +631,16 @@ class _NotificationSettingsTab extends ConsumerWidget {
                   ? controller.setTaskCompleteNotificationsEnabled
                   : null,
             ),
+            _SwitchSetting(
+              title: 'Agent Chat 알림',
+              subtitle:
+                  '예약으로 시작했거나 앱이 백그라운드일 때, loop가 승인·답변·마감 연장을 '
+                  '기다리거나 끝나면 알립니다.',
+              value: notifications.agentAttentionEnabled,
+              onChanged: notifications.enabled
+                  ? controller.setAgentAttentionNotificationsEnabled
+                  : null,
+            ),
           ],
         ),
       ],

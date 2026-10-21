@@ -288,8 +288,8 @@ class TerminalToolExecutor {
         }
         // 모델이 만든 입력을 살아 있는 터미널에 그대로 보내는 지점이다.
         // 모델 컨텍스트에는 원격 서버가 출력한 내용이 들어가므로, 서버가
-        // 모델을 유도해 파괴적인 명령을 만들어 낼 수 있다.
-        // 위험도를 분류하고, 위험하면 호출자의 승인 정책을 거친다.
+        // 모델을 유도해 파괴적인 명령을 만들어 낼 수 있다. Agent Chat과 같은
+        // 기준으로 분류하고, 위험하면 호출자의 승인 정책을 거친다.
         final verdict = riskClassifier.classify(
           input,
           screenContext: session.engine.recentPlainText(maxLines: 40),
@@ -438,7 +438,7 @@ $result
 /// 사용자 목표 하나를 tool call 한 번(최대 [maxRounds]회 왕복)으로 처리한다.
 ///
 /// 모델이 먼저 read_sessions로 화면을 읽겠다고 하면 관찰 결과를 붙여 한 번만
-/// 더 묻는다.
+/// 더 묻는다. 그 이상은 Agent Chat의 몫이다.
 class TerminalToolCallRunner {
   const TerminalToolCallRunner({
     required this.service,

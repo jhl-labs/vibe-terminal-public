@@ -8,6 +8,7 @@ import 'package:xterm/xterm.dart';
 
 import '../../../app/theme.dart';
 import '../../../ai/ai_chat_service.dart';
+import '../../../ai/terminal_recap.dart';
 import '../../../ai/terminal_reply_suggestions.dart';
 import '../../../settings/app_settings.dart';
 import '../../../state/providers.dart';
@@ -53,6 +54,23 @@ class _TerminalGuiSurfaceState extends ConsumerState<TerminalGuiSurface> {
   var _visited = false;
   final _autoReplyHistory = TerminalAutoReplyHistory();
 
+  /// 퍼피 ReCap에 보낼 사용자 입력. 새 키 기록기를 두지 않고 세션 로그의
+  /// `[input]` 줄을 재사용해 비밀번호 프롬프트 가림 처리를 그대로 따른다.
+  /// 로그가 없는 세션은 빈 목록을 돌려 화면 출력만 요약하게 한다.
+  Future<List<String>> _recapInputs() async {
+    final logId = ref
+        .read(sessionManagerProvider.notifier)
+        .logIdOf(widget.session.id);
+    if (logId == null || logId.trim().isEmpty) return const [];
+    final tail = await ref
+        .read(sessionLogRepositoryProvider)
+        .readPlainTextTailById(
+          logId,
+          maxLines: TerminalRecapService.inputLogLines,
+        );
+    return TerminalRecapService.inputsFromSessionLog(tail);
+  }
+
   @override
   Widget build(BuildContext context) {
     final enabled = ref.watch(
@@ -76,6 +94,7 @@ class _TerminalGuiSurfaceState extends ConsumerState<TerminalGuiSurface> {
               aiConsentStore: ref.watch(aiConsentStoreProvider),
               inputActivity: widget.terminalInputActivity,
               autoReplyHistory: _autoReplyHistory,
+              recapInputs: _recapInputs,
               onOpened: widget.onReplyOverlayOpened,
               onClosed: widget.onReplyOverlayClosed,
               child: widget.terminal,

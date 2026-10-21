@@ -645,6 +645,7 @@ Read the current terminal context again as the observation after that action. Te
     _beginSending(sessionId, cancelToken);
 
     try {
+      // 다중 세션 오케스트레이션(agent loop)은 Agent Chat 패널로 이관됨.
       // AI Chat은 단일 세션 질의응답과 단발 terminal tool call 보조에 집중한다.
       String reply;
       String? contextNote;

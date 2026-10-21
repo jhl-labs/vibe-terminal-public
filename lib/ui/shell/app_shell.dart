@@ -23,7 +23,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 
+import '../../agent/agent_chat_notifier.dart';
 import '../../agent/agent_launcher.dart';
+import '../../agent/agent_models.dart';
+import '../../agent/agent_notification_notifier.dart';
+import '../../agent/agent_schedule_notifier.dart';
 import '../../agent/agent_worktree.dart';
 import '../../agent/agent_workspace_run_probe.dart';
 import '../../app/build_features.dart';
@@ -51,6 +55,7 @@ import '../terminal/extra_keys_bar.dart';
 import '../terminal/session_terminal_view.dart';
 import '../terminal/gui/terminal_gui_mode.dart';
 import '../terminal/terminal_touch_mode.dart';
+import 'agent_chat_panel.dart';
 import 'agent_source_control_dialog.dart';
 import 'agent_worktrees_dialog.dart';
 import 'agent_integration_dialog.dart';
@@ -66,6 +71,7 @@ import 'pane_layout_panel.dart';
 import 'right_panel_tools.dart';
 import 'session_info_panel.dart';
 import 'session_rail.dart';
+import 'collapsed_session_list.dart';
 import 'snippet_panel.dart';
 
 List<RightPanelTool> _enabledRightPanelTools(
@@ -1402,6 +1408,17 @@ class _AppShellState extends ConsumerState<AppShell> {
     final features = ref.watch(buildFeaturesProvider);
     final settings = ref.watch(appSettingsProvider);
     final availableTools = _enabledRightPanelTools(features, settings);
+    final agentAttention = features.aiChat
+        ? ref.watch(agentChatProvider.select(_agentToolAttention))
+        : _AgentToolAttention.none;
+    if (features.aiChat) {
+      // 예약 스케줄러와 알림은 앱 수준 provider다. 패널을 한 번도 열지 않아도
+      // 예약 시각에 loop가 시작되고 알림이 가도록 앱 셸이 붙잡아 둔다. 값은 쓰지
+      // 않는다.
+      ref.watch(agentScheduleProvider.select((_) => 0));
+      ref.watch(agentNotificationProvider.select((_) => 0));
+    }
+
     // 수동 lookup: collection 패키지 없이 안전하게 처리
     SessionInfo? active;
     for (final s in sessions) {
@@ -1741,6 +1758,19 @@ class _AppShellState extends ConsumerState<AppShell> {
                         Icon(_rightPanelToolIcon(tool)),
                         const SizedBox(width: 12),
                         Expanded(child: Text(_rightPanelToolLabel(tool))),
+                        if (tool == RightPanelTool.agentChat &&
+                            agentAttention != _AgentToolAttention.none) ...[
+                          _AgentAttentionBadge(attention: agentAttention),
+                          const SizedBox(width: 6),
+                          Text(
+                            agentAttention.label!,
+                            style: TextStyle(
+                              color: agentAttention.color,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -1865,7 +1895,8 @@ class _AppShellState extends ConsumerState<AppShell> {
                     _ToolStrip(
                       panelState: rightPanel,
                       availableTools: availableTools,
-                          onToggleTool: (tool) =>
+                      agentAttention: agentAttention,
+                      onToggleTool: (tool) =>
                           ref.read(rightPanelProvider.notifier).toggle(tool),
                     ),
                     if (rightPanel.open) ...[
@@ -2070,7 +2101,12 @@ class _CollapsedLeftPanel extends StatelessWidget {
               icon: Icons.add,
               onPressed: onNewSession,
             ),
-            const Spacer(),
+            const SizedBox(height: 4),
+            const Divider(height: 1, color: VibeColors.borderSoft),
+            // 활성 작업공간의 세션 아이콘 목록. 넘치면 이 영역만 스크롤한다.
+            const Expanded(child: CollapsedSessionList()),
+            const Divider(height: 1, color: VibeColors.borderSoft),
+            const SizedBox(height: 4),
             _ToolButton(
               tooltip: 'Settings',
               active: false,
@@ -2266,15 +2302,78 @@ class _PaneDivider extends StatelessWidget {
   }
 }
 
+enum _AgentToolAttention {
+  none,
+  running,
+  waitingApproval,
+  waitingUser,
+  paused,
+  budgetExhausted,
+  deadlineReached,
+  blocked,
+}
+
+_AgentToolAttention _agentToolAttention(AgentLoopState state) {
+  return switch (state.status) {
+    AgentLoopStatus.idle ||
+    AgentLoopStatus.finished => _AgentToolAttention.none,
+    AgentLoopStatus.waitingApproval => _AgentToolAttention.waitingApproval,
+    AgentLoopStatus.waitingUser => _AgentToolAttention.waitingUser,
+    AgentLoopStatus.paused => switch (state.pauseReason) {
+      AgentPauseReason.budgetExhausted => _AgentToolAttention.budgetExhausted,
+      AgentPauseReason.deadlineReached => _AgentToolAttention.deadlineReached,
+      AgentPauseReason.recoverableError ||
+      AgentPauseReason.runtimeBlocked => _AgentToolAttention.blocked,
+      _ => _AgentToolAttention.paused,
+    },
+    _ => _AgentToolAttention.running,
+  };
+}
+
+extension on _AgentToolAttention {
+  String? get label => switch (this) {
+    _AgentToolAttention.none => null,
+    _AgentToolAttention.running => '실행 중',
+    _AgentToolAttention.waitingApproval => '승인 필요',
+    _AgentToolAttention.waitingUser => '답변 필요',
+    _AgentToolAttention.paused => '일시정지됨',
+    _AgentToolAttention.budgetExhausted => '예산 추가 필요',
+    _AgentToolAttention.deadlineReached => '마감 연장 필요',
+    _AgentToolAttention.blocked => '복구 후 재개 필요',
+  };
+
+  Color get color => switch (this) {
+    _AgentToolAttention.running => VibeColors.accent,
+    _AgentToolAttention.waitingApproval ||
+    _AgentToolAttention.waitingUser ||
+    _AgentToolAttention.budgetExhausted ||
+    _AgentToolAttention.deadlineReached => VibeColors.warning,
+    _AgentToolAttention.blocked => VibeColors.statusError,
+    _ => VibeColors.onSurfaceDim,
+  };
+
+  IconData? get icon => switch (this) {
+    _AgentToolAttention.waitingApproval ||
+    _AgentToolAttention.waitingUser => Icons.priority_high,
+    _AgentToolAttention.paused => Icons.pause,
+    _AgentToolAttention.budgetExhausted => Icons.add,
+    _AgentToolAttention.deadlineReached => Icons.timer_off,
+    _AgentToolAttention.blocked => Icons.build,
+    _ => null,
+  };
+}
+
 class _ToolStrip extends ConsumerWidget {
   const _ToolStrip({
     required this.panelState,
     required this.availableTools,
+    required this.agentAttention,
     required this.onToggleTool,
   });
 
   final RightPanelState panelState;
   final List<RightPanelTool> availableTools;
+  final _AgentToolAttention agentAttention;
   final ValueChanged<RightPanelTool> onToggleTool;
 
   Future<void> _showContextMenu(
@@ -2345,10 +2444,18 @@ class _ToolStrip extends ConsumerWidget {
                     padding: const EdgeInsets.only(bottom: 4),
                     child: Builder(
                       builder: (context) {
+                        final attention = tool == RightPanelTool.agentChat
+                            ? agentAttention
+                            : _AgentToolAttention.none;
+                        final baseTooltip = _rightPanelToolLabel(tool);
+                        final tooltip = attention.label == null
+                            ? baseTooltip
+                            : '$baseTooltip · ${attention.label}';
                         return _ToolButton(
-                          tooltip: _rightPanelToolLabel(tool),
+                          tooltip: tooltip,
                           active: panelState.open && panelState.tool == tool,
                           icon: rightPanelToolIcon(tool),
+                          attention: attention,
                           onPressed: () => onToggleTool(tool),
                         );
                       },
@@ -2369,12 +2476,15 @@ class _ToolButton extends StatelessWidget {
     required this.active,
     required this.icon,
     required this.onPressed,
+    this.attention = _AgentToolAttention.none,
   });
 
   final String tooltip;
   final bool active;
   final IconData icon;
   final VoidCallback? onPressed;
+
+  final _AgentToolAttention attention;
 
   @override
   Widget build(BuildContext context) {
@@ -2406,11 +2516,36 @@ class _ToolButton extends StatelessWidget {
                   ),
                   icon: Icon(icon, size: 19),
                 ),
+                if (attention != _AgentToolAttention.none)
+                  Positioned(
+                    top: attention.icon == null ? 6 : 3,
+                    right: attention.icon == null ? 6 : 3,
+                    child: _AgentAttentionBadge(attention: attention),
+                  ),
               ],
             ),
           ),
         ),
       ),
+    );
+  }
+}
+
+class _AgentAttentionBadge extends StatelessWidget {
+  const _AgentAttentionBadge({required this.attention});
+
+  final _AgentToolAttention attention;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      key: ValueKey('agent-tool-badge-${attention.name}'),
+      width: attention.icon == null ? 8 : 14,
+      height: attention.icon == null ? 8 : 14,
+      decoration: BoxDecoration(color: attention.color, shape: BoxShape.circle),
+      child: attention.icon == null
+          ? null
+          : Icon(attention.icon, size: 10, color: VibeColors.terminal),
     );
   }
 }
@@ -2441,6 +2576,9 @@ class _RightPanelContent extends ConsumerWidget {
     return switch (visibleTool) {
       RightPanelTool.paneLayout => paneLayoutPanel,
       RightPanelTool.aiChat => AiChatPanel(onOpenSettings: onOpenSettings),
+      RightPanelTool.agentChat => AgentChatPanel(
+        onOpenSettings: onOpenSettings,
+      ),
       RightPanelTool.snippets => const SnippetPanel(),
       RightPanelTool.sessionInfo => const SessionInfoPanel(),
       RightPanelTool.memo => const MemoPanel(),

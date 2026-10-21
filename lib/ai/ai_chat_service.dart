@@ -222,7 +222,8 @@ class AiChatService {
     String? systemPromptOverride,
     String? sessionLogContext,
   }) async {
-    // 호출자는 systemPromptOverride로 기본 시스템 프롬프트를 대체할 수 있다.
+    // Agent Chat 오케스트레이터처럼 시스템 프롬프트를 전적으로 제어해야 하는
+    // 호출자는 systemPromptOverride로 기본(터미널 편집) 프롬프트를 대체한다.
     final systemPrompt = maskTerminalSecrets(
       systemPromptOverride ??
           _buildSystemPrompt(

@@ -17,6 +17,10 @@ import '../../security/secure_screen.dart';
 import '../../settings/terminal_preferences.dart';
 import '../settings/terminal_preferences_editor.dart';
 
+/// Kubernetes 경유 호스트의 추가·경로 편집은 이 빌드에서 제공하지 않는다.
+/// 저장된 호스트와 기존 연결은 그대로 유지된다.
+const bool _kubernetesHostSetupAvailable = false;
+
 /// 호스트 편집 결과. 공개키를 새로 붙였으면 목록 페이지가 서버 등록을 제안한다.
 class HostEditResult {
   const HostEditResult({this.suggestInstallHostId, this.suggestInstallKeyId});
@@ -87,6 +91,11 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
       Platform.isWindows || Platform.isLinux || Platform.isMacOS;
 
   String get _connectionProfileSubtitle {
+    if (!_kubernetesHostSetupAvailable) {
+      return _supportsLocalShell
+          ? 'SSH 또는 이 기기의 로컬 셸 프로필을 저장합니다.'
+          : 'SSH 프로필을 저장합니다.';
+    }
     if (!_supportsLocalShell) return 'SSH 또는 Kubernetes Pod 경유 SSH 프로필을 저장합니다.';
     return _showShellPicker
         ? 'SSH, Kubernetes Pod 경유 SSH 또는 이 Windows PC의 로컬 셸 프로필을 저장합니다.'
@@ -240,8 +249,11 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
   }
 
   Future<void> _save() async {
+    if (_isKubernetesSsh && !_kubernetesHostSetupAvailable) {
+      return;
+    }
     FocusScope.of(context).unfocus();
-    if (!_formKey.currentState!.validate()) return;
+    if (!(_formKey.currentState?.validate() ?? false)) return;
 
     setState(() => _saving = true);
     try {
@@ -292,6 +304,10 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
           case HostAuthType.keyboardInteractive:
             credRef = null;
         }
+      }
+      if (!mounted ||
+          (_isKubernetesSsh && !_kubernetesHostSetupAvailable)) {
+        return;
       }
       final now = DateTime.now();
       final hostname = _isSsh ? _hostname.text.trim() : 'localhost';
@@ -867,6 +883,20 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
 
   @override
   Widget build(BuildContext context) {
+    const kubernetesEnabled = _kubernetesHostSetupAvailable;
+    if (_isKubernetesSsh && !kubernetesEnabled) {
+      return Scaffold(
+        appBar: AppBar(title: Text(_editing ? '호스트 수정' : '호스트 추가')),
+        body: const Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Text(
+              '이 버전에서는 Kubernetes 경유 연결을 편집할 수 없습니다.\n저장된 호스트와 기존 연결은 유지됩니다.',
+            ),
+          ),
+        ),
+      );
+    }
     final bottomInset = MediaQuery.viewPaddingOf(context).bottom;
     final supportsX11Forwarding =
         ref.watch(buildFeaturesProvider).x11 && _platformSupportsX11Forwarding;
@@ -913,11 +943,12 @@ class _HostEditPageState extends ConsumerState<HostEditPage> {
                             icon: Icon(Icons.dns_outlined),
                             label: Text('SSH'),
                           ),
-                          const ButtonSegment(
-                            value: HostConnectionType.kubernetesSsh,
-                            icon: Icon(Icons.hub_outlined),
-                            label: Text('Kubernetes'),
-                          ),
+                          if (kubernetesEnabled)
+                            const ButtonSegment(
+                              value: HostConnectionType.kubernetesSsh,
+                              icon: Icon(Icons.hub_outlined),
+                              label: Text('Kubernetes (실험)'),
+                            ),
                           if (_supportsLocalShell)
                             const ButtonSegment(
                               value: HostConnectionType.localShell,

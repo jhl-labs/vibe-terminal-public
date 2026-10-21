@@ -11,6 +11,7 @@ import 'package:xterm/xterm.dart';
 import '../app/error_reporter.dart' show appErrorReporter;
 import '../agent/agent_launcher.dart';
 import '../agent/agent_semantic_event.dart';
+import '../agent/autopilot/autopilot_controller.dart';
 import '../agent/agent_native_session.dart';
 import '../agent/workspace_operation_coordinator.dart';
 import '../agent/agent_conflict.dart';
@@ -60,6 +61,8 @@ import 'session_attention.dart';
 import 'session_diagnostics.dart';
 import 'session_group.dart';
 import 'session_restore_store.dart';
+import 'session_tab_group_controller.dart';
+import 'session_tab_layout.dart';
 import '../ssh/remote_server_info.dart';
 
 enum RemoteSessionActivationKind { switchedToExistingTab, openedNewTab }
@@ -156,6 +159,12 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   Future<void>? _restoreFuture;
   bool _restoreCompleted = false;
 
+  /// 앱 시작 복원([restoreSavedSessions])으로 만든 세션 id. 복원되지 않은 이전
+  /// 세션의 id를 새 세션이 다시 받을 수 있으므로, 세션별로 저장해 둔 부가 설정을
+  /// 되살릴 때 "정말 복원된 세션인지" 확인하는 데 쓴다.
+  final Set<String> _restoredSessionIds = {};
+
+  bool wasRestoredSession(String id) => _restoredSessionIds.contains(id);
   Future<void>? _agentWorktreeInitialization;
 
   /// pingActiveSessions 재진입 방지 플래그.
@@ -329,8 +338,10 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     String id,
     Host host, {
     String? title,
+    String? authorizationId,
     RestoredSessionContext? restoredContext,
     String groupId = defaultSessionGroupId,
+    String? tabGroupId,
     String? remoteSessionId,
     String? localSessionId,
     AgentWorkspaceContext? agentWorkspace,
@@ -348,6 +359,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         .rebase(from: saved, to: defaults);
     return SessionInfo(
       id: id,
+      authorizationId: authorizationId,
       host: host,
       engine: _newEngine(id, preferences.scrollbackLines!),
       terminalPreferences: preferences,
@@ -355,6 +367,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       title: _cleanTitle(title),
       restoredContext: restoredContext,
       groupId: groupId,
+      tabGroupId: tabGroupId,
       remoteSessionId: host.keepsRemoteSession ? remoteSessionId : null,
       localSessionId: localSessionId,
       agentWorkspace: agentWorkspace,
@@ -2278,6 +2291,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     final snapshot = await ref.read(sessionRestoreStoreProvider).load();
     if (snapshot == null || state.isNotEmpty) return;
     ref.read(sessionGroupProvider.notifier).restoreFromSnapshot(snapshot);
+    ref.read(sessionTabGroupProvider.notifier).restoreFromSnapshot(snapshot);
     if (snapshot.sessions.isEmpty) return;
 
     final restored = <SessionInfo>[];
@@ -2314,10 +2328,12 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         id,
         sessionHost,
         title: entry.title,
+        authorizationId: entry.authorizationId,
         terminalPreferences: entry.terminalPreferences,
         terminalDefaults: entry.terminalDefaults,
         restoredContext: restoredContext,
         groupId: entry.groupId,
+        tabGroupId: entry.tabGroupId,
         localSessionId: entry.localSessionId,
         remoteSessionId: sessionHost.keepsRemoteSession
             ? entry.remoteSessionId
@@ -2337,6 +2353,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     }
     if (restored.isEmpty || state.isNotEmpty) return;
 
+    _restoredSessionIds.addAll(restored.map((s) => s.id));
     state = restored;
     final activeId = snapshot.activeId;
     ref
@@ -2456,6 +2473,9 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       if (submitted) {
         ref.read(sessionActivityProvider.notifier).markTaskSubmitted(id);
       }
+      ref
+          .read(agentAutopilotProvider.notifier)
+          .noteUserInput(id, submitted: submitted);
       final current = _sessionStates[id];
       if (current == null) return;
       if (current.handleInput(data)) {
@@ -3135,6 +3155,49 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     _persistOpenSessions();
   }
 
+  /// [groupId] 작업공간 세션의 순서와 탭 그룹 소속을 [placements]대로 바꾼다.
+  /// [placements]는 그 작업공간의 세션을 빠짐없이 한 번씩 담아야 하며,
+  /// 그렇지 않으면(그 사이 세션이 열리거나 닫힌 경우) 무시한다.
+  void arrangeSessionsInGroup(
+    String groupId,
+    List<SessionPlacement> placements,
+  ) {
+    final groupSessions = {
+      for (final session in state)
+        if (session.groupId == groupId) session.id: session,
+    };
+    final placedIds = placements.map((p) => p.id).toSet();
+    if (placedIds.length != placements.length ||
+        placedIds.length != groupSessions.length ||
+        !placedIds.containsAll(groupSessions.keys)) {
+      return;
+    }
+    SessionInfo placed(SessionPlacement placement) {
+      final session = groupSessions[placement.id]!;
+      return session.tabGroupId == placement.tabGroupId
+          ? session
+          : session.copyWith(tabGroupId: placement.tabGroupId);
+    }
+
+    final arranged = placements.map(placed).toList();
+    var nextGroupIndex = 0;
+    final next = [
+      for (final session in state)
+        if (session.groupId == groupId) arranged[nextGroupIndex++] else session,
+    ];
+    var changed = false;
+    for (var i = 0; i < next.length && !changed; i++) {
+      changed = !identical(next[i], state[i]);
+    }
+    if (!changed) return;
+    state = next;
+    _persistOpenSessions();
+  }
+
+  /// 세션 목록 밖의 배치 정보(탭 그룹 이름·색·접힘)가 바뀌었을 때 복원
+  /// 스냅샷을 곧 다시 저장한다.
+  void persistLayoutSoon() => _schedulePersistOpenSessions();
+
   void moveSessionToGroup(String id, String groupId) {
     if (!ref.read(sessionGroupProvider).contains(groupId)) return;
     final next = <SessionInfo>[];
@@ -3145,7 +3208,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         continue;
       }
       if (session.groupId == groupId) return;
-      next.add(session.copyWith(groupId: groupId));
+      // 탭 그룹은 작업공간 안의 하위 그룹이라 다른 작업공간으로 따라가지 않는다.
+      next.add(session.copyWith(groupId: groupId, tabGroupId: null));
       moved = true;
     }
     if (!moved) return;
@@ -3576,18 +3640,21 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       activeId: ref.read(activeSessionIdProvider),
       groups: ref.read(sessionGroupProvider).groups,
       activeGroupId: ref.read(sessionGroupProvider).activeGroupId,
+      tabGroups: ref.read(sessionTabGroupProvider).groups,
       sessions: [
         for (final session in state)
           if (!_closedWith.containsKey(session.id) &&
               session.status != SessionStatus.error &&
               session.appId == null)
             RestoredSessionEntry(
+              authorizationId: session.authorizationId,
               id: session.id,
               hostId: session.host.id,
               title: session.title,
               terminalPreferences: session.terminalPreferences,
               terminalDefaults: session.terminalDefaults,
               groupId: session.groupId,
+              tabGroupId: session.tabGroupId,
               remoteSessionId: session.remoteSessionId,
               localSessionId: session.localSessionId,
               agentWorkspace: session.agentWorkspace,

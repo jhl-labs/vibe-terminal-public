@@ -1,4 +1,4 @@
-import 'dart:math' show max;
+import 'dart:math' show max, min;
 
 import 'package:xterm/src/base/observable.dart';
 import 'package:xterm/src/core/buffer/buffer.dart';
@@ -26,10 +26,11 @@ import 'package:xterm/src/utils/circular_buffer.dart';
 /// translating user input into escape sequences that the application can
 /// understand.
 class Terminal with Observable implements TerminalState, EscapeHandler {
-  // Reject unsupported control requests before any callback or allocation.
-  static const maxColumns = 1024;
-  static const maxRows = 512;
-  static const maxScreenCells = 262144;
+  // Application resize requests beyond these bounds are rejected by the
+  // parser; local view resizes are clamped to them.
+  static const maxColumns = TerminalSizeLimits.maxColumns;
+  static const maxRows = TerminalSizeLimits.maxRows;
+  static const maxScreenCells = TerminalSizeLimits.maxScreenCells;
   static const maxRepeatCount = 65536;
 
   /// The number of lines that the scrollback buffer can hold. If the buffer
@@ -356,8 +357,8 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   }
 
   /// Resize the terminal screen. [newWidth] and [newHeight] should be greater
-  /// than 0. Text reflow is currently not implemented and will be avaliable in
-  /// the future.
+  /// than 0. Sizes beyond [maxColumns], [maxRows] or [maxScreenCells] are
+  /// clamped so the buffer, the view and the remote side stay in agreement.
   @override
   void resize(
     int newWidth,
@@ -365,13 +366,9 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
     int? pixelWidth,
     int? pixelHeight,
   ]) {
-    newWidth = max(newWidth, 1);
-    newHeight = max(newHeight, 1);
-    if (newWidth > maxColumns ||
-        newHeight > maxRows ||
-        newWidth * newHeight > maxScreenCells) {
-      return;
-    }
+    newWidth = newWidth.clamp(1, maxColumns);
+    newHeight = newHeight.clamp(1, maxRows);
+    newHeight = min(newHeight, max(1, maxScreenCells ~/ newWidth));
 
     onResize?.call(newWidth, newHeight, pixelWidth ?? 0, pixelHeight ?? 0);
 

@@ -688,6 +688,7 @@ class EscapeParser {
         }
         final rows = _csi.params[1];
         final cols = _csi.params[2];
+        if (!TerminalSizeLimits.allows(cols, rows)) return;
         handler.resize(cols, rows);
         return;
       // Window handling is currently no in the scope of the package.

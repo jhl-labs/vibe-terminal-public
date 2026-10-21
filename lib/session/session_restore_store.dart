@@ -7,18 +7,21 @@ import '../agent/agent_launcher.dart';
 import '../core/atomic_file.dart';
 import '../data/models/host.dart';
 import 'session_group.dart';
+import 'session_tab_group.dart';
 import '../settings/terminal_preferences.dart';
 
 class RestoredSessionEntry {
   const RestoredSessionEntry({
     required this.id,
     required this.hostId,
+    this.authorizationId,
     this.title,
     this.terminalText,
     this.currentWorkingDirectory,
     this.localShellType,
     this.sessionLogId,
     this.groupId = defaultSessionGroupId,
+    this.tabGroupId,
     this.historyPromptDismissed = false,
     this.historyPromptCompleted = false,
     this.pathPromptDismissed = false,
@@ -34,12 +37,16 @@ class RestoredSessionEntry {
   final TerminalPreferences? terminalDefaults;
   final String id;
   final String hostId;
+  final String? authorizationId;
   final String? title;
   final String? terminalText;
   final String? currentWorkingDirectory;
   final LocalShellType? localShellType;
   final String? sessionLogId;
   final String groupId;
+
+  /// 작업공간 안 탭 그룹 id. 없으면 그룹 없는 탭. 이전 버전 스냅샷에는 없다.
+  final String? tabGroupId;
   final bool historyPromptDismissed;
   final bool historyPromptCompleted;
   final bool pathPromptDismissed;
@@ -51,6 +58,7 @@ class RestoredSessionEntry {
   Map<String, Object?> toJson() => {
     'id': id,
     'hostId': hostId,
+    if (authorizationId != null) 'authorizationId': authorizationId,
     if (terminalPreferences != null)
       'terminalPreferences': terminalPreferences!.toJson(),
     if (terminalDefaults != null)
@@ -65,6 +73,7 @@ class RestoredSessionEntry {
     if (sessionLogId != null && sessionLogId!.isNotEmpty)
       'sessionLogId': sessionLogId,
     if (groupId != defaultSessionGroupId) 'groupId': groupId,
+    if (tabGroupId != null) 'tabGroupId': tabGroupId,
     if (historyPromptDismissed) 'historyPromptDismissed': true,
     if (historyPromptCompleted) 'historyPromptCompleted': true,
     if (pathPromptDismissed) 'pathPromptDismissed': true,
@@ -87,6 +96,7 @@ class RestoredSessionEntry {
     final localShellType = _localShellTypeFromJson(value['localShellType']);
     final sessionLogId = value['sessionLogId'];
     final groupId = value['groupId'];
+    final tabGroupId = value['tabGroupId'];
     final remoteSessionId = value['remoteSessionId'];
     final agentWorkspace = AgentWorkspaceContext.fromJson(
       value['agentWorkspace'],
@@ -94,6 +104,13 @@ class RestoredSessionEntry {
     return RestoredSessionEntry(
       id: id,
       hostId: hostId,
+      authorizationId:
+          value['authorizationId'] is String &&
+              RegExp(
+                r'^[A-Za-z0-9_-]{22}==$',
+              ).hasMatch(value['authorizationId'] as String)
+          ? value['authorizationId'] as String
+          : null,
       localSessionId: value['localSessionId'] is String
           ? value['localSessionId'] as String
           : null,
@@ -107,6 +124,9 @@ class RestoredSessionEntry {
       groupId: groupId is String && groupId.trim().isNotEmpty
           ? groupId.trim()
           : defaultSessionGroupId,
+      tabGroupId: tabGroupId is String && tabGroupId.trim().isNotEmpty
+          ? tabGroupId.trim()
+          : null,
       historyPromptDismissed: value['historyPromptDismissed'] == true,
       historyPromptCompleted: value['historyPromptCompleted'] == true,
       pathPromptDismissed: value['pathPromptDismissed'] == true,
@@ -124,6 +144,29 @@ class RestoredSessionEntry {
     );
   }
 
+  /// 탭 그룹 소속만 바꾼 사본. 스냅샷을 읽을 때 유효하지 않은 소속을 지운다.
+  RestoredSessionEntry withTabGroupId(String? value) => RestoredSessionEntry(
+    id: id,
+    hostId: hostId,
+    authorizationId: authorizationId,
+    title: title,
+    terminalText: terminalText,
+    currentWorkingDirectory: currentWorkingDirectory,
+    localShellType: localShellType,
+    sessionLogId: sessionLogId,
+    groupId: groupId,
+    tabGroupId: value,
+    historyPromptDismissed: historyPromptDismissed,
+    historyPromptCompleted: historyPromptCompleted,
+    pathPromptDismissed: pathPromptDismissed,
+    pathPromptCompleted: pathPromptCompleted,
+    remoteSessionId: remoteSessionId,
+    localSessionId: localSessionId,
+    agentWorkspace: agentWorkspace,
+    terminalPreferences: terminalPreferences,
+    terminalDefaults: terminalDefaults,
+  );
+
   static LocalShellType? _localShellTypeFromJson(Object? value) {
     if (value is! String) return null;
     for (final type in LocalShellType.values) {
@@ -139,6 +182,7 @@ class SessionRestoreSnapshot {
     this.activeId,
     this.groups = const [SessionGroup.defaultGroup],
     this.activeGroupId = defaultSessionGroupId,
+    this.tabGroups = const [],
   });
 
   static const empty = SessionRestoreSnapshot(sessions: []);
@@ -148,11 +192,15 @@ class SessionRestoreSnapshot {
   final List<SessionGroup> groups;
   final String activeGroupId;
 
+  /// 작업공간 안의 탭 그룹(이름·색·접힘). 소속은 각 세션 항목의 tabGroupId.
+  final List<SessionTabGroup> tabGroups;
+
   SessionRestoreSnapshot copyWith({
     List<RestoredSessionEntry>? sessions,
     Object? activeId = _unchanged,
     List<SessionGroup>? groups,
     String? activeGroupId,
+    List<SessionTabGroup>? tabGroups,
   }) => SessionRestoreSnapshot(
     sessions: sessions ?? this.sessions,
     activeId: identical(activeId, _unchanged)
@@ -160,15 +208,18 @@ class SessionRestoreSnapshot {
         : activeId as String?,
     groups: groups ?? this.groups,
     activeGroupId: activeGroupId ?? this.activeGroupId,
+    tabGroups: tabGroups ?? this.tabGroups,
   );
 
   static const Object _unchanged = Object();
 
   Map<String, Object?> toJson() => {
-    'version': 5,
+    'version': 6,
     'activeId': activeId,
     'activeGroupId': activeGroupId,
     'groups': [for (final group in groups) group.toJson()],
+    if (tabGroups.isNotEmpty)
+      'tabGroups': [for (final group in tabGroups) group.toJson()],
     'sessions': [for (final session in sessions) session.toJson()],
   };
 
@@ -176,10 +227,20 @@ class SessionRestoreSnapshot {
     if (value is! Map) return null;
     final rawSessions = value['sessions'];
     if (rawSessions is! List) return null;
-    final sessions = rawSessions
-        .map(RestoredSessionEntry.fromJson)
-        .whereType<RestoredSessionEntry>()
-        .toList();
+    final rawTabGroups = value['tabGroups'];
+    final (sessions, tabGroups) = _validTabGroups(
+      rawSessions
+          .map(RestoredSessionEntry.fromJson)
+          .whereType<RestoredSessionEntry>()
+          .toList(),
+      rawTabGroups is List
+          ? normalizeSessionTabGroups(
+              rawTabGroups
+                  .map(SessionTabGroup.fromJson)
+                  .whereType<SessionTabGroup>(),
+            )
+          : const <SessionTabGroup>[],
+    );
     final activeId = value['activeId'];
     final rawGroups = value['groups'];
     final groups = normalizeSessionGroups(
@@ -198,6 +259,37 @@ class SessionRestoreSnapshot {
               groups.any((group) => group.id == activeGroupId)
           ? activeGroupId
           : defaultSessionGroupId,
+      tabGroups: tabGroups,
+    );
+  }
+
+  /// 세션의 탭 그룹 소속은 같은 작업공간의 저장된 그룹을 가리킬 때만 남긴다.
+  /// 멤버가 없는 탭 그룹은 버린다. 이전 버전 스냅샷(필드 없음)은 그대로
+  /// "그룹 없음"이 된다.
+  static (List<RestoredSessionEntry>, List<SessionTabGroup>) _validTabGroups(
+    List<RestoredSessionEntry> sessions,
+    List<SessionTabGroup> tabGroups,
+  ) {
+    final byId = {for (final group in tabGroups) group.id: group};
+    final usedIds = <String>{};
+    final validSessions = <RestoredSessionEntry>[];
+    for (final session in sessions) {
+      final id = session.tabGroupId;
+      if (id == null) {
+        validSessions.add(session);
+      } else if (byId[id]?.workspaceGroupId == session.groupId) {
+        usedIds.add(id);
+        validSessions.add(session);
+      } else {
+        validSessions.add(session.withTabGroupId(null));
+      }
+    }
+    return (
+      validSessions,
+      [
+        for (final group in tabGroups)
+          if (usedIds.contains(group.id)) group,
+      ],
     );
   }
 }

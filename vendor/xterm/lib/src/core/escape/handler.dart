@@ -1,5 +1,17 @@
 import 'package:xterm/src/core/mouse/mode.dart';
 
+/// Screen size bounds shared by escape parsing and [EscapeHandler.resize].
+abstract final class TerminalSizeLimits {
+  static const maxColumns = 1024;
+  static const maxRows = 512;
+  static const maxScreenCells = 262144;
+
+  /// Whether an application may request this size. Oversized requests are
+  /// rejected before any callback or allocation.
+  static bool allows(int cols, int rows) =>
+      cols <= maxColumns && rows <= maxRows && cols * rows <= maxScreenCells;
+}
+
 abstract class EscapeHandler {
   void writeChar(int char);
 

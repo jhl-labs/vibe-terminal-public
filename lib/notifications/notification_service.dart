@@ -17,6 +17,7 @@ class NotificationService {
   void Function(String payload)? onPayloadTapped;
 
   static const _channelId = 'task_complete';
+  static const _agentChannelId = 'agent_attention';
   static const _announcementChannelId = 'announcements';
 
   /// 공지 푸시는 항상 같은 id 로 띄워 여러 건이 쌓이지 않게 한다.
@@ -117,6 +118,38 @@ class NotificationService {
         body: body,
         notificationDetails: details,
         payload: url?.toString(),
+      );
+    } catch (_) {
+      // 알림 실패는 핵심 기능에 영향이 없으므로 무시한다.
+    }
+  }
+
+  /// Agent Chat loop가 사용자의 개입을 기다리거나 끝났음을 알린다.
+  Future<void> showAgentAttention({
+    required String title,
+    required String body,
+  }) async {
+    if (!_supported) return;
+    try {
+      await _ensureInit();
+      const android = AndroidNotificationDetails(
+        _agentChannelId,
+        'Agent Chat 알림',
+        channelDescription: 'Agent Chat loop가 승인·답변을 기다리거나 끝나면 알립니다.',
+        importance: Importance.high,
+        priority: Priority.high,
+      );
+      const details = NotificationDetails(
+        android: android,
+        iOS: DarwinNotificationDetails(),
+        macOS: DarwinNotificationDetails(),
+        linux: LinuxNotificationDetails(),
+      );
+      await _plugin.show(
+        id: _counter++,
+        title: title,
+        body: body,
+        notificationDetails: details,
       );
     } catch (_) {
       // 알림 실패는 핵심 기능에 영향이 없으므로 무시한다.

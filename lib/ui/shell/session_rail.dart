@@ -1,5 +1,4 @@
 import 'session_close_dialog.dart';
-import '../common/activity_clock.dart';
 import '../common/device_aware_draggable.dart';
 import '../settings/terminal_preferences_editor.dart';
 import '../../session/session_pane_layout.dart';
@@ -12,6 +11,8 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../agent/agent_launcher.dart';
+import '../../agent/autopilot/autopilot_controller.dart';
+import '../../agent/autopilot/autopilot_state.dart';
 import '../../app/app_edition.dart';
 import '../../app/app_version.dart';
 import '../../app/theme.dart';
@@ -25,6 +26,12 @@ import 'agent_brand.dart';
 import 'release_notes_dialog.dart';
 import '../../session/server_work_tabs.dart';
 import 'session_group_manager.dart';
+import 'session_status_indicators.dart';
+import 'session_info_tooltip.dart';
+import 'session_tab_group_header.dart';
+import '../../session/session_tab_group.dart';
+import '../../session/session_tab_group_controller.dart';
+import '../../session/session_tab_layout.dart';
 
 /// 좌측 세로탭 세션 패널. 데스크톱 레일/모바일 drawer 양쪽에서 재사용.
 class SessionRail extends ConsumerWidget {
@@ -60,19 +67,6 @@ class SessionRail extends ConsumerWidget {
   /// 관점의 조작이라 세션 그룹 선택기 옆에 둔다. null이면 비활성화한다.
   final VoidCallback? onPreviousSession, onNextSession;
 
-  Color _statusColor(SessionStatus s) {
-    switch (s) {
-      case SessionStatus.connecting:
-        return VibeColors.statusConnecting;
-      case SessionStatus.connected:
-        return VibeColors.statusConnected;
-      case SessionStatus.disconnected:
-        return VibeColors.statusDisconnected;
-      case SessionStatus.error:
-        return VibeColors.statusError;
-    }
-  }
-
   RelativeRect _menuPosition(BuildContext context, Offset globalPosition) {
     final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
     return RelativeRect.fromRect(
@@ -99,6 +93,7 @@ class SessionRail extends ConsumerWidget {
         side: const BorderSide(color: VibeColors.borderSoft),
       ),
       items: [
+        ..._autopilotMenuItems(ref, session),
         _SessionMenuItem(
           value: _SessionAction.duplicate,
           icon: Icons.copy_all_outlined,
@@ -110,6 +105,7 @@ class SessionRail extends ConsumerWidget {
             icon: Icons.drive_file_move_outline,
             label: '그룹 이동',
           ),
+        ..._tabGroupMenuItems(ref, session),
         _SessionMenuItem(
           value: _SessionAction.terminalSettings,
           icon: Icons.palette_outlined,
@@ -143,10 +139,57 @@ class SessionRail extends ConsumerWidget {
     if (action == null || !context.mounted) return;
 
     switch (action) {
+      case _SessionAction.toggleAutopilot:
+        ref.read(agentAutopilotProvider.notifier).toggle(session.id);
+      case _SessionAction.toggleAutopilotNotifyOnly:
+        final controller = ref.read(agentAutopilotProvider.notifier);
+        controller.setNotifyOnly(
+          session.id,
+          !controller.stateOf(session.id).notifyOnly,
+        );
       case _SessionAction.duplicate:
         await onDuplicateSession(session);
       case _SessionAction.moveGroup:
         await _moveSessionToGroup(context, ref, session);
+      case _SessionAction.addToNewTabGroup:
+        ref.read(sessionTabGroupProvider.notifier).addToNewGroup(session.id);
+      case _SessionAction.moveToTabGroup:
+        final position = _menuPosition(context, globalPosition);
+        final targetId = await showMenu<String>(
+          context: context,
+          position: position,
+          color: VibeColors.surfaceHigh,
+          items: [
+            for (final group in _otherTabGroups(ref, session))
+              PopupMenuItem(
+                key: ValueKey('move-to-tab-group-${group.id}'),
+                value: group.id,
+                child: Row(
+                  children: [
+                    Container(
+                      width: 12,
+                      height: 12,
+                      decoration: BoxDecoration(
+                        color: group.color.color,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Flexible(
+                      child: Text(group.name, overflow: TextOverflow.ellipsis),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        );
+        if (targetId != null) {
+          ref
+              .read(sessionTabGroupProvider.notifier)
+              .moveToGroup(session.id, targetId);
+        }
+      case _SessionAction.removeFromTabGroup:
+        ref.read(sessionTabGroupProvider.notifier).removeFromGroup(session.id);
       case _SessionAction.terminalSettings:
         await _configureTerminal(context, ref, session, forHost: false);
       case _SessionAction.hostTerminalDefaults:
@@ -160,6 +203,45 @@ class SessionRail extends ConsumerWidget {
       case _SessionAction.close:
         await requestCloseSession(context, ref, session);
     }
+  }
+
+  /// 세션이 속한 작업공간에서 옮겨 갈 수 있는(현재 소속이 아닌) 탭 그룹.
+  List<SessionTabGroup> _otherTabGroups(WidgetRef ref, SessionInfo session) => [
+    for (final group
+        in ref
+            .read(sessionTabGroupProvider.notifier)
+            .groupsWithMembers(session.groupId))
+      if (group.id != session.tabGroupId) group,
+  ];
+
+  List<PopupMenuEntry<_SessionAction>> _tabGroupMenuItems(
+    WidgetRef ref,
+    SessionInfo session,
+  ) {
+    final grouped =
+        ref.read(sessionTabGroupProvider).byId(session.tabGroupId) != null;
+    return [
+      _SessionMenuItem(
+        key: const ValueKey('session-add-to-new-tab-group'),
+        value: _SessionAction.addToNewTabGroup,
+        icon: Icons.add_box_outlined,
+        label: '새 탭 그룹에 추가',
+      ),
+      if (_otherTabGroups(ref, session).isNotEmpty)
+        _SessionMenuItem(
+          key: const ValueKey('session-move-to-tab-group'),
+          value: _SessionAction.moveToTabGroup,
+          icon: Icons.drive_file_move_rtl_outlined,
+          label: '탭 그룹으로 이동 ▸',
+        ),
+      if (grouped)
+        _SessionMenuItem(
+          key: const ValueKey('session-remove-from-tab-group'),
+          value: _SessionAction.removeFromTabGroup,
+          icon: Icons.layers_clear_outlined,
+          label: '탭 그룹에서 제거',
+        ),
+    ];
   }
 
   void _activateGroup(WidgetRef ref, String groupId) {
@@ -353,6 +435,7 @@ class SessionRail extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final railContext = context;
+    listenSessionTabGroupCleanup(ref);
     final allSessions = ref.watch(sessionManagerProvider);
     final groupState = ref.watch(sessionGroupProvider);
     final activeGroupId = groupState.activeGroupId;
@@ -360,6 +443,11 @@ class SessionRail extends ConsumerWidget {
       for (final session in allSessions)
         if (session.groupId == activeGroupId) session,
     ];
+    final tabBlocks = buildSessionTabBlocks(
+      sessions,
+      tabGroupOf: (session) => session.tabGroupId,
+      groups: ref.watch(sessionTabGroupProvider).mapForWorkspace(activeGroupId),
+    );
     final activeId = ref.watch(activeSessionIdProvider);
     final archiveState = ref.watch(serverWorkTabsProvider);
     final archiveTabs = archiveState.tabs.where(
@@ -382,7 +470,6 @@ class SessionRail extends ConsumerWidget {
                 ref.read(serverWorkTabsProvider.notifier).close(tab.id),
           ),
     ];
-    final mgr = ref.read(sessionManagerProvider.notifier);
     final sessionCounts = <String, int>{};
     for (final session in allSessions) {
       sessionCounts.update(
@@ -473,12 +560,42 @@ class SessionRail extends ConsumerWidget {
                           ? const _EmptyRail()
                           : _SessionList(
                               groupId: activeGroupId,
-                              sessions: sessions,
-                              onReorder: (oldIndex, slot) =>
-                                  mgr.moveSessionInGroup(
-                                    activeGroupId,
-                                    oldIndex,
-                                    slot > oldIndex ? slot - 1 : slot,
+                              blocks: tabBlocks,
+                              onDrop: (sessionId, target) => ref
+                                  .read(sessionTabGroupProvider.notifier)
+                                  .dropSession(sessionId, target),
+                              headerBuilder: (context, block, highlighted) =>
+                                  Consumer(
+                                    builder: (context, headerRef, child) =>
+                                        SessionTabGroupHeader(
+                                          group: block.group,
+                                          memberCount: block.members.length,
+                                          highlighted: highlighted,
+                                          summaryState: headerRef.watch(
+                                            sessionAttentionProvider.select(
+                                              (
+                                                attention,
+                                              ) => strongestAttentionState(
+                                                block.members.map(
+                                                  (s) => attention[s.id]?.state,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                          onToggleCollapsed: () => ref
+                                              .read(
+                                                sessionTabGroupProvider
+                                                    .notifier,
+                                              )
+                                              .toggleCollapsed(block.group.id),
+                                          onShowMenu: (position) =>
+                                              showSessionTabGroupMenu(
+                                                railContext,
+                                                ref,
+                                                block.group,
+                                                position,
+                                              ),
+                                        ),
                                   ),
                               tileBuilder: (context, s, tileKey) => Consumer(
                                 builder: (context, tileRef, child) =>
@@ -500,7 +617,7 @@ class SessionRail extends ConsumerWidget {
                                       selected:
                                           archiveState.activeId == null &&
                                           s.id == activeId,
-                                      statusColor: _statusColor(s.status),
+                                      statusColor: sessionStatusColor(s.status),
                                       busy: tileRef.watch(
                                         sessionActivityProvider.select(
                                           (activity) => activity[s.id] ?? false,
@@ -509,6 +626,19 @@ class SessionRail extends ConsumerWidget {
                                       attention: tileRef.watch(
                                         sessionAttentionProvider.select(
                                           (attention) => attention[s.id],
+                                        ),
+                                      ),
+                                      aiConfigured: tileRef.watch(
+                                        appSettingsProvider.select(
+                                          (s) => s.ai.isConfigured,
+                                        ),
+                                      ),
+                                      autopilot: tileRef.watch(
+                                        agentAutopilotProvider.select(
+                                          (states) =>
+                                              states[s.id]?.enabled == true
+                                              ? states[s.id]
+                                              : null,
                                         ),
                                       ),
                                       onTap: () {
@@ -623,8 +753,13 @@ class _SessionRenameDialogState extends State<_SessionRenameDialog> {
 enum _SessionAction {
   terminalSettings,
   hostTerminalDefaults,
+  toggleAutopilot,
+  toggleAutopilotNotifyOnly,
   duplicate,
   moveGroup,
+  addToNewTabGroup,
+  moveToTabGroup,
+  removeFromTabGroup,
   rename,
   remoteSessions,
   close,
@@ -636,11 +771,40 @@ class _SessionMenuItem extends PopupMenuItem<_SessionAction> {
     required IconData icon,
     required String label,
     String? detail,
+    super.key,
   }) : super(
          value: value,
          height: detail == null ? 46 : 58,
          child: _SessionMenuItemBody(icon: icon, label: label, detail: detail),
        );
+}
+
+/// Agent 자율사용 토글. 연결된 세션에서 claude·codex·opencode가 보일 때만 나온다.
+/// AI 설정이 없어도 켤 수 있다(조용한 멈춤 판정만 생략).
+List<PopupMenuEntry<_SessionAction>> _autopilotMenuItems(
+  WidgetRef ref,
+  SessionInfo session,
+) {
+  final controller = ref.read(agentAutopilotProvider.notifier);
+  if (!controller.isAvailableFor(session.id)) return const [];
+  final state = controller.stateOf(session.id);
+  return [
+    _SessionMenuItem(
+      key: const ValueKey('session-autopilot-toggle'),
+      value: _SessionAction.toggleAutopilot,
+      icon: state.enabled ? Icons.check_box : Icons.check_box_outline_blank,
+      label: 'Agent 자율사용',
+    ),
+    if (state.enabled)
+      _SessionMenuItem(
+        key: const ValueKey('session-autopilot-notify-only'),
+        value: _SessionAction.toggleAutopilotNotifyOnly,
+        icon: state.notifyOnly
+            ? Icons.check_box
+            : Icons.check_box_outline_blank,
+        label: '자동 입력 없이 알림만',
+      ),
+  ];
 }
 
 class _SessionMenuItemBody extends StatelessWidget {
@@ -1220,6 +1384,8 @@ class _SessionTile extends StatefulWidget {
     required this.statusColor,
     required this.busy,
     required this.attention,
+    this.autopilot,
+    this.aiConfigured = true,
     required this.onTap,
     required this.onShowMenu,
     required this.onClose,
@@ -1235,6 +1401,10 @@ class _SessionTile extends StatefulWidget {
 
   /// Agent로 식별된 세션의 작업·승인 대기·미확인 완료 상태.
   final SessionAttention? attention;
+
+  /// Agent 자율사용이 켜진 세션의 상태. 꺼져 있으면 null.
+  final AutopilotState? autopilot;
+  final bool aiConfigured;
 
   final VoidCallback onTap;
   final Future<void> Function(Offset position) onShowMenu;
@@ -1359,21 +1529,35 @@ class _SessionTileState extends State<_SessionTile> {
                     ],
                     const SizedBox(width: 4),
                     Expanded(
-                      child: Text(
-                        widget.session.displayName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: VibeColors.onSurface,
-                          fontWeight: FontWeight.w700,
-                          fontSize: 13,
+                      // 이름 영역에만 정보 툴팁을 둔다. 작은 버튼의 툴팁과
+                      // 겹치지 않게 하기 위해서다.
+                      child: SessionInfoTooltip(
+                        session: widget.session,
+                        attention: widget.attention,
+                        child: Text(
+                          widget.session.displayName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: VibeColors.onSurface,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 13,
+                          ),
                         ),
                       ),
                     ),
+                    if (widget.autopilot case final autopilot?)
+                      _AutopilotBadge(
+                        state: autopilot,
+                        aiConfigured: widget.aiConfigured,
+                      ),
                     if (widget.attention case final attention?)
-                      _AgentAttentionIndicator(attention: attention)
+                      AgentAttentionIndicator(
+                        state: attention.state,
+                        agentHint: attention.agentHint,
+                      )
                     else if (widget.busy)
-                      const _BusyIndicator(),
+                      const SessionBusyIndicator(),
                     _MiniTileButton(
                       icon: _expanded ? Icons.expand_less : Icons.expand_more,
                       tooltip: '세션 정보',
@@ -1477,6 +1661,44 @@ class _SessionTileState extends State<_SessionTile> {
                             ),
                           ),
                         ],
+                        if (widget.autopilot case final autopilot?) ...[
+                          const SizedBox(height: 5),
+                          Text(
+                            autopilot.statusLabel,
+                            key: const ValueKey('session-autopilot-status'),
+                            style: TextStyle(
+                              color: _autopilotColor(autopilot),
+                              fontSize: 10,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          if (autopilot.lastAction case final action?) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              action,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: VibeColors.onSurfaceDim,
+                                fontSize: 10,
+                                height: 1.25,
+                              ),
+                            ),
+                          ],
+                          if (autopilot.lastVerdict case final verdict?) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              '${verdict.source.label}: ${verdict.reason}',
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: VibeColors.onSurfaceDim,
+                                fontSize: 10,
+                                height: 1.25,
+                              ),
+                            ),
+                          ],
+                        ],
                       ],
                     ),
                   ),
@@ -1518,77 +1740,98 @@ class _MiniTileButton extends StatelessWidget {
   }
 }
 
-/// 세션이 작업 중(busy)일 때 보여주는 작은 회전 인디케이터.
-class _BusyIndicator extends StatelessWidget {
-  const _BusyIndicator();
+Color _autopilotColor(AutopilotState state) => switch (state.phase) {
+  AutopilotPhase.exhausted => VibeColors.statusError,
+  AutopilotPhase.waitingUsageReset => VibeColors.warning,
+  AutopilotPhase.idle => VibeColors.onSurfaceDim,
+  _ => VibeColors.accent,
+};
+
+/// Agent 자율사용이 켜진 세션의 배지. 동작 중이면 accent, 한도 대기는 경고색, 포기는 빨강.
+class _AutopilotBadge extends StatelessWidget {
+  const _AutopilotBadge({required this.state, required this.aiConfigured});
+
+  final AutopilotState state;
+  final bool aiConfigured;
 
   @override
   Widget build(BuildContext context) {
-    return const Padding(
-      padding: EdgeInsets.symmetric(horizontal: 4),
-      child: Tooltip(
-        message: '작업 중',
-        child: SizedBox(
-          width: 13,
-          height: 13,
-          child: ActivitySpinner(color: VibeColors.accent),
-        ),
-      ),
-    );
-  }
-}
-
-class _AgentAttentionIndicator extends StatelessWidget {
-  const _AgentAttentionIndicator({required this.attention});
-
-  final SessionAttention attention;
-
-  @override
-  Widget build(BuildContext context) {
-    if (attention.state == SessionAttentionState.working) {
-      return const _BusyIndicator();
-    }
+    final message = aiConfigured
+        ? state.statusLabel
+        : '${state.statusLabel}\nAI 설정 없음: 조용한 멈춤 판정은 생략';
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 2),
       child: Tooltip(
-        message:
-            '${attention.agentHint ?? 'SESSION'} · ${attention.state.label}',
+        message: message,
         child: Icon(
-          attention.state.icon,
-          size: 15,
-          color: attention.state.color,
+          Icons.auto_mode,
+          key: const ValueKey('session-autopilot-badge'),
+          size: 14,
+          color: _autopilotColor(state),
         ),
       ),
     );
   }
 }
 
-extension on SessionAttentionState {
-  String get label => switch (this) {
-    SessionAttentionState.idle => '대기',
-    SessionAttentionState.working => '작업 중',
-    SessionAttentionState.done => '완료 · 미확인',
-    SessionAttentionState.blocked => '입력 필요',
-  };
+/// 세로 탭 목록의 한 줄: 탭 그룹 머리 행 또는 세션 행.
+sealed class _RailEntry {
+  const _RailEntry();
+}
 
-  IconData get icon => switch (this) {
-    SessionAttentionState.idle => Icons.circle,
-    SessionAttentionState.working => Icons.sync,
-    SessionAttentionState.done => Icons.check_circle_outline,
-    SessionAttentionState.blocked => Icons.error_outline,
-  };
+class _HeaderEntry extends _RailEntry {
+  const _HeaderEntry(this.block);
 
-  Color get color => switch (this) {
-    SessionAttentionState.idle => VibeColors.statusConnected,
-    SessionAttentionState.working => VibeColors.accent,
-    SessionAttentionState.done => VibeColors.accent,
-    SessionAttentionState.blocked => VibeColors.statusError,
-  };
+  final SessionTabGroupBlock<SessionInfo> block;
+}
+
+class _SessionEntry extends _RailEntry {
+  const _SessionEntry(this.session, this.group);
+
+  final SessionInfo session;
+
+  /// 세션이 속한(펼쳐진) 탭 그룹. 그룹 없는 세션이면 null.
+  final SessionTabGroup? group;
+}
+
+/// 드래그 중 포인터가 가리키는 드롭 위치와 표시 방법.
+class _DropHover {
+  const _DropHover(
+    this.index,
+    this.target, {
+    this.lineAfter,
+    this.joins = false,
+  });
+
+  /// 가리키는 행([_RailEntry]) 인덱스.
+  final int index;
+  final SessionDropTarget target;
+
+  /// 삽입선을 행 아래(true)/위(false)에 그린다. null이면 선 없음.
+  final bool? lineAfter;
+
+  /// 접힌 탭 그룹 머리 행 위: 선 대신 머리 행을 강조한다.
+  final bool joins;
+
+  @override
+  bool operator ==(Object other) =>
+      other is _DropHover &&
+      other.index == index &&
+      other.target == target &&
+      other.lineAfter == lineAfter &&
+      other.joins == joins;
+
+  @override
+  int get hashCode => Object.hash(index, target, lineAfter, joins);
 }
 
 /// 세션 행 하나를 통째로 드래그하는 목록. 전용 핸들 없이 행을 끌어
 /// 레일 안의 다른 행 위·아래에 놓으면 순서가 바뀌고, 터미널 칸
 /// ([SessionPaneDeck]의 [DragTarget]) 위에 놓으면 그 칸에 배치된다.
+///
+/// 탭 그룹 안 행에 놓으면 그 그룹에 들어가고, 그룹 밖 행·목록 아래 빈 공간에
+/// 놓으면 그룹에서 빠진다. 탭 그룹 머리 행의 위쪽은 그룹 앞(그룹 밖),
+/// 아래쪽은 그룹 맨 앞, 접힌 그룹은 그룹 끝으로 들어간다.
 ///
 /// 클릭/탭은 세션 선택으로 남긴다. 플랫폼과 무관하게 마우스는 slop 이상
 /// 움직이면 바로 끌리고, 터치는 스크롤과 겹치지 않도록 길게 눌러 끈다. 터치에서
@@ -1596,13 +1839,16 @@ extension on SessionAttentionState {
 class _SessionList extends StatefulWidget {
   const _SessionList({
     required this.groupId,
-    required this.sessions,
+    required this.blocks,
     required this.tileBuilder,
-    required this.onReorder,
+    required this.headerBuilder,
+    required this.onDrop,
   });
 
   final String groupId;
-  final List<SessionInfo> sessions;
+
+  /// 작업공간 세션을 탭 그룹 단위로 묶은 목록([buildSessionTabBlocks]).
+  final List<SessionTabBlock<SessionInfo>> blocks;
 
   final Widget Function(
     BuildContext context,
@@ -1611,8 +1857,15 @@ class _SessionList extends StatefulWidget {
   )
   tileBuilder;
 
-  /// [oldIndex]의 세션을 원래 목록 기준 삽입 위치 [slot](0..length) 앞으로 옮긴다.
-  final void Function(int oldIndex, int slot) onReorder;
+  final Widget Function(
+    BuildContext context,
+    SessionTabGroupBlock<SessionInfo> block,
+    bool highlighted,
+  )
+  headerBuilder;
+
+  /// 세션을 [SessionDropTarget] 위치·소속으로 옮긴다.
+  final void Function(String sessionId, SessionDropTarget target) onDrop;
 
   @override
   State<_SessionList> createState() => _SessionListState();
@@ -1628,11 +1881,15 @@ class _SessionListState extends State<_SessionList>
   final _tileKeys = <String, GlobalKey<_SessionTileState>>{};
   late final Ticker _ticker;
 
-  /// 드롭 시 삽입될 위치(0..length). null이면 레일 위에 드래그 중이 아님.
-  int? _dropSlot;
+  /// 화면에 그리는 행(접힌 그룹의 멤버 제외).
+  late List<_RailEntry> _entries;
 
-  /// 이 목록에서 시작한 드래그의 원래 인덱스. 칸에서 끌어온 드래그면 null.
-  int? _draggedIndex;
+  /// 작업공간 세션 전체의 현재 배치(접힌 그룹의 멤버 포함).
+  late List<SessionPlacement> _placements;
+
+  /// 드롭될 위치. null이면 레일 위에 드래그 중이 아니거나 제자리다.
+  _DropHover? _hover;
+
   // 드롭 위치 변경이 행을 리빌드해도 시작점과 이동 이력을 유지한다.
   Offset? _dragOrigin;
   bool _longPressDrag = false;
@@ -1643,12 +1900,14 @@ class _SessionListState extends State<_SessionList>
   void initState() {
     super.initState();
     _ticker = createTicker(_onTick);
+    _rebuildEntries();
   }
 
   @override
   void didUpdateWidget(covariant _SessionList oldWidget) {
     super.didUpdateWidget(oldWidget);
-    final sessionIds = widget.sessions.map((session) => session.id).toSet();
+    _rebuildEntries();
+    final sessionIds = _placements.map((p) => p.id).toSet();
     _tileKeys.removeWhere((id, _) => !sessionIds.contains(id));
   }
 
@@ -1659,23 +1918,95 @@ class _SessionListState extends State<_SessionList>
     super.dispose();
   }
 
-  bool _accepts(PaneSessionDrag drag) =>
-      drag.groupId == widget.groupId &&
-      widget.sessions.any((s) => s.id == drag.sessionId);
-
-  int _indexOf(String sessionId) =>
-      widget.sessions.indexWhere((s) => s.id == sessionId);
-
-  void _setSlot(int? slot) {
-    if (_dropSlot == slot) return;
-    setState(() => _dropSlot = slot);
+  void _rebuildEntries() {
+    final entries = <_RailEntry>[];
+    final placements = <SessionPlacement>[];
+    for (final block in widget.blocks) {
+      switch (block) {
+        case SessionTabSingle(:final item):
+          entries.add(_SessionEntry(item, null));
+          placements.add(SessionPlacement(item.id, null));
+        case SessionTabGroupBlock(:final group, :final members):
+          entries.add(_HeaderEntry(block));
+          for (final member in members) {
+            if (!group.collapsed) entries.add(_SessionEntry(member, group));
+            placements.add(SessionPlacement(member.id, group.id));
+          }
+      }
+    }
+    _entries = entries;
+    _placements = placements;
   }
 
-  void _drop(PaneSessionDrag drag, int slot) {
-    _setSlot(null);
-    final oldIndex = _indexOf(drag.sessionId);
-    if (oldIndex < 0 || slot == oldIndex || slot == oldIndex + 1) return;
-    widget.onReorder(oldIndex, slot);
+  bool _accepts(PaneSessionDrag drag) =>
+      drag.groupId == widget.groupId &&
+      _placements.any((p) => p.id == drag.sessionId);
+
+  /// 놓아도 순서·소속이 그대로인 위치(자기 자리)인지.
+  bool _isNoOp(String sessionId, SessionDropTarget target) {
+    final next = placeSession(_placements, sessionId, target);
+    if (next.length != _placements.length) return false;
+    for (var i = 0; i < next.length; i++) {
+      if (next[i] != _placements[i]) return false;
+    }
+    return true;
+  }
+
+  void _setHover(_DropHover? hover) {
+    if (_hover == hover) return;
+    setState(() => _hover = hover);
+  }
+
+  /// 포인터가 [index] 행 높이의 [fraction] 지점(0=위, 1=아래)에 있을 때의
+  /// 드롭 위치.
+  _DropHover _hoverAt(int index, double fraction) {
+    switch (_entries[index]) {
+      case _SessionEntry(:final session, :final group):
+        final after = fraction >= 0.5;
+        return _DropHover(
+          index,
+          SessionDropTarget(
+            anchorId: session.id,
+            after: after,
+            tabGroupId: group?.id,
+          ),
+          lineAfter: after,
+        );
+      case _HeaderEntry(:final block):
+        final group = block.group;
+        final first = block.members.first.id;
+        final beforeGroup = fraction < (group.collapsed ? 1 / 3 : 0.5);
+        if (beforeGroup) {
+          return _DropHover(
+            index,
+            SessionDropTarget(anchorId: first),
+            lineAfter: false,
+          );
+        }
+        if (group.collapsed) {
+          return _DropHover(
+            index,
+            SessionDropTarget(
+              anchorId: block.members.last.id,
+              after: true,
+              tabGroupId: group.id,
+            ),
+            joins: true,
+          );
+        }
+        return _DropHover(
+          index,
+          SessionDropTarget(anchorId: first, tabGroupId: group.id),
+          lineAfter: true,
+        );
+    }
+  }
+
+  void _drop(PaneSessionDrag drag, _DropHover fallback) {
+    final hover = _hover ?? fallback;
+    _setHover(null);
+    if (_isNoOp(drag.sessionId, hover.target)) return;
+    widget.onDrop(drag.sessionId, hover.target);
   }
 
   // ── 가장자리 자동 스크롤 ───────────────────────────────────────────────
@@ -1709,12 +2040,11 @@ class _SessionListState extends State<_SessionList>
   /// onDraggableCanceled는 행이 폐기돼도 호출되므로 거기서도 이 정리를 한다.
   void _finishDrag() {
     if (!mounted) return;
-    _draggedIndex = null;
     _dragOrigin = null;
     _longPressDrag = false;
     _dragMoved = false;
     _stopAutoScroll();
-    _setSlot(null);
+    _setHover(null);
   }
 
   void _onTick(Duration _) {
@@ -1766,7 +2096,6 @@ class _SessionListState extends State<_SessionList>
         _dragOrigin = position;
         _longPressDrag = delayed;
         _dragMoved = false;
-        _draggedIndex = _indexOf(session.id);
       },
       onDragUpdate: (details) {
         final start = _dragOrigin;
@@ -1791,44 +2120,57 @@ class _SessionListState extends State<_SessionList>
     );
   }
 
-  /// 행 하나 = 드롭 대상. 포인터가 위쪽 절반이면 이 행 앞, 아래쪽이면 뒤에 삽입.
+  /// 행 하나 = 드롭 대상. 포인터 위치로 [_hoverAt]이 삽입 위치·소속을 정한다.
   Widget _row(BuildContext _, int index) {
-    final session = widget.sessions[index];
-    final last = index == widget.sessions.length - 1;
-    // 목록 갱신 중에도 세션 행의 상태와 context를 유지한다.
-    final tileKey = _tileKeys.putIfAbsent(
-      session.id,
-      () => GlobalKey<_SessionTileState>(),
-    );
+    final entry = _entries[index];
+    final last = index == _entries.length - 1;
     // Builder의 context로 이 행(RenderBox)의 위치를 얻는다. ListView builder의
     // context는 sliver 자체라 행 좌표로 쓸 수 없다.
     return Builder(
-      key: ValueKey('session-row-${session.id}'),
+      key: switch (entry) {
+        _SessionEntry(:final session) => ValueKey('session-row-${session.id}'),
+        _HeaderEntry(:final block) => ValueKey(
+          'tab-group-row-${block.group.id}',
+        ),
+      },
       builder: (rowContext) => DragTarget<PaneSessionDrag>(
         onWillAcceptWithDetails: (details) => _accepts(details.data),
         onMove: (details) {
           final box = rowContext.findRenderObject();
           if (box is! RenderBox) return;
           final local = box.globalToLocal(details.offset);
-          _setSlot(local.dy < box.size.height / 2 ? index : index + 1);
+          final hover = _hoverAt(index, local.dy / box.size.height);
+          _setHover(
+            _isNoOp(details.data.sessionId, hover.target) ? null : hover,
+          );
         },
-        onLeave: (_) => _setSlot(null),
+        onLeave: (_) => _setHover(null),
         onAcceptWithDetails: (details) =>
-            _drop(details.data, _dropSlot ?? index),
+            _drop(details.data, _hoverAt(index, 0)),
         builder: (context, _, _) {
-          final slot = _dropSlot;
-          final showTop = slot == index && !_isOwnSlot(index);
-          final showBottom =
-              last && slot == index + 1 && !_isOwnSlot(index + 1);
-          final tile = widget.tileBuilder(context, session, tileKey);
+          final hover = _hover?.index == index ? _hover : null;
+          final Widget content = switch (entry) {
+            _SessionEntry(:final session, :final group) => _sessionRow(
+              context,
+              session,
+              group,
+            ),
+            _HeaderEntry(:final block) => widget.headerBuilder(
+              context,
+              block,
+              hover?.joins ?? false,
+            ),
+          };
           return Padding(
             padding: EdgeInsets.only(bottom: last ? 0 : _gap),
             child: Stack(
               clipBehavior: Clip.none,
               children: [
-                _draggableRow(session, tile, tileKey),
-                if (showTop) _insertionLine(top: -(_gap / 2 + 1)),
-                if (showBottom) _insertionLine(bottom: -(_gap / 2 + 1)),
+                content,
+                if (hover?.lineAfter == false)
+                  _insertionLine(top: -(_gap / 2 + 1)),
+                if (hover?.lineAfter == true)
+                  _insertionLine(bottom: -(_gap / 2 + 1)),
               ],
             ),
           );
@@ -1837,11 +2179,32 @@ class _SessionListState extends State<_SessionList>
     );
   }
 
-  /// 드래그 중인 세션 자신의 바로 앞/뒤 슬롯은 순서가 바뀌지 않으므로 표시하지 않는다.
-  /// 터미널 칸에서 끌어온 드래그([_draggedIndex]가 null)는 항상 표시한다.
-  bool _isOwnSlot(int slot) {
-    final dragged = _draggedIndex;
-    return dragged != null && (slot == dragged || slot == dragged + 1);
+  Widget _sessionRow(
+    BuildContext context,
+    SessionInfo session,
+    SessionTabGroup? group,
+  ) {
+    // 목록 갱신 중에도 세션 행의 상태와 context를 유지한다.
+    final tileKey = _tileKeys.putIfAbsent(
+      session.id,
+      () => GlobalKey<_SessionTileState>(),
+    );
+    final row = _draggableRow(
+      session,
+      widget.tileBuilder(context, session, tileKey),
+      tileKey,
+    );
+    if (group == null) return row;
+    // 탭 그룹 멤버는 그룹 색 막대로 묶어 보인다.
+    return Container(
+      key: ValueKey('tab-group-member-${session.id}'),
+      margin: const EdgeInsets.only(left: 4),
+      padding: const EdgeInsets.only(left: 6),
+      decoration: BoxDecoration(
+        border: Border(left: BorderSide(color: group.color.color, width: 3)),
+      ),
+      child: row,
+    );
   }
 
   Widget _insertionLine({double? top, double? bottom}) {
@@ -1864,17 +2227,26 @@ class _SessionListState extends State<_SessionList>
 
   @override
   Widget build(BuildContext context) {
-    // 목록 아래 빈 공간에 놓으면 맨 끝으로 이동.
+    // 목록 아래 빈 공간에 놓으면 맨 끝(그룹 밖)으로 이동한다. 표시는 마지막
+    // 행 아래 선으로 대신한다.
+    final endHover = _DropHover(
+      _entries.length - 1,
+      SessionDropTarget.end,
+      lineAfter: true,
+    );
     return DragTarget<PaneSessionDrag>(
       onWillAcceptWithDetails: (details) => _accepts(details.data),
-      onMove: (_) => _setSlot(widget.sessions.length),
-      onLeave: (_) => _setSlot(null),
-      onAcceptWithDetails: (details) =>
-          _drop(details.data, widget.sessions.length),
+      onMove: (details) => _setHover(
+        _isNoOp(details.data.sessionId, SessionDropTarget.end)
+            ? null
+            : endHover,
+      ),
+      onLeave: (_) => _setHover(null),
+      onAcceptWithDetails: (details) => _drop(details.data, endHover),
       builder: (context, _, _) => ListView.builder(
         controller: _scroll,
         padding: const EdgeInsets.all(10),
-        itemCount: widget.sessions.length,
+        itemCount: _entries.length,
         itemBuilder: _row,
       ),
     );
