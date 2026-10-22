@@ -133,6 +133,58 @@ class SessionManager extends Notifier<List<SessionInfo>> {
 
   int _counter = 0;
   String _genId() => 's${_counter++}';
+
+  /// 세션 목록이 바뀔 때마다 멤버가 없어진 탭 그룹을 지운다. 세션을 닫거나
+  /// 다른 작업공간·그룹 밖으로 옮기는 모든 경로가 이 setter를 거치므로, 목록을
+  /// 그리는 위젯이 없어도 "빈 탭 그룹은 없다"는 불변식이 모델에서 지켜진다.
+  ///
+  /// 탭 그룹 컨트롤러가 이 provider를 구독하면 Riverpod 순환 의존이 되므로
+  /// (docs/session-tab-groups.md) 세션 쪽에서 컨트롤러를 부른다.
+  @override
+  set state(List<SessionInfo> value) {
+    super.state = value;
+    _removeEmptyTabGroups();
+  }
+
+  /// 재시도처럼 세션을 닫았다가 곧 같은 그룹으로 다시 여는 동안 비어도
+  /// 지우지 않을 탭 그룹 id와 그 예약 수.
+  final Map<String, int> _reservedTabGroups = {};
+
+  void _removeEmptyTabGroups() {
+    if (!ref.mounted) return;
+    ref
+        .read(sessionTabGroupProvider.notifier)
+        .removeEmptyGroups(state, keep: _reservedTabGroups.keys);
+  }
+
+  /// [tabGroupId]를 [action]이 끝날 때까지 빈 그룹 정리에서 제외한다.
+  Future<T> _holdTabGroup<T>(
+    String? tabGroupId,
+    Future<T> Function() action,
+  ) async {
+    if (tabGroupId == null) return action();
+    _reservedTabGroups.update(tabGroupId, (n) => n + 1, ifAbsent: () => 1);
+    try {
+      return await action();
+    } finally {
+      final left = _reservedTabGroups[tabGroupId]! - 1;
+      if (left == 0) {
+        _reservedTabGroups.remove(tabGroupId);
+      } else {
+        _reservedTabGroups[tabGroupId] = left;
+      }
+      _removeEmptyTabGroups();
+    }
+  }
+
+  /// [tabGroupId]가 [workspaceGroupId] 작업공간에 지금 있는 탭 그룹이면
+  /// 그대로, 아니면(그 사이 해제·삭제됨) null.
+  String? _liveTabGroupId(String? tabGroupId, String workspaceGroupId) {
+    if (tabGroupId == null) return null;
+    final group = ref.read(sessionTabGroupProvider).byId(tabGroupId);
+    return group?.workspaceGroupId == workspaceGroupId ? tabGroupId : null;
+  }
+
   final Random _secureRandom = Random.secure();
   final Set<String> _newLocalSessions = {};
   final Map<String, String> _nativeSessionReferences = {};
@@ -377,8 +429,15 @@ class SessionManager extends Notifier<List<SessionInfo>> {
 
   /// 새 세션을 열고 연결을 시도한다. 생성한 sessionId를 반환한다.
   /// [insertionIndex]를 지정하면 연결 시작부터 해당 목록 위치에 표시한다.
-  /// [insertAfterId]를 지정하면 그 세션 바로 다음에 표시한다. 위치는 추가하는
-  /// 시점에 다시 찾으므로 그 사이 탭이 열리거나 닫혀도 어긋나지 않는다.
+  /// [insertAfterId]를 지정하면 그 세션 바로 다음에 표시한다. 그 세션이 없으면
+  /// [insertAfterAnyOf] 중 아직 있는 마지막 세션 다음, 그것도 없으면
+  /// [insertBeforeAnyOf] 중 아직 있는 첫 세션 앞, 모두 없으면 [insertionIndex]
+  /// (없으면 맨 끝)에 표시한다.
+  /// 위치는 추가하는 시점에 다시 찾으므로 그 사이 탭이 열리거나 닫혀도
+  /// 어긋나지 않는다.
+  /// [tabGroupId]를 지정하면 그 탭 그룹 멤버로 연다(그 사이 그룹이 없어졌으면
+  /// 그룹 없음). 그 그룹이 접혀 있으면 펼친다. 어느 경우든 같은 탭 그룹
+  /// 멤버는 목록에서 이어지게 정리한다.
   Future<String> openSession(
     Host host, {
     required Future<bool> Function(String, String, String, HostKeyVerdict)
@@ -394,6 +453,9 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     String? appId,
     int? insertionIndex,
     String? insertAfterId,
+    List<String> insertAfterAnyOf = const [],
+    List<String> insertBeforeAnyOf = const [],
+    String? tabGroupId,
     bool? expectRemoteSession,
   }) async {
     // 세션 복제처럼 이전 Host 객체를 재사용해도 최신 호스트 기본값을 적용한다.
@@ -438,6 +500,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       host,
       title: title,
       groupId: groupId,
+      tabGroupId: _liveTabGroupId(tabGroupId, groupId),
       remoteSessionId: resolvedRemoteSessionId,
       localSessionId: resolvedLocalId,
       agentWorkspace: agentWorkspace,
@@ -446,14 +509,31 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     final engine = session.engine;
     _configureSessionTracking(id, host, engine);
     final next = [...state];
-    final anchorIndex = insertAfterId == null
-        ? -1
-        : next.indexWhere((s) => s.id == insertAfterId);
-    final index = anchorIndex >= 0
-        ? anchorIndex + 1
+    int indexOf(String? id) =>
+        id == null ? -1 : next.indexWhere((s) => s.id == id);
+    final after = [
+      indexOf(insertAfterId),
+      ...insertAfterAnyOf.reversed.map(indexOf),
+    ].firstWhere((i) => i >= 0, orElse: () => -1);
+    final before = insertBeforeAnyOf
+        .map(indexOf)
+        .firstWhere((i) => i >= 0, orElse: () => -1);
+    final index = after >= 0
+        ? after + 1
+        : before >= 0
+        ? before
         : (insertionIndex ?? next.length);
     next.insert(index.clamp(0, next.length), session);
-    state = next;
+    state = _withContiguousTabGroups(next);
+    // 새 세션(복제·재시도·Agent 등)이 접힌 탭 그룹에 들어가면 그룹을 펼친다.
+    // 새 세션은 연결(호스트 키·키보드 대화형 확인)이 끝나야 활성이 되고, 제어
+    // 서버로 띄운 Agent 세션은 활성이 되지 않는다. 그동안 활성 멤버만 보이는
+    // 표시 규칙(SessionTabGroupBlock.visibleMembers)으로는 숨어 버린다.
+    if (session.tabGroupId case final tabGroupId?) {
+      ref
+          .read(sessionTabGroupProvider.notifier)
+          .setCollapsed(tabGroupId, false);
+    }
     ref
         .read(telemetryProvider)
         .logEvent(TelemetryEvent.sessionOpen(host.connectionType));
@@ -653,7 +733,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
   }
 
   /// 실행 중인 세션의 현재 상태를 기준으로 새 세션을 만든다.
-  /// 새 탭은 목록 끝이 아니라 원본 세션 바로 아래에 놓는다.
+  /// 새 탭은 목록 끝이 아니라 원본 세션 바로 아래, 원본과 같은 탭 그룹에
+  /// 놓는다(그룹 멤버가 목록에서 갈라지지 않게).
   ///
   /// 로컬 셸은 추적 중인 셸 종류와 작업 디렉터리를 시작 옵션으로 넘기고,
   /// SSH는 연결과 시작 스크립트 실행이 끝난 뒤 현재 원격 디렉터리로 이동한다.
@@ -691,6 +772,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
       onKeyboardInteractive: onKeyboardInteractive,
       title: source.title,
       groupId: source.groupId,
+      tabGroupId: source.tabGroupId,
       agentWorkspace: agentWorkspace,
       insertAfterId: id,
     );
@@ -2382,7 +2464,8 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     }
   }
 
-  /// 실패한 세션을 닫고 같은 호스트로 다시 연결한다. 연결 실패 후 사용자가
+  /// 실패한 세션을 닫고 같은 호스트로 다시 연결한다. 목록 자리와 탭 그룹
+  /// 소속은 그대로 이어받는다. 연결 실패 후 사용자가
   /// 호스트 정보를 수정했을 수 있으므로, 세션 생성 시점에 캡처한 스냅샷이
   /// 아니라 DB에서 최신 호스트를 다시 읽어 연결한다. 호스트가 삭제됐으면
   /// 기존 세션의 호스트로 폴백한다. 생성한 새 sessionId를 반환한다.
@@ -2402,29 +2485,44 @@ class SessionManager extends Notifier<List<SessionInfo>> {
         .read(hostRepositoryProvider)
         .getById(session.host.id);
     final host = latest ?? session.host;
-    final title = session.title;
-    final remoteSessionId = session.remoteSessionId;
 
-    // 호스트 조회 중 사용자가 정렬하거나 닫았을 수 있으므로 현재 위치를 쓴다.
-    final insertionIndex = state.indexWhere((s) => s.id == id);
-    if (insertionIndex < 0) return id;
+    // 호스트 조회 중 사용자가 정렬·이름 변경·그룹 이동을 하거나 닫았을 수
+    // 있으므로 현재 위치와 현재 세션 정보(작업공간·탭 그룹 소속 포함)를 쓴다.
+    final index = state.indexWhere((s) => s.id == id);
+    if (index < 0) return id;
+    final retrying = state[index];
+    // 다시 여는 동안에도 탭이 열리고 닫힐 수 있으므로 위치는 인덱스가 아니라
+    // 앞쪽·뒤쪽 세션 id 전체로 넘겨 추가하는 시점에 다시 찾게 한다. 아직 있는
+    // 마지막 앞쪽 세션 뒤, 없으면 아직 있는 첫 뒤쪽 세션 앞, 모두 없으면 맨
+    // 끝이다. 목록 전체 순서로 찾으므로 전역 자리도 지키고, 작업공간 안 순서도
+    // 지킨다(다른 작업공간 정렬은 그 작업공간 자리끼리만 바꾼다).
+    // 알려진 한계: 그 사이 이웃을 드래그로 옮기면 옮긴 이웃을 따라간다.
+    final earlierIds = [for (final s in state.take(index)) s.id];
+    final laterIds = [for (final s in state.skip(index + 1)) s.id];
+    final title = retrying.title;
+    final remoteSessionId = retrying.remoteSessionId;
     // 닫으면 기록이 지워지므로 먼저 본다.
     final fresh = _freshRemoteWork.contains(id);
-    closeSession(id);
-    final retriedId = await openSession(
-      host,
-      onHostKey: onHostKey,
-      onKeyboardInteractive: onKeyboardInteractive,
-      expectRemoteSession: !fresh,
-      title: title,
-      groupId: session.groupId,
-      remoteSessionId: remoteSessionId,
-      localSessionId: session.localSessionId,
-      persistentLocal: session.localSessionId != null,
-      agentWorkspace: session.agentWorkspace,
-      insertionIndex: insertionIndex,
-    );
-    final workspaceId = session.agentWorkspace?.workspaceId;
+    // 닫은 뒤 다시 열 때까지 그룹이 비어도(혼자인 멤버) 지우지 않는다.
+    final retriedId = await _holdTabGroup(retrying.tabGroupId, () {
+      closeSession(id);
+      return openSession(
+        host,
+        onHostKey: onHostKey,
+        onKeyboardInteractive: onKeyboardInteractive,
+        expectRemoteSession: !fresh,
+        title: title,
+        groupId: retrying.groupId,
+        tabGroupId: retrying.tabGroupId,
+        remoteSessionId: remoteSessionId,
+        localSessionId: retrying.localSessionId,
+        persistentLocal: retrying.localSessionId != null,
+        agentWorkspace: retrying.agentWorkspace,
+        insertAfterAnyOf: earlierIds,
+        insertBeforeAnyOf: laterIds,
+      );
+    });
+    final workspaceId = retrying.agentWorkspace?.workspaceId;
     if (workspaceId != null) {
       final store = ref.read(agentWorktreeStoreProvider);
       final entry = await store.find(workspaceId);
@@ -3115,50 +3213,29 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     _persistOpenSessions();
   }
 
-  void reorderSession(int oldIndex, int newIndex) {
-    final adjustedIndex = oldIndex < newIndex ? newIndex - 1 : newIndex;
-    moveSession(oldIndex, adjustedIndex);
-  }
-
-  void moveSession(int oldIndex, int targetIndex) {
-    if (oldIndex < 0 || oldIndex >= state.length) return;
-
-    final next = [...state];
-    final session = next.removeAt(oldIndex);
-    final boundedIndex = targetIndex.clamp(0, next.length).toInt();
-    next.insert(boundedIndex, session);
-    state = next;
-    _persistOpenSessions();
-  }
-
-  void moveSessionInGroup(String groupId, int oldIndex, int targetIndex) {
-    final groupSessions = [
-      for (final session in state)
-        if (session.groupId == groupId) session,
+  /// 같은 탭 그룹 멤버가 목록에서 이어지도록 첫 멤버 자리에 모은다
+  /// ([normalizeSessionPlacements]). 그룹 없는 세션의 상대 순서는 그대로다.
+  /// 탭 그룹은 한 작업공간 안에만 있으므로 작업공간별 순서도 유지된다.
+  static List<SessionInfo> _withContiguousTabGroups(
+    List<SessionInfo> sessions,
+  ) {
+    if (sessions.every((session) => session.tabGroupId == null)) {
+      return sessions;
+    }
+    final byId = {for (final session in sessions) session.id: session};
+    return [
+      for (final placement in normalizeSessionPlacements([
+        for (final session in sessions)
+          SessionPlacement(session.id, session.tabGroupId),
+      ]))
+        byId[placement.id]!,
     ];
-    if (oldIndex < 0 || oldIndex >= groupSessions.length) return;
-    if (groupSessions.length < 2) return;
-
-    final reordered = [...groupSessions];
-    final session = reordered.removeAt(oldIndex);
-    final boundedIndex = targetIndex.clamp(0, reordered.length).toInt();
-    reordered.insert(boundedIndex, session);
-
-    var nextGroupIndex = 0;
-    state = [
-      for (final session in state)
-        if (session.groupId == groupId)
-          reordered[nextGroupIndex++]
-        else
-          session,
-    ];
-    _persistOpenSessions();
   }
 
   /// [groupId] 작업공간 세션의 순서와 탭 그룹 소속을 [placements]대로 바꾼다.
   /// [placements]는 그 작업공간의 세션을 빠짐없이 한 번씩 담아야 하며,
-  /// 그렇지 않으면(그 사이 세션이 열리거나 닫힌 경우) 무시한다.
-  void arrangeSessionsInGroup(
+  /// 그렇지 않으면(그 사이 세션이 열리거나 닫힌 경우) 무시하고 false를 돌려준다.
+  bool arrangeSessionsInGroup(
     String groupId,
     List<SessionPlacement> placements,
   ) {
@@ -3170,7 +3247,7 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     if (placedIds.length != placements.length ||
         placedIds.length != groupSessions.length ||
         !placedIds.containsAll(groupSessions.keys)) {
-      return;
+      return false;
     }
     SessionInfo placed(SessionPlacement placement) {
       final session = groupSessions[placement.id]!;
@@ -3189,9 +3266,10 @@ class SessionManager extends Notifier<List<SessionInfo>> {
     for (var i = 0; i < next.length && !changed; i++) {
       changed = !identical(next[i], state[i]);
     }
-    if (!changed) return;
+    if (!changed) return true;
     state = next;
     _persistOpenSessions();
+    return true;
   }
 
   /// 세션 목록 밖의 배치 정보(탭 그룹 이름·색·접힘)가 바뀌었을 때 복원

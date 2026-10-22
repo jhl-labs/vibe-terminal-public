@@ -18,16 +18,17 @@ import 'session_tab_group_header.dart';
 /// 접힌 좌측 패널(폭 52)의 세션 아이콘 목록. 활성 작업공간의 세션을 세로
 /// 탭 순서대로 보인다.
 ///
-/// - 세션: Agent 브랜드 배지 또는 이름 첫 글자(연결 상태 색), 모서리에 Agent
-///   상태(대기 점·작업 중 스피너·완료·입력 필요). 누르면 그 세션을 연다.
+/// - 세션: 아주 작은 글씨의 이름 한 줄. 연결 상태는 왼쪽 위 점, Agent 종류는
+///   아래쪽 얇은 브랜드 색 선, Agent 상태(대기 점·작업 중 스피너·완료·입력
+///   필요)는 오른쪽 위 배지로 보인다. 누르면 그 세션을 연다.
 /// - 펼친 탭 그룹: 그룹 색의 얇은 막대 아래에 멤버를 보인다.
-/// - 접힌 탭 그룹: 그룹 칩 하나(색·세션 수·요약 상태). 누르면 그룹을 펼친다.
+/// - 접힌 탭 그룹: 그룹 색 칩 하나(이름·요약 상태, 세션 수는 툴팁). 누르면
+///   그룹을 펼친다. 활성 세션이 그 그룹에 있으면 칩 아래에 그 세션만 보인다.
 class CollapsedSessionList extends ConsumerWidget {
   const CollapsedSessionList({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    listenSessionTabGroupCleanup(ref);
     final workspaceId = ref.watch(
       sessionGroupProvider.select((state) => state.activeGroupId),
     );
@@ -55,30 +56,40 @@ class CollapsedSessionList extends ConsumerWidget {
       },
     );
 
+    List<SessionInfo> visibleMembers(SessionTabGroupBlock<SessionInfo> block) =>
+        block.visibleMembers(isActive: (member) => member.id == activeId);
+
     return ListView(
       key: const ValueKey('collapsed-session-list'),
       padding: const EdgeInsets.symmetric(vertical: 6),
       children: [
         for (final block in blocks)
-          switch (block) {
-            SessionTabSingle(:final item) => sessionItem(item),
+          ...switch (block) {
+            SessionTabSingle(:final item) => [sessionItem(item)],
             SessionTabGroupBlock(:final group, :final members)
                 when group.collapsed =>
-              _CollapsedGroupChip(
-                key: ValueKey('collapsed-tab-group-${group.id}'),
-                group: group,
-                members: members,
-                onTap: () => ref
-                    .read(sessionTabGroupProvider.notifier)
-                    .setCollapsed(group.id, false),
-              ),
-            SessionTabGroupBlock(:final group, :final members) => Column(
-              key: ValueKey('collapsed-tab-group-${group.id}'),
-              children: [
-                _GroupBar(group: group),
-                for (final member in members) sessionItem(member),
+              [
+                _CollapsedGroupChip(
+                  key: ValueKey('collapsed-tab-group-${group.id}'),
+                  group: group,
+                  members: members,
+                  onTap: () => ref
+                      .read(sessionTabGroupProvider.notifier)
+                      .setCollapsed(group.id, false),
+                ),
+                // 접힌 그룹이어도 활성 세션은 칩 바로 아래에 보인다(레일과 같은
+                // 규칙). 그룹의 접힘 상태는 바꾸지 않는다.
+                for (final member in visibleMembers(block)) sessionItem(member),
               ],
-            ),
+            SessionTabGroupBlock(:final group, :final members) => [
+              Column(
+                key: ValueKey('collapsed-tab-group-${group.id}'),
+                children: [
+                  _GroupBar(group: group),
+                  for (final member in members) sessionItem(member),
+                ],
+              ),
+            ],
           },
       ],
     );
@@ -130,83 +141,140 @@ class _CollapsedSessionItem extends ConsumerWidget {
     final statusColor = sessionStatusColor(session.status);
     final brand = AgentBrand.forHint(attention?.agentHint);
     final name = session.displayName.trim();
-    final initial = name.isEmpty ? '?' : name.characters.first.toUpperCase();
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
       child: SessionInfoTooltip(
         session: session,
         attention: attention,
         preferBelow: false,
-        child: Material(
-          color: selected ? VibeColors.surfacePressed : VibeColors.surfaceHigh,
-          borderRadius: BorderRadius.circular(8),
-          child: InkWell(
-            onTap: onTap,
-            borderRadius: BorderRadius.circular(8),
-            child: Container(
-              height: 36,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(
-                  color: selected ? VibeColors.accent : VibeColors.borderSoft,
-                ),
-              ),
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  Center(
-                    child: brand != null
-                        ? AgentBrandBadge(brand: brand)
-                        : Text(
-                            initial,
-                            style: TextStyle(
-                              color: statusColor,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                  ),
-                  // 브랜드 배지는 자체 색을 써서, 연결 상태는 점으로 따로 보인다.
-                  Positioned(
-                    left: 3,
-                    bottom: 3,
-                    child: Container(
-                      key: ValueKey('collapsed-status-${session.id}'),
-                      width: 6,
-                      height: 6,
-                      decoration: BoxDecoration(
-                        color: statusColor,
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                  ),
-                  if (attention != null || busy)
-                    Positioned(
-                      right: -2,
-                      top: -2,
-                      child: _CornerBadge(
-                        child: attention != null
-                            ? AgentAttentionIndicator(
-                                key: ValueKey(
-                                  'collapsed-attention-${session.id}',
-                                ),
-                                state: attention.state,
-                                agentHint: attention.agentHint,
-                                size: 11,
-                                padding: 0,
-                              )
-                            : const SessionBusyIndicator(size: 9, padding: 0),
-                      ),
-                    ),
-                ],
-              ),
+        child: _CollapsedTile(
+          selected: selected,
+          onTap: onTap,
+          background: selected
+              ? VibeColors.surfacePressed
+              : VibeColors.surfaceHigh,
+          borderColor: selected ? VibeColors.accent : VibeColors.borderSoft,
+          label: name.isEmpty ? '?' : name,
+          labelColor: selected
+              ? VibeColors.onSurface
+              : VibeColors.onSurfaceMuted,
+          // Agent 종류는 글자 대신 브랜드 색의 얇은 선으로만 구분한다.
+          accent: brand?.background,
+          topLeft: Container(
+            key: ValueKey('collapsed-status-${session.id}'),
+            width: 5,
+            height: 5,
+            decoration: BoxDecoration(
+              color: statusColor,
+              shape: BoxShape.circle,
             ),
           ),
+          topRight: attention != null
+              ? AgentAttentionIndicator(
+                  key: ValueKey('collapsed-attention-${session.id}'),
+                  state: attention.state,
+                  agentHint: attention.agentHint,
+                  size: 10,
+                  padding: 0,
+                )
+              : busy
+              ? const SessionBusyIndicator(size: 8, padding: 0)
+              : null,
         ),
       ),
     );
   }
+}
+
+/// 접힌 목록의 칸 하나. 이름은 작은 글씨 한 줄로 줄이고, 상태 표시는 모서리에
+/// 겹쳐 그려 글자 자리를 차지하지 않는다.
+class _CollapsedTile extends StatelessWidget {
+  const _CollapsedTile({
+    required this.selected,
+    required this.onTap,
+    required this.background,
+    required this.borderColor,
+    required this.label,
+    required this.labelColor,
+    this.accent,
+    this.topLeft,
+    this.topRight,
+  });
+
+  static const height = 28.0;
+
+  final bool selected;
+  final VoidCallback onTap;
+  final Color background;
+  final Color borderColor;
+  final String label;
+  final Color labelColor;
+  final Color? accent;
+  final Widget? topLeft;
+  final Widget? topRight;
+
+  @override
+  Widget build(BuildContext context) => Material(
+    color: background,
+    borderRadius: BorderRadius.circular(6),
+    child: InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        height: height,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: borderColor),
+        ),
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 3),
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  softWrap: false,
+                  // 좁은 칸에서 말줄임표가 글자 자리를 먹지 않도록 끝을 흐리게 자른다.
+                  overflow: TextOverflow.fade,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: labelColor,
+                    fontSize: 8.5,
+                    height: 1.1,
+                    letterSpacing: -0.3,
+                    fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                  ),
+                ),
+              ),
+            ),
+            if (accent != null)
+              Positioned(
+                left: 8,
+                right: 8,
+                bottom: 2,
+                child: Container(
+                  height: 2,
+                  decoration: BoxDecoration(
+                    color: accent,
+                    borderRadius: BorderRadius.circular(1),
+                  ),
+                ),
+              ),
+            if (topLeft != null) Positioned(left: 3, top: 3, child: topLeft!),
+            if (topRight != null)
+              Positioned(
+                right: -3,
+                top: -3,
+                child: _CornerBadge(child: topRight!),
+              ),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 /// 아이콘 모서리 배지 바탕. 아이콘 경계와 겹쳐도 상태가 읽히게 한다.
@@ -226,8 +294,8 @@ class _CornerBadge extends StatelessWidget {
   );
 }
 
-/// 접힌 탭 그룹 하나를 대신하는 칩. 그룹 색·세션 수와 멤버 Agent 상태 요약을
-/// 보이고, 누르면 그룹을 펼친다.
+/// 접힌 탭 그룹 하나를 대신하는 칩. 그룹 색·이름과 멤버 Agent 상태 요약을
+/// 보이고(세션 수는 툴팁), 누르면 그룹을 펼친다.
 class _CollapsedGroupChip extends ConsumerWidget {
   const _CollapsedGroupChip({
     super.key,
@@ -251,52 +319,25 @@ class _CollapsedGroupChip extends ConsumerWidget {
     );
     final color = group.color.color;
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
       child: Tooltip(
         message: '${group.name} · 세션 ${members.length}개 (눌러서 펼치기)',
-        child: Material(
-          color: color.withValues(alpha: 0.18),
-          borderRadius: BorderRadius.circular(8),
-          child: InkWell(
-            onTap: onTap,
-            borderRadius: BorderRadius.circular(8),
-            child: Container(
-              height: 36,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: color, width: 1.5),
-              ),
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  Center(
-                    child: Text(
-                      '${members.length}',
-                      style: TextStyle(
-                        color: color,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                  ),
-                  if (summary != null)
-                    Positioned(
-                      right: -2,
-                      top: -2,
-                      child: _CornerBadge(
-                        child: AgentAttentionIndicator(
-                          key: ValueKey('collapsed-group-summary-${group.id}'),
-                          state: summary,
-                          agentHint: group.name,
-                          size: 11,
-                          padding: 0,
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
+        child: _CollapsedTile(
+          selected: false,
+          onTap: onTap,
+          background: color.withValues(alpha: 0.16),
+          borderColor: color,
+          label: group.name,
+          labelColor: color,
+          topRight: summary != null
+              ? AgentAttentionIndicator(
+                  key: ValueKey('collapsed-group-summary-${group.id}'),
+                  state: summary,
+                  agentHint: group.name,
+                  size: 10,
+                  padding: 0,
+                )
+              : null,
         ),
       ),
     );

@@ -2,7 +2,8 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart' show DragStartDetails, PointerDeviceKind;
+import 'package:flutter/gestures.dart'
+    show DragStartDetails, PointerDeviceKind, kPrimaryMouseButton;
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart' show PointerSignalEvent;
 import 'package:flutter/rendering.dart' show BoxHitTestResult;
@@ -19,11 +20,13 @@ import '../../session/terminal_zoom.dart';
 import '../../settings/app_settings.dart';
 import '../../settings/shortcut_bindings.dart';
 import '../../state/providers.dart';
+import '../../terminal/pending_echo_tracker.dart';
 import '../../terminal/smart_word_selection.dart';
 import '../adaptive/breakpoints.dart';
 import 'action_bar_catalog.dart';
 import 'gui/terminal_gui_mode.dart';
 import 'gui/terminal_gui_view.dart';
+import 'terminal_ime_overlay.dart';
 import 'terminal_native_ime.dart';
 import 'terminal_native_text_input.dart';
 import 'terminal_selection_overlay.dart';
@@ -107,12 +110,21 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   // 브리지가 켜져 있으면 한글 조합은 EditableText를 거치지 않으므로 기존
   // [_composing] 경로와 분리해 둔다.
   final _nativeComposing = ValueNotifier<String?>(null);
-  late final Listenable _composingListenable = Listenable.merge([
+  // 조합 꼬리가 화면에 있는 동안 출력이 커서를 옮기면(늦게 도착한 에코 등)
+  // 다음 키 입력을 기다리지 않고 오버레이를 다시 배치하라는 신호.
+  final _imeOverlayRefresh = _ChangeBridge();
+  late final Listenable _imeOverlayListenable = Listenable.merge([
     _composing,
     _nativeComposing,
+    _imeOverlayRefresh,
+    _terminalScrollController,
   ]);
-  AppSettings? _overlaySettings;
-  double? _overlayFontSize;
+  bool _nativeImeCaretUpdateScheduled = false;
+  // 원격으로 보냈지만 아직 에코되지 않은 입력(표시 전용). 지연이 큰 연결에서
+  // 확정된 한글을 그 자리에 미리 보여 주고 조합 오버레이를 그 뒤에 그린다.
+  // 전송 바이트와 터미널 버퍼에는 관여하지 않는다(docs/terminal-hangul-pending-echo.md).
+  final _pendingEcho = PendingEchoTracker();
+  Timer? _pendingEchoExpiryTimer;
   // 셀 크기 측정(TextPainter) 캐시. 글꼴 설정이 같으면 재측정하지 않는다.
   Size? _cellSizeCache;
   Object? _cellSizeCacheKey;
@@ -459,17 +471,12 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   SelectionGeometry? _selectionGeometry() {
     final selection = _terminalController.selection;
     if (selection == null) return null;
-    final render = _terminalViewKey.currentState?.renderTerminal;
-    final box = _terminalViewKey.currentContext?.findRenderObject();
-    if (render == null || box is! RenderBox) return null;
-    // The renderer sits inside TerminalView padding. Selection overlays fill
-    // the outer view, so convert its local cell coordinates before painting.
-    Offset viewOffset(CellOffset cell) =>
-        box.globalToLocal(render.localToGlobal(render.getOffset(cell)));
+    final grid = _terminalCellGrid();
+    if (grid == null) return null;
     return SelectionGeometry(
-      begin: viewOffset(selection.begin),
-      end: viewOffset(selection.end),
-      cellSize: render.cellSize,
+      begin: grid.localOf(selection.begin),
+      end: grid.localOf(selection.end),
+      cellSize: grid.cellSize,
     );
   }
 
@@ -523,10 +530,24 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // 분할 덱·작업공간 전환은 보이지 않는 세션을 TickerMode(false)로 살려 둔다.
+    // 보이는 동안만 엔진이 출력마다 프레임을 요청하게 알린다.
+    widget.session.engine.setViewVisible(
+      this,
+      TickerMode.valuesOf(context).enabled,
+    );
+  }
+
+  @override
   void dispose() {
+    widget.session.engine.setViewVisible(this, false);
     TerminalNativeIme.instance.dispose(this);
     _composing.dispose();
     _nativeComposing.dispose();
+    _imeOverlayRefresh.dispose();
+    _pendingEchoExpiryTimer?.cancel();
     _imeIdleCommitTimer?.cancel();
     _imeBufferClearTimer?.cancel();
     _hardwareKeyQuietTimer?.cancel();
@@ -549,8 +570,90 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   }
 
   void _handleTerminalChanged() {
-    if (_terminalController.selection == null) return;
-    _terminalChangeBridge.bump();
+    if (_terminalController.selection != null) _terminalChangeBridge.bump();
+    final pendingChanged = _pendingEcho.onScreenChanged(_pendingEchoScreen);
+    if (pendingChanged) _schedulePendingEchoExpiry();
+    _syncImeOverlayWithTerminal(force: pendingChanged);
+  }
+
+  /// 출력으로 커서가 움직였을 때 조합·에코 대기 오버레이와 IME 후보 창 위치를
+  /// 따라가게 한다. 둘 다 없으면 아무것도 하지 않아 출력 폭주 시 비용이 없다.
+  void _syncImeOverlayWithTerminal({bool force = false}) {
+    final composing =
+        _composing.value != null || _nativeComposing.value != null;
+    if (!force && !composing && !_pendingEcho.hasPending) return;
+    _imeOverlayRefresh.bump();
+    if (_nativeComposing.value != null) _scheduleNativeImeCaretRectUpdate();
+  }
+
+  PendingEchoScreen get _pendingEchoScreen =>
+      TerminalPendingEchoScreen(widget.session.engine.terminal);
+
+  /// 원격으로 텍스트를 보낸다. 보내기 직전에 기록해야 동기 에코(로컬 PTY·
+  /// 테스트)도 같은 순서로 확인된다.
+  void _sendTextToRemote(String text) {
+    _pendingEcho.recordSent(text, _pendingEchoScreen);
+    widget.session.engine.terminal.textInput(text);
+    _pendingEchoUpdated();
+  }
+
+  /// 원격으로 터미널 키를 보낸다. 수식키 없는 Backspace만 대기 텍스트를 한 글자
+  /// 지우고, 나머지 키는 커서 맥락을 바꾸므로 예측을 멈춘다.
+  void _sendKeyToRemote(
+    TerminalKey key, {
+    bool ctrl = false,
+    bool alt = false,
+    bool shift = false,
+  }) {
+    if (key == TerminalKey.backspace && !ctrl && !alt) {
+      _pendingEcho.recordBackspace();
+    } else {
+      _pendingEcho.recordUntrackedSend();
+    }
+    widget.session.engine.terminal.keyInput(
+      key,
+      ctrl: ctrl,
+      alt: alt,
+      shift: shift,
+    );
+    _pendingEchoUpdated();
+  }
+
+  /// 붙여넣기·매핑 키처럼 위치를 예측할 수 없는 입력을 보내기 전에 호출한다.
+  void _beforeUntrackedRemoteInput() {
+    _pendingEcho.recordUntrackedSend();
+    _pendingEchoUpdated();
+  }
+
+  void _pendingEchoUpdated() {
+    // dispose 중 포커스 해제 알림이 늦게 와도 해제된 notifier를 건드리지 않는다.
+    if (!mounted) return;
+    _imeOverlayRefresh.bump();
+    _schedulePendingEchoExpiry();
+  }
+
+  void _schedulePendingEchoExpiry() {
+    _pendingEchoExpiryTimer?.cancel();
+    _pendingEchoExpiryTimer = null;
+    final wait = _pendingEcho.timeUntilExpiry;
+    if (wait == null) return;
+    _pendingEchoExpiryTimer = Timer(wait, () {
+      _pendingEchoExpiryTimer = null;
+      if (!mounted) return;
+      if (_pendingEcho.expire()) _imeOverlayRefresh.bump();
+      _schedulePendingEchoExpiry();
+    });
+  }
+
+  /// 후보 창 위치는 터미널이 새 출력으로 레이아웃(스크롤 보정)을 마친 뒤에
+  /// 계산해야 한다. 같은 프레임의 여러 출력은 한 번으로 합친다.
+  void _scheduleNativeImeCaretRectUpdate() {
+    if (_nativeImeCaretUpdateScheduled) return;
+    _nativeImeCaretUpdateScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _nativeImeCaretUpdateScheduled = false;
+      if (mounted) _updateNativeImeCaretRect();
+    });
   }
 
   void _handleTerminalSelectionChanged() {
@@ -609,6 +712,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   /// 이미지 업로드 경로를 터미널에 입력하고, 텍스트 붙여넣기와 동일하게 후처리한다.
   void _sendImagePathToTerminal(String text) {
     _flushTextInputBuffer();
+    _beforeUntrackedRemoteInput();
     widget.session.engine.terminal.textInput(text);
     _terminalController.clearSelection();
     _requestFocus();
@@ -676,6 +780,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     }
 
     _flushTextInputBuffer();
+    _beforeUntrackedRemoteInput();
     widget.session.engine.terminal.paste(text);
     _terminalController.clearSelection();
     _requestFocus();
@@ -790,15 +895,22 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   }
 
   /// 조합 중인 한글을 터미널 커서 위치에 밑줄과 함께 표시한다(전송 전 로컬 echo).
+  ///
+  /// 터미널(앞 형제)의 레이아웃이 끝난 뒤 위치를 계산하도록 LayoutBuilder 안에서
+  /// 빌드한다. 조합 갱신·출력(커서 이동)·스크롤 때만 이 오버레이만 다시 그린다.
   Widget _buildComposingOverlay(AppSettings settings, double fontSize) {
-    _overlaySettings = settings;
-    _overlayFontSize = fontSize;
-    return ListenableBuilder(
-      listenable: _composingListenable,
-      builder: (context, _) => _composingOverlayFor(
-        _nativeComposing.value ?? _composing.value,
-        settings,
-        fontSize,
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: LayoutBuilder(
+          builder: (context, _) => ListenableBuilder(
+            listenable: _imeOverlayListenable,
+            builder: (context, _) => _composingOverlayFor(
+              _nativeComposing.value ?? _composing.value,
+              settings,
+              fontSize,
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -810,6 +922,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     } else {
       _cancelPendingHardwareTextInput();
       TerminalNativeIme.instance.detach(this);
+      // 세션 전환·대화상자 등으로 입력 소유권을 잃으면 예측을 남기지 않는다.
+      _pendingEcho.reset();
+      _pendingEchoUpdated();
     }
   }
 
@@ -821,7 +936,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     if (_terminalController.selection != null) {
       _terminalController.clearSelection();
     }
-    widget.session.engine.terminal.textInput(_applyStickyCtrl(text));
+    _sendTextToRemote(_applyStickyCtrl(text));
     _scrollTerminalToBottomOnInput();
   }
 
@@ -839,24 +954,12 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     }
   }
 
-  /// IME 후보 창(한자 변환 등)을 터미널 커서 셀에 붙인다. 조합 오버레이와 같은
-  /// 좌표계(EditableText 레이어의 원점 = 터미널 padding 원점)를 쓴다.
+  /// IME 후보 창(한자 변환 등)을 조합 오버레이가 그려지는 셀에 붙인다.
   void _updateNativeImeCaretRect() {
-    final settings = _overlaySettings;
-    final fontSize = _overlayFontSize;
-    final box = _editableTextKey.currentContext?.findRenderObject();
-    if (settings == null ||
-        fontSize == null ||
-        box is! RenderBox ||
-        !box.attached ||
-        !box.hasSize) {
-      return;
-    }
-    final buffer = widget.session.engine.terminal.buffer;
-    final cell = _terminalCellSize(settings, fontSize);
-    final origin = box.localToGlobal(
-      Offset(buffer.cursorX * cell.width, buffer.cursorY * cell.height),
-    );
+    final grid = _terminalCellGrid();
+    if (grid == null) return;
+    final origin = grid.globalOf(_composingCell());
+    final cell = grid.cellSize;
     final ratio = View.of(context).devicePixelRatio;
     TerminalNativeIme.instance.setCaretRect(
       Rect.fromLTWH(
@@ -868,43 +971,117 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     );
   }
 
+  /// 조합 텍스트가 시작될 터미널 셀(절대 행 기준). 에코 대기 텍스트가 보이면
+  /// 그 바로 뒤, 아니면 원격 커서다.
+  CellOffset _composingCell({bool? pendingVisible}) {
+    final buffer = widget.session.engine.terminal.buffer;
+    final showPending =
+        pendingVisible ??
+        _pendingEcho.shouldDisplay(_pendingEchoScreen, composing: true);
+    if (!showPending) return CellOffset(buffer.cursorX, buffer.absoluteCursorY);
+    return CellOffset(
+      _pendingEcho.anchorCol + _pendingEcho.pendingCells,
+      buffer.absoluteCursorY,
+    );
+  }
+
+  /// xterm 렌더러의 실제 셀 크기·스크롤 오프셋으로 셀 좌표를 변환한다. 선택
+  /// 영역 오버레이와 IME 오버레이·후보 창이 같은 변환을 쓴다. 렌더러는
+  /// TerminalView 패딩 안에 있고 오버레이는 바깥 뷰를 채우므로, 렌더러 좌표를
+  /// 전역을 거쳐 뷰 좌표로 바꾼다. 렌더러가 아직 레이아웃되지 않았으면 null.
+  _TerminalCellGrid? _terminalCellGrid() {
+    final render = _terminalViewKey.currentState?.renderTerminal;
+    final box = _terminalViewKey.currentContext?.findRenderObject();
+    if (render == null ||
+        !render.attached ||
+        !render.hasSize ||
+        box is! RenderBox ||
+        !box.attached) {
+      return null;
+    }
+    return _TerminalCellGrid(
+      cellSize: render.cellSize,
+      globalOf: (cell) => render.localToGlobal(render.getOffset(cell)),
+      localOf: (cell) =>
+          box.globalToLocal(render.localToGlobal(render.getOffset(cell))),
+    );
+  }
+
   Widget _composingOverlayFor(
     String? composing,
     AppSettings settings,
     double fontSize,
   ) {
-    if (composing == null) return const SizedBox.shrink();
+    final showPending = _pendingEcho.shouldDisplay(
+      _pendingEchoScreen,
+      composing: composing != null,
+    );
+    if (composing == null && !showPending) return const SizedBox.shrink();
     final buffer = widget.session.engine.terminal.buffer;
-    final cell = _terminalCellSize(settings, fontSize);
-    // 아래 TerminalView의 padding(EdgeInsets.fromLTRB(14, 10, 14, 12))과 일치.
-    final left = 14 + buffer.cursorX * cell.width;
-    final top = 10 + buffer.cursorY * cell.height;
-    return Positioned(
-      key: const ValueKey('composing-overlay'),
-      left: left,
-      top: top,
-      child: IgnorePointer(
-        child: DecoratedBox(
-          decoration: const BoxDecoration(
-            color: VibeColors.terminal,
-            border: Border(
-              bottom: BorderSide(color: VibeColors.accent, width: 2),
+    final grid = _terminalCellGrid();
+    final Size cell;
+    final Offset Function(CellOffset) originOf;
+    if (grid != null) {
+      cell = grid.cellSize;
+      originOf = grid.localOf;
+    } else {
+      // 첫 레이아웃 전: TerminalView padding(14, 10)과 측정 셀 크기로 근사한다.
+      cell = _terminalCellSize(settings, fontSize);
+      originOf = (c) => Offset(
+        14 + c.x * cell.width,
+        10 + (c.y - buffer.scrollBack) * cell.height,
+      );
+    }
+    final theme = settings.resolvedTerminalTheme;
+    TextStyle style(Color color) => TextStyle(
+      color: color,
+      fontSize: fontSize,
+      height: settings.terminalLineHeight,
+      fontFamily: settings.terminalFontFamily,
+      fontFamilyFallback: settings.fontFallback,
+    );
+    Widget at(CellOffset c, Key key, Widget child) {
+      final origin = originOf(c);
+      return Positioned(
+        key: key,
+        left: origin.dx,
+        top: origin.dy,
+        child: child,
+      );
+    }
+
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        // 에코를 기다리는 확정 텍스트: 실제 에코가 나타날 칸에 흐리게 그린다.
+        if (showPending)
+          at(
+            CellOffset(_pendingEcho.anchorCol, buffer.absoluteCursorY),
+            const ValueKey('pending-echo-overlay'),
+            TerminalImeCells(
+              text: _pendingEcho.pendingText,
+              cellSize: cell,
+              background: theme.background,
+              underline: BorderSide(
+                color: theme.foreground.withAlpha(0x55),
+                width: 1,
+              ),
+              style: style(theme.foreground.withAlpha(0xB0)),
             ),
           ),
-          child: Text(
-            composing,
-            maxLines: 1,
-            softWrap: false,
-            style: TextStyle(
-              color: VibeColors.onSurface,
-              fontSize: fontSize,
-              height: settings.terminalLineHeight,
-              fontFamily: settings.terminalFontFamily,
-              fontFamilyFallback: settings.fontFallback,
+        if (composing != null)
+          at(
+            _composingCell(pendingVisible: showPending),
+            const ValueKey('composing-overlay'),
+            TerminalImeCells(
+              text: composing,
+              cellSize: cell,
+              background: theme.background,
+              underline: const BorderSide(color: VibeColors.accent, width: 2),
+              style: style(theme.foreground),
             ),
           ),
-        ),
-      ),
+      ],
     );
   }
 
@@ -985,6 +1162,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
           _flushTextInputBuffer();
         }
         _disableSelectionMode(clearSelection: true);
+        _beforeUntrackedRemoteInput();
         key.send(widget.session.engine.terminal);
         _forgetSentPrefixAfterTerminalKey();
         _scrollTerminalToBottomOnInput();
@@ -1010,10 +1188,20 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     }
     _pointerDownGlobal = event.position;
     _terminalLongPressTimer?.cancel();
+    // 마우스 추적 TUI에 보내는 클릭은 오래 눌러도 로컬 메뉴를 함께 열지 않는다.
+    if (_clicksMouseTrackingApp(event)) return;
     _terminalLongPressTimer = Timer(_terminalLongPressDelay, () {
       _longPressMenuPending = true;
     });
   }
+
+  /// xterm `mouseClickInput`이 프로그램으로 보내는 클릭과 같은 조건이다.
+  bool _clicksMouseTrackingApp(PointerDownEvent event) =>
+      event.kind == PointerDeviceKind.mouse &&
+      event.buttons == kPrimaryMouseButton &&
+      !HardwareKeyboard.instance.isShiftPressed &&
+      _terminalController.selection == null &&
+      widget.session.engine.terminal.mouseMode != MouseMode.none;
 
   void _handlePointerMove(PointerMoveEvent event) {
     if (!_activePointers.containsKey(event.pointer)) return;
@@ -1172,7 +1360,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
   void _handleImeSubmit([String _ = '']) {
     if (widget.session.status != SessionStatus.connected) return;
     _flushTextInputBuffer();
-    widget.session.engine.terminal.keyInput(TerminalKey.enter);
+    _sendKeyToRemote(TerminalKey.enter);
     _releaseTextInputBuffer();
     _scrollTerminalToBottomOnInput();
   }
@@ -1305,7 +1493,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
         'new="$committedText"',
       );
       for (var i = 0; i < deleteCount; i++) {
-        widget.session.engine.terminal.keyInput(TerminalKey.backspace);
+        _sendKeyToRemote(TerminalKey.backspace);
       }
     }
     if (nextText.isNotEmpty) {
@@ -1336,7 +1524,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     final outgoing = _applyStickyCtrl(text);
     if (!_consumeRecentHardwareText(text)) {
       _traceInput('textCommit send "$outgoing"');
-      widget.session.engine.terminal.textInput(outgoing);
+      _sendTextToRemote(outgoing);
       _rememberCommittedText(text);
       _rememberLastCommittedText(text);
     } else {
@@ -1590,7 +1778,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
       _terminalController.clearSelection();
     }
     _traceInput('hardwareText send "$text"');
-    widget.session.engine.terminal.textInput(text);
+    _sendTextToRemote(text);
     _rememberHardwareText(text);
     // 모바일 IME는 영문을 KeyEvent로, 한글을 TextInput으로 전달할 수 있다.
     // 영문 에코가 없다는 이유만으로 다음 한글 입력 때 이미 보낸 영문을
@@ -1612,7 +1800,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
     if (imeText.startsWith(leaked)) return;
     _traceInput('hardwareText retract "$leaked" before ime "$imeText"');
     for (var i = 0; i < leaked.length; i++) {
-      widget.session.engine.terminal.keyInput(TerminalKey.backspace);
+      _sendKeyToRemote(TerminalKey.backspace);
     }
     _unconfirmedHardwareText = '';
     _unconfirmedHardwareTextAt = null;
@@ -1928,12 +2116,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
           _shouldFlushBeforeTerminalKey(event.logicalKey)) {
         _flushTextInputBuffer();
       }
-      widget.session.engine.terminal.keyInput(
-        key,
-        ctrl: ctrl,
-        alt: alt,
-        shift: shift,
-      );
+      _sendKeyToRemote(key, ctrl: ctrl, alt: alt, shift: shift);
       _discardStaleImeBufferAfterServerEdit(event.logicalKey);
       // Enter, Tab, 커서 이동, Ctrl 조합 등 여기로 오는 모든 키는 커서 위치나
       // 줄 맥락을 바꾼다. 그 뒤로는 "이미 보낸 prefix가 커서 바로 앞에 있다"는
@@ -1969,7 +2152,7 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
       _terminalController.clearSelection();
     }
     _traceInput('key send line feed');
-    widget.session.engine.terminal.textInput('\n');
+    _sendTextToRemote('\n');
     _releaseTextInputBuffer();
     _scrollTerminalToBottomOnInput();
   }
@@ -2752,6 +2935,9 @@ class _SessionTerminalViewState extends ConsumerState<SessionTerminalView>
                               onDoubleTap: _handleConfiguredDoubleTap,
                               readOnly: true,
                               tapInputMode: touchControl && !guiMode,
+                              // 마우스 추적을 켠 TUI(OpenCode 등)는 데스크톱
+                              // 클릭·더블클릭을 프로그램이 직접 처리한다.
+                              mouseClickInput: true,
                               hardwareKeyboardOnly: true,
                               resizeDebounce: context.isCompact
                                   ? const Duration(milliseconds: 150)
@@ -3655,4 +3841,18 @@ class _SessionErrorView extends StatelessWidget {
 
 class _ChangeBridge extends ChangeNotifier {
   void bump() => notifyListeners();
+}
+
+/// 터미널 셀 → 좌표 변환기. [localOf]는 TerminalView(=오버레이 Stack) 기준,
+/// [globalOf]는 화면 전역 좌표다.
+class _TerminalCellGrid {
+  const _TerminalCellGrid({
+    required this.cellSize,
+    required this.globalOf,
+    required this.localOf,
+  });
+
+  final Size cellSize;
+  final Offset Function(CellOffset cell) globalOf;
+  final Offset Function(CellOffset cell) localOf;
 }

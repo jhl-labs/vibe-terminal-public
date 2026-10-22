@@ -21,7 +21,7 @@ enum AiProviderType {
 
   String get defaultModel => switch (this) {
     AiProviderType.openai => 'gpt-4.1-mini',
-    AiProviderType.gemini => 'gemini-2.5-flash',
+    AiProviderType.gemini => 'gemini-3.1-flash-lite',
     AiProviderType.claude => 'claude-sonnet-4-5',
     AiProviderType.openAiCompatible => 'gpt-4.1-mini',
   };

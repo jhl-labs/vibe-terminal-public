@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:xterm/xterm.dart';
 
+import 'terminal_flush_scheduler.dart';
 import 'terminal_session_handle.dart';
 import 'terminal_output_scheduler.dart';
 import 'terminal_resize_dispatcher.dart';
@@ -16,8 +17,15 @@ import 'terminal_sideband.dart';
 /// - `terminal.onOutput` (String) → `handle.write` (UTF-8 bytes)
 /// - `terminal.onResize` (w, h, pw, ph) → `handle.resize` (cols, rows)
 class TerminalEngine {
-  TerminalEngine({int maxLines = 5000})
-    : terminal = Terminal(maxLines: maxLines) {
+  /// [outputFlushScheduler]는 테스트에서 flush 시점을 고정할 때만 넘긴다.
+  /// 기본값은 다음 프레임 정렬 + 16ms 대체 타이머다.
+  TerminalEngine({
+    int maxLines = 5000,
+    TerminalFlushScheduler Function(VoidCallback flush)? outputFlushScheduler,
+  }) : terminal = Terminal(maxLines: maxLines) {
+    _outputFlush = (outputFlushScheduler ?? TerminalFlushScheduler.new)(
+      _flushPendingOutput,
+    );
     terminal.onTitleChange = (title) {
       _title = title;
       onTitleChange?.call(title);
@@ -63,18 +71,38 @@ class TerminalEngine {
   // 붙어 claude/codex가 동시에 화면을 재그리면, 이 notify 폭주가 메인
   // 아이솔레이트를 포화시켜 키 입력 이벤트 처리가 밀린다(빠른 타이핑 누락).
   //
-  // 청크를 모아 한 프레임 간격으로 한 번에 write해 write/notify 횟수를
-  // 프레임당 1회로 제한한다. 파서는 스트리밍이라
+  // 청크를 모아 다음 프레임 시작(vsync)에 한 번에 write해 write/notify 횟수를
+  // 프레임당 1회로 제한한다. 프레임이 오지 않으면 16ms 타이머가 대신 flush한다
+  // ([TerminalFlushScheduler]). 파서는 스트리밍이라
   // `write(a); write(b)` == `write(a + b)`이므로 화면 결과는 동일하고,
   // swarm은 버퍼를 온디맨드로 읽고(quiescence 안정 창은 초 단위) idle 판정은
-  // 1500ms라 16ms 배칭은 영향이 없다.
-  static const _outputCoalesceWindow = Duration(milliseconds: 16);
+  // 1500ms라 프레임 단위 배칭은 영향이 없다.
+  static const _largeOutputFlushCharacters = 32 * 1024;
   final List<String> _pendingOutput = [];
   int _pendingOutputCharacters = 0;
-  Timer? _outputFlushTimer;
+  late final TerminalFlushScheduler _outputFlush;
   final TerminalSidebandDecoder _sidebandDecoder = TerminalSidebandDecoder();
   final TerminalWorkingDirectoryDecoder _cwdDecoder =
       TerminalWorkingDirectoryDecoder();
+
+  // 이 터미널을 지금 화면에 그리는 뷰. 비어 있으면 출력이 프레임을 요청하지
+  // 않는다([TerminalFlushScheduler.request]).
+  final Set<Object> _visibleViews = {};
+
+  /// 이 터미널을 보이게 그리는 뷰가 있는지.
+  bool get hasVisibleView => _visibleViews.isNotEmpty;
+
+  /// [view]가 이 터미널을 화면에 보이게 그리는지 알린다. 뷰는 붙을 때와
+  /// 가시성(TickerMode)이 바뀔 때 부르고, 떨어질 때 false로 부른다.
+  void setViewVisible(Object view, bool visible) {
+    if (visible) {
+      _visibleViews.add(view);
+      // 숨어 있는 동안 타이머로만 예약된 출력도 다음 프레임에 바로 보인다.
+      if (_outputFlush.isScheduled) _outputFlush.request();
+    } else {
+      _visibleViews.remove(view);
+    }
+  }
 
   /// [handle]을 터미널에 연결한다. 출력·입력·리사이즈를 양방향 연결한다.
   /// [onClosed]는 출력 스트림이 종료(연결 끊김)되면 호출된다.
@@ -84,8 +112,7 @@ class TerminalEngine {
     _resizeDispatcher?.dispose();
     _outputSub?.cancel();
     // 이전 세션의 미flush 청크는 아래에서 화면을 지우므로 버린다.
-    _outputFlushTimer?.cancel();
-    _outputFlushTimer = null;
+    _outputFlush.cancel();
     _pendingOutput.clear();
     _pendingOutputCharacters = 0;
     _sidebandDecoder.reset();
@@ -117,11 +144,12 @@ class TerminalEngine {
       }
       _pendingOutput.add(data);
       _pendingOutputCharacters += data.length;
-      if (_pendingOutputCharacters >= 32 * 1024) {
+      // 대량 출력은 프레임을 기다리지 않고 바로 반영해 메모리에 쌓지 않는다.
+      if (_pendingOutputCharacters >= _largeOutputFlushCharacters) {
         _flushPendingOutput();
         return;
       }
-      _outputFlushTimer ??= Timer(_outputCoalesceWindow, _flushPendingOutput);
+      _outputFlush.request(frame: hasVisibleView);
     }
 
     var ended = false;
@@ -239,8 +267,7 @@ class TerminalEngine {
 
   /// 모아 둔 출력 청크를 한 번에 터미널에 반영한다(코얼레싱 flush).
   void _flushPendingOutput() {
-    _outputFlushTimer?.cancel();
-    _outputFlushTimer = null;
+    _outputFlush.cancel();
     if (_pendingOutput.isEmpty) return;
     final data = _pendingOutput.join();
     _pendingOutput.clear();
@@ -257,7 +284,7 @@ class TerminalEngine {
   /// 스트림 구독을 취소하고 SSH 세션을 닫는다.
   void dispose() {
     _resizeDispatcher?.dispose();
-    _outputFlushTimer?.cancel();
+    _outputFlush.cancel();
     _outputSub?.cancel();
     _handle?.close();
   }

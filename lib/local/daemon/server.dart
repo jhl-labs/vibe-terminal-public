@@ -113,6 +113,7 @@ class LocalPtyDaemon {
   }
 
   Future<void> _accept(Socket socket) async {
+    enableDaemonSocketNoDelay(socket);
     final reader = StreamIterator(daemonMessages(socket));
     try {
       if (!await reader.moveNext().timeout(const Duration(seconds: 5))) return;

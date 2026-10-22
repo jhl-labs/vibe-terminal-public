@@ -144,8 +144,12 @@ class RestoredSessionEntry {
     );
   }
 
-  /// 탭 그룹 소속만 바꾼 사본. 스냅샷을 읽을 때 유효하지 않은 소속을 지운다.
-  RestoredSessionEntry withTabGroupId(String? value) => RestoredSessionEntry(
+  /// 탭 그룹 소속만 지운 정확한 사본. 스냅샷을 읽을 때 유효하지 않은 소속을
+  /// 지운다. 저장 형식을 거치지 않으므로 값이 정규화되거나 빠지지 않는다.
+  ///
+  /// 필드를 추가하면 이 생성자 호출에도 넣어야 한다. 모든 필드가 그대로
+  /// 복사되는지는 테스트(`withoutTabGroup은 소속 외 모든 필드를…`)가 확인한다.
+  RestoredSessionEntry withoutTabGroup() => RestoredSessionEntry(
     id: id,
     hostId: hostId,
     authorizationId: authorizationId,
@@ -155,7 +159,6 @@ class RestoredSessionEntry {
     localShellType: localShellType,
     sessionLogId: sessionLogId,
     groupId: groupId,
-    tabGroupId: value,
     historyPromptDismissed: historyPromptDismissed,
     historyPromptCompleted: historyPromptCompleted,
     pathPromptDismissed: pathPromptDismissed,
@@ -281,7 +284,7 @@ class SessionRestoreSnapshot {
         usedIds.add(id);
         validSessions.add(session);
       } else {
-        validSessions.add(session.withTabGroupId(null));
+        validSessions.add(session.withoutTabGroup());
       }
     }
     return (

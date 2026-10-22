@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:xterm/src/core/buffer/cell_offset.dart';
 import 'package:xterm/src/core/buffer/line.dart';
@@ -8,6 +9,7 @@ import 'package:xterm/src/core/buffer/range_line.dart';
 import 'package:xterm/src/core/input/keys.dart';
 import 'package:xterm/src/core/mouse/button.dart';
 import 'package:xterm/src/core/mouse/button_state.dart';
+import 'package:xterm/src/core/mouse/mode.dart';
 import 'package:xterm/src/terminal_view.dart';
 import 'package:xterm/src/ui/controller.dart';
 import 'package:xterm/src/ui/gesture/gesture_detector.dart';
@@ -32,6 +34,7 @@ class TerminalGestureHandler extends StatefulWidget {
     this.onTertiaryTapUp,
     this.readOnly = false,
     this.tapInputMode = false,
+    this.mouseClickInput = false,
     this.onTouchSelectionChanged,
   });
 
@@ -61,6 +64,8 @@ class TerminalGestureHandler extends StatefulWidget {
 
   final bool tapInputMode;
 
+  final bool mouseClickInput;
+
   final ValueChanged<bool>? onTouchSelectionChanged;
 
   @override
@@ -76,12 +81,35 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
   final _tapPointers = <int>{};
   bool _tapInputArmed = false;
   bool _tapInputBlocked = false;
+  // The current gesture is a mouse click sent to the application
+  // ([TerminalGestureHandler.mouseClickInput]); decided when it starts.
+  bool _mouseClickGesture = false;
+
+  /// Whether taps of the current gesture are sent as clicks instead of
+  /// focusing, selecting or running the double tap action.
+  bool get _sendsTapAsClick => widget.tapInputMode || _mouseClickGesture;
 
   @override
   void didUpdateWidget(TerminalGestureHandler oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.tapInputMode != widget.tapInputMode) _tapInputArmed = false;
+    if (oldWidget.tapInputMode != widget.tapInputMode ||
+        oldWidget.mouseClickInput != widget.mouseClickInput) {
+      _tapInputArmed = false;
+      _mouseClickGesture = false;
+    }
   }
+
+  /// Whether [event] starts a primary mouse click for an application that
+  /// tracks the mouse. Shift keeps the click local, as in common terminals,
+  /// and a click that dismisses a selection only clears it.
+  bool _startsMouseClick(PointerDownEvent event) =>
+      widget.mouseClickInput &&
+      widget.terminalController.selection == null &&
+      event.kind == PointerDeviceKind.mouse &&
+      event.buttons == kPrimaryMouseButton &&
+      !HardwareKeyboard.instance.isShiftPressed &&
+      terminalView.widget.terminal.mouseMode != MouseMode.none &&
+      widget.terminalController.shouldSendPointerInput(PointerInput.tap);
 
   /// Vibe Terminal patch: the drag anchor as a buffer cell (stable across
   /// scrolling) and the last pointer position, used to re-apply the selection
@@ -147,7 +175,8 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
       onPointerDown: (event) {
         if (_tapPointers.isEmpty) {
           _tapInputBlocked = false;
-          _tapInputArmed = widget.tapInputMode;
+          _mouseClickGesture = _startsMouseClick(event);
+          _tapInputArmed = _sendsTapAsClick;
         }
         _tapPointers.add(event.pointer);
         if (_tapPointers.length > 1) _tapInputBlocked = true;
@@ -165,6 +194,7 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
       onPointerSignal: _onPointerSignal,
       child: TerminalGestureDetector(
         detectMultiTap: !widget.tapInputMode,
+        suppressMultiTap: () => _mouseClickGesture,
         onTapUp: widget.onTapUp,
         onSingleTapUp: onSingleTapUp,
         onTapDown: onTapDown,
@@ -234,7 +264,7 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
   }
 
   void onTapDown(TapDownDetails details) {
-    if (widget.tapInputMode) {
+    if (_sendsTapAsClick) {
       // Defer the complete click until the tap wins the gesture arena. A
       // scroll, pinch or long press must not press a button in the remote app.
       widget.onTapDown?.call(details);
@@ -251,7 +281,7 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
   }
 
   void onSingleTapUp(TapUpDetails details) {
-    if (widget.tapInputMode) {
+    if (_sendsTapAsClick) {
       if (!_tapInputArmed || _tapInputBlocked || _touchSelecting) return;
       _tapInputArmed = false;
       if (!widget.terminalController.shouldSendPointerInput(PointerInput.tap)) {
@@ -340,7 +370,8 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
         lastPosition != null &&
         (event.position - lastPosition).distance <= kDoubleTapSlop;
     _clickSequenceTimer?.cancel();
-    _clickCount = continues ? (_clickCount % 3) + 1 : 1;
+    // A click sent to the application does not start a local word/line drag.
+    _clickCount = continues && !_mouseClickGesture ? (_clickCount % 3) + 1 : 1;
   }
 
   void _recordClickUp(PointerUpEvent event) {

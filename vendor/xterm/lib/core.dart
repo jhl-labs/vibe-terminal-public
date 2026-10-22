@@ -20,3 +20,4 @@ export 'src/core/mouse/mode.dart';
 export 'src/core/platform.dart';
 export 'src/core/state.dart';
 export 'src/terminal.dart';
+export 'src/utils/unicode_v11.dart' show unicodeV11, UnicodeV11;

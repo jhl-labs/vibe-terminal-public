@@ -51,6 +51,7 @@ class TerminalView extends StatefulWidget {
     this.onTouchSelectionChanged,
     this.readOnly = false,
     this.tapInputMode = false,
+    this.mouseClickInput = false,
     this.hardwareKeyboardOnly = false,
     this.simulateScroll = true,
   });
@@ -151,6 +152,13 @@ class TerminalView extends StatefulWidget {
   /// view. Does not enable keyboard input. Swipes and long presses stay local;
   /// repeated taps send separate clicks instead of selecting words/lines.
   final bool tapInputMode;
+
+  /// Vibe Terminal patch: send completed primary mouse clicks to an
+  /// application that enabled mouse tracking, also in a read-only view. Each
+  /// click of a quick sequence is sent, so the application handles double
+  /// clicks itself. Drags still select locally, and holding Shift keeps the
+  /// click local, as in common terminals. Does not enable keyboard input.
+  final bool mouseClickInput;
 
   /// True if only hardware keyboard events should be used as input. This will
   /// also prevent any on-screen keyboard to be shown.
@@ -381,6 +389,7 @@ class TerminalViewState extends State<TerminalView> {
           widget.onSecondaryTapUp != null ? _onSecondaryTapUp : null,
       readOnly: widget.readOnly,
       tapInputMode: widget.tapInputMode,
+      mouseClickInput: widget.mouseClickInput,
       child: child,
     );
 

@@ -58,6 +58,7 @@ class LocalDaemonClient {
       connection['port'] as int,
       timeout: const Duration(seconds: 3),
     );
+    enableDaemonSocketNoDelay(socket);
     try {
       socket.write(
         daemonFrame({
@@ -204,6 +205,7 @@ class LocalDaemonClient {
       connection['port'] as int,
       timeout: const Duration(seconds: 3),
     );
+    enableDaemonSocketNoDelay(socket);
     socket.write(
       daemonFrame({
         'method': 'attach',

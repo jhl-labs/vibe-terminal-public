@@ -25,11 +25,16 @@ class TerminalGestureDetector extends StatefulWidget {
     this.onDoubleTapDown,
     this.onTripleTapDown,
     this.detectMultiTap = true,
+    this.suppressMultiTap,
   });
 
   final Widget? child;
 
   final bool detectMultiTap;
+
+  /// Vibe Terminal patch: evaluated per tap; true reports the tap as a single
+  /// tap even inside a quick sequence (e.g. a click sent to the application).
+  final ValueGetter<bool>? suppressMultiTap;
 
   final GestureTapUpCallback? onTapUp;
 
@@ -83,6 +88,9 @@ class _TerminalGestureDetectorState extends State<TerminalGestureDetector> {
   // Taps in the current quick sequence (Vibe Terminal patch: triple tap).
   int _tapCount = 0;
 
+  bool get _detectsMultiTap =>
+      widget.detectMultiTap && !(widget.suppressMultiTap?.call() ?? false);
+
   @override
   void didUpdateWidget(TerminalGestureDetector oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -102,7 +110,11 @@ class _TerminalGestureDetectorState extends State<TerminalGestureDetector> {
   // run before a long press success.
   void _handleTapDown(TapDownDetails details) {
     widget.onTapDown?.call(details);
-    if (!widget.detectMultiTap) return;
+    if (!_detectsMultiTap) {
+      // A suppressed tap ends the sequence; the next tap starts a new one.
+      _doubleTapTimeout();
+      return;
+    }
 
     if (_doubleTapTimer != null &&
         _isWithinDoubleTapTolerance(details.globalPosition)) {
@@ -123,7 +135,8 @@ class _TerminalGestureDetectorState extends State<TerminalGestureDetector> {
   }
 
   void _handleTapUp(TapUpDetails details) {
-    if (!widget.detectMultiTap) {
+    if (!_detectsMultiTap) {
+      _isDoubleTap = false;
       widget.onSingleTapUp?.call(details);
       return;
     }

@@ -114,6 +114,8 @@ class AiChatService {
   static Future<bool> _storedConsent(AiSettings settings) =>
       AiConsentStore().isApproved(AiConsentStore.destinationKey(settings));
   static const _maxOutputTokens = 2048;
+  // Gemini는 추론 토큰도 출력 한도에 포함하므로 최종 답변용 여유를 둔다.
+  static const _geminiMaxOutputTokens = 8192;
 
   /// 서버가 응답 헤더도 보내기 전에 연결을 끊었을 때 한 번 더 시도하기 전 대기.
   ///
@@ -514,7 +516,11 @@ class AiChatService {
       ],
       'generationConfig': {
         'temperature': 0.2,
-        'maxOutputTokens': _maxOutputTokens,
+        'maxOutputTokens': _geminiMaxOutputTokens,
+        // 3.8 Flash는 minimal을 지원하지 않는다. 다른 모델의 추론 설정은
+        // 지원 여부가 다르므로 확인한 모델에만 low를 명시한다.
+        if (model == 'gemini-3.8-flash')
+          'thinkingConfig': {'thinkingLevel': 'low', 'includeThoughts': false},
       },
     };
 
@@ -528,13 +534,24 @@ class AiChatService {
     final candidates = decoded['candidates'];
     if (candidates is List && candidates.isNotEmpty) {
       final first = candidates.first;
+      if (first is Map && first['finishReason'] == 'MAX_TOKENS') {
+        // 일부 텍스트가 있어도 잘린 JSON·터미널 입력으로 사용하지 않는다.
+        throw AiChatException(
+          'Gemini가 추론·답변 토큰 한도에 도달해 답변 생성을 중단했습니다. '
+          '질문이나 첨부 문맥을 줄여 다시 시도하세요.',
+          kind: AiChatFailureKind.invalidResponse,
+        );
+      }
       final content = first is Map ? first['content'] : null;
       final parts = content is Map ? content['parts'] : null;
       if (parts is List) {
         final text = parts
-            .map((part) => part is Map ? part['text'] : null)
+            .whereType<Map>()
+            .where((part) => part['thought'] != true)
+            .map((part) => part['text'])
             .whereType<String>()
-            .join('\n')
+            // 원문에 없는 개행을 넣으면 분할된 JSON 문자열 등이 깨진다.
+            .join()
             .trim();
         if (text.isNotEmpty) return text;
       }
@@ -690,7 +707,7 @@ class AiChatService {
         final decoded = _decodeResponseBody(body, response.statusCode);
 
         if (response.statusCode < 200 || response.statusCode >= 300) {
-          throw _serverError(response.statusCode, decoded, body);
+          throw _serverError(response.statusCode, decoded, body, settings);
         }
         if (decoded is Map) return Map<String, Object?>.from(decoded);
         throw AiChatException(
@@ -810,7 +827,7 @@ class AiChatService {
         final decoded = _decodeResponseBody(body, response.statusCode);
 
         if (response.statusCode < 200 || response.statusCode >= 300) {
-          throw _serverError(response.statusCode, decoded, body);
+          throw _serverError(response.statusCode, decoded, body, settings);
         }
         if (decoded is Map) return Map<String, Object?>.from(decoded);
         throw AiChatException(
@@ -862,17 +879,31 @@ class AiChatService {
     }
   }
 
-  AiChatException _serverError(int status, Object? decoded, String body) =>
-      AiChatException(
-        'AI 서버 오류 $status: ${_errorMessage(decoded, body)}',
-        kind: switch (status) {
-          401 || 403 => AiChatFailureKind.authentication,
-          408 => AiChatFailureKind.timeout,
-          429 => AiChatFailureKind.rateLimited,
-          >= 500 => AiChatFailureKind.server,
-          _ => AiChatFailureKind.configuration,
-        },
-      );
+  AiChatException _serverError(
+    int status,
+    Object? decoded,
+    String body,
+    AiSettings settings,
+  ) {
+    var message = 'AI 서버 오류 $status: ${_errorMessage(decoded, body)}';
+    if (settings.provider == AiProviderType.gemini && status == 404) {
+      message +=
+          '\nGemini 모델이 종료되었거나 이 API 키에서 사용할 수 없습니다. '
+          'AI 설정의 Model을 ${AiProviderType.gemini.defaultModel} 등 사용 가능한 모델로 '
+          '변경한 뒤 연결 테스트를 다시 실행하세요. '
+          '모델 목록에 표시되어도 생성 요청이 제한될 수 있습니다.';
+    }
+    return AiChatException(
+      message,
+      kind: switch (status) {
+        401 || 403 => AiChatFailureKind.authentication,
+        408 => AiChatFailureKind.timeout,
+        429 => AiChatFailureKind.rateLimited,
+        >= 500 => AiChatFailureKind.server,
+        _ => AiChatFailureKind.configuration,
+      },
+    );
+  }
 
   Map<String, String> _openAiAuthHeaders(AiSettings settings) {
     final token = settings.apiToken.trim();

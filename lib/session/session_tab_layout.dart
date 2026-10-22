@@ -38,6 +38,12 @@ class SessionTabGroupBlock<T> extends SessionTabBlock<T> {
 
   final SessionTabGroup group;
   final List<T> members;
+
+  /// 목록에 그릴 멤버. 펼친 그룹은 모든 멤버, 접힌 그룹은 활성 멤버만이다.
+  /// 활성 세션은 그룹이 접혀 있어도 항상 보인다(Ctrl+Tab·칸 포커스 등으로 접힌
+  /// 그룹 안 세션이 활성이 될 때). 레일과 접힌 좌측 패널이 이 규칙을 함께 쓴다.
+  List<T> visibleMembers({required bool Function(T member) isActive}) =>
+      group.collapsed ? [...members.where(isActive)] : members;
 }
 
 /// 작업공간 세션 목록을 표시 덩어리로 묶는다. 탭 그룹은 첫 멤버가 나온

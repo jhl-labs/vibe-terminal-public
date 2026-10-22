@@ -435,7 +435,6 @@ class SessionRail extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final railContext = context;
-    listenSessionTabGroupCleanup(ref);
     final allSessions = ref.watch(sessionManagerProvider);
     final groupState = ref.watch(sessionGroupProvider);
     final activeGroupId = groupState.activeGroupId;
@@ -561,6 +560,7 @@ class SessionRail extends ConsumerWidget {
                           : _SessionList(
                               groupId: activeGroupId,
                               blocks: tabBlocks,
+                              activeSessionId: activeId,
                               onDrop: (sessionId, target) => ref
                                   .read(sessionTabGroupProvider.notifier)
                                   .dropSession(sessionId, target),
@@ -1813,6 +1813,11 @@ class _DropHover {
   /// 접힌 탭 그룹 머리 행 위: 선 대신 머리 행을 강조한다.
   final bool joins;
 
+  /// 놓을 위치는 기억하되 아무 표시도 그리지 않는 사본. 제자리(no-op) 위치에
+  /// 쓴다. 드롭 위치를 지우면 [_SessionListState._drop]이 행 맨 위
+  /// ("이 행 앞") 대체 위치로 옮겨 버리므로 위치는 남겨 둬야 한다.
+  _DropHover get silent => _DropHover(index, target);
+
   @override
   bool operator ==(Object other) =>
       other is _DropHover &&
@@ -1840,6 +1845,7 @@ class _SessionList extends StatefulWidget {
   const _SessionList({
     required this.groupId,
     required this.blocks,
+    required this.activeSessionId,
     required this.tileBuilder,
     required this.headerBuilder,
     required this.onDrop,
@@ -1849,6 +1855,10 @@ class _SessionList extends StatefulWidget {
 
   /// 작업공간 세션을 탭 그룹 단위로 묶은 목록([buildSessionTabBlocks]).
   final List<SessionTabBlock<SessionInfo>> blocks;
+
+  /// 활성 세션. 접힌 탭 그룹에서도 이 세션 행은 머리 행 아래에 그린다
+  /// ([SessionTabGroupBlock.visibleMembers]).
+  final String? activeSessionId;
 
   final Widget Function(
     BuildContext context,
@@ -1887,7 +1897,8 @@ class _SessionListState extends State<_SessionList>
   /// 작업공간 세션 전체의 현재 배치(접힌 그룹의 멤버 포함).
   late List<SessionPlacement> _placements;
 
-  /// 드롭될 위치. null이면 레일 위에 드래그 중이 아니거나 제자리다.
+  /// 드롭될 위치. null이면 레일 위에 드래그 중이 아니다. 제자리 위치는
+  /// [_DropHover.silent]로 표시 없이 기억해 드롭을 no-op으로 만든다.
   _DropHover? _hover;
 
   // 드롭 위치 변경이 행을 리빌드해도 시작점과 이동 이력을 유지한다.
@@ -1928,8 +1939,12 @@ class _SessionListState extends State<_SessionList>
           placements.add(SessionPlacement(item.id, null));
         case SessionTabGroupBlock(:final group, :final members):
           entries.add(_HeaderEntry(block));
+          for (final member in block.visibleMembers(
+            isActive: (member) => member.id == widget.activeSessionId,
+          )) {
+            entries.add(_SessionEntry(member, group));
+          }
           for (final member in members) {
-            if (!group.collapsed) entries.add(_SessionEntry(member, group));
             placements.add(SessionPlacement(member.id, group.id));
           }
       }
@@ -1956,6 +1971,11 @@ class _SessionListState extends State<_SessionList>
     if (_hover == hover) return;
     setState(() => _hover = hover);
   }
+
+  /// 드래그 중인 [sessionId]가 [hover]를 가리킬 때 기억할 드롭 위치.
+  /// 제자리면 표시 없이 위치만 남긴다.
+  void _hoverFor(String sessionId, _DropHover hover) =>
+      _setHover(_isNoOp(sessionId, hover.target) ? hover.silent : hover);
 
   /// 포인터가 [index] 행 높이의 [fraction] 지점(0=위, 1=아래)에 있을 때의
   /// 드롭 위치.
@@ -2139,9 +2159,9 @@ class _SessionListState extends State<_SessionList>
           final box = rowContext.findRenderObject();
           if (box is! RenderBox) return;
           final local = box.globalToLocal(details.offset);
-          final hover = _hoverAt(index, local.dy / box.size.height);
-          _setHover(
-            _isNoOp(details.data.sessionId, hover.target) ? null : hover,
+          _hoverFor(
+            details.data.sessionId,
+            _hoverAt(index, local.dy / box.size.height),
           );
         },
         onLeave: (_) => _setHover(null),
@@ -2236,11 +2256,7 @@ class _SessionListState extends State<_SessionList>
     );
     return DragTarget<PaneSessionDrag>(
       onWillAcceptWithDetails: (details) => _accepts(details.data),
-      onMove: (details) => _setHover(
-        _isNoOp(details.data.sessionId, SessionDropTarget.end)
-            ? null
-            : endHover,
-      ),
+      onMove: (details) => _hoverFor(details.data.sessionId, endHover),
       onLeave: (_) => _setHover(null),
       onAcceptWithDetails: (details) => _drop(details.data, endHover),
       builder: (context, _, _) => ListView.builder(

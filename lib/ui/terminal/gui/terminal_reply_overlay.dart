@@ -70,6 +70,14 @@ class _TerminalReplyOverlayState extends State<TerminalReplyOverlay>
   bool _automaticCard = false;
   bool _inputPrepared = false;
   final _overlayFocus = FocusNode();
+
+  /// 터미널과 오버레이 전체를 감싸는 포커스 노드. 스스로 포커스를 받지 않고,
+  /// 포커스가 이 안(터미널·카드·퍼피)에 있는지 확인하는 데만 쓴다.
+  final _subtreeFocus = FocusNode(
+    debugLabel: 'TerminalReplyOverlay',
+    canRequestFocus: false,
+    skipTraversal: true,
+  );
   late TerminalAutoReply _automatic;
   bool Function()? _autoCurrent;
   late AiConsentStore _consentStore;
@@ -127,8 +135,20 @@ class _TerminalReplyOverlayState extends State<TerminalReplyOverlay>
         widget.aiSettings?.autoReplySuggestions == true,
   );
 
+  /// 전역 키 처리기가 이 터미널의 키로 볼지. 다른 칸·입력란에 포커스가
+  /// 있거나 위에 모달(동의 창 등)이 떠 있으면 그 키는 이 터미널 것이 아니다.
+  /// 아무것도 포커스를 갖지 않을 때(포커스 범위 자체만 있을 때)는 받을 곳이
+  /// 이 터미널뿐이므로 이 터미널 키로 본다.
+  bool get _ownsKeyboard {
+    if (!(ModalRoute.of(context)?.isCurrent ?? true)) return false;
+    final primary = FocusManager.instance.primaryFocus;
+    return primary == null ||
+        primary is FocusScopeNode ||
+        _subtreeFocus.hasFocus;
+  }
+
   bool _hardwareInput(KeyEvent event) {
-    if (!_available || event is KeyUpEvent) return false;
+    if (!_available || event is KeyUpEvent || !_ownsKeyboard) return false;
     if (_recap.open && event.logicalKey == LogicalKeyboardKey.escape) {
       // 말풍선을 닫는 Escape는 터미널로 보내지 않는다.
       _recap.dismiss();
@@ -344,171 +364,172 @@ class _TerminalReplyOverlayState extends State<TerminalReplyOverlay>
     _detach();
     _recap.dispose();
     _overlayFocus.dispose();
+    _subtreeFocus.dispose();
     super.dispose();
   }
 
   @override
-  Widget build(BuildContext context) => LayoutBuilder(
-    builder: (context, constraints) {
-      final controller = _suggestions;
-      final interaction = _interaction;
-      return Stack(
-        fit: StackFit.expand,
-        children: [
-          Listener(
-            // 터미널을 누르면 제안 카드·ReCap 말풍선을 닫고 입력은 그대로 넘긴다.
-            onPointerDown: _terminalPointerDown,
-            child: widget.child,
+  Widget build(BuildContext context) => Focus(
+    focusNode: _subtreeFocus,
+    child: LayoutBuilder(builder: _buildLayers),
+  );
+
+  Widget _buildLayers(BuildContext context, BoxConstraints constraints) {
+    final controller = _suggestions;
+    final interaction = _interaction;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Listener(
+          // 터미널을 누르면 제안 카드·ReCap 말풍선을 닫고 입력은 그대로 넘긴다.
+          onPointerDown: _terminalPointerDown,
+          child: widget.child,
+        ),
+        if (_available && controller == null)
+          Positioned(
+            right: 12,
+            top: 12,
+            child: Tooltip(
+              message: _configured
+                  ? 'AI 답변 제안'
+                  : 'AI 답변 제안 · AI Chat 연결 설정이 필요합니다.',
+              child: FilledButton.tonalIcon(
+                key: const ValueKey('terminal-ai-suggest'),
+                onPressed: _configured ? () => unawaited(_open()) : null,
+                icon: const Icon(Icons.auto_awesome_outlined, size: 18),
+                label: const Text('AI'),
+              ),
+            ),
           ),
-          if (_available && controller == null)
-            Positioned(
-              right: 12,
-              top: 12,
-              child: Tooltip(
-                message: _configured
-                    ? 'AI 답변 제안'
-                    : 'AI 답변 제안 · AI Chat 연결 설정이 필요합니다.',
-                child: FilledButton.tonalIcon(
-                  key: const ValueKey('terminal-ai-suggest'),
-                  onPressed: _configured ? () => unawaited(_open()) : null,
-                  icon: const Icon(Icons.auto_awesome_outlined, size: 18),
-                  label: const Text('AI'),
-                ),
+        // 작은 화면에서 말풍선이 상단 AI 버튼과 겹쳐도 위에 그려지도록 뒤에 둔다.
+        if (_available && _configured && controller == null)
+          Positioned(
+            right: 8,
+            bottom: 8,
+            child: TerminalRecapPuppy(
+              controller: _recap,
+              onRequest: () => unawaited(_requestRecap()),
+              onDismiss: _recap.dismiss,
+              maxBubbleWidth: math.max(
+                0,
+                math.min(340, constraints.maxWidth - 16),
               ),
+              maxBubbleHeight: math.max(0, constraints.maxHeight - 16),
             ),
-          // 작은 화면에서 말풍선이 상단 AI 버튼과 겹쳐도 위에 그려지도록 뒤에 둔다.
-          if (_available && _configured && controller == null)
-            Positioned(
-              right: 8,
-              bottom: 8,
-              child: TerminalRecapPuppy(
-                controller: _recap,
-                onRequest: () => unawaited(_requestRecap()),
-                onDismiss: _recap.dismiss,
-                maxBubbleWidth: math.max(
-                  0,
-                  math.min(340, constraints.maxWidth - 16),
+          ),
+        if (_available && controller != null && interaction != null)
+          Positioned(
+            right: 12,
+            bottom: 12,
+            width: math.max(0, math.min(480, constraints.maxWidth - 24)),
+            child: Focus(
+              focusNode: _overlayFocus,
+              autofocus: !_automaticCard,
+              onKeyEvent: (_, event) {
+                if (event is KeyDownEvent &&
+                    event.logicalKey == LogicalKeyboardKey.escape) {
+                  _close();
+                  return KeyEventResult.handled;
+                }
+                return KeyEventResult.ignored;
+              },
+              child: Material(
+                key: const ValueKey('terminal-reply-overlay'),
+                elevation: 12,
+                color: Theme.of(context).colorScheme.surface,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: BorderSide(color: Theme.of(context).dividerColor),
                 ),
-                maxBubbleHeight: math.max(0, constraints.maxHeight - 16),
-              ),
-            ),
-          if (_available && controller != null && interaction != null)
-            Positioned(
-              right: 12,
-              bottom: 12,
-              width: math.max(0, math.min(480, constraints.maxWidth - 24)),
-              child: Focus(
-                focusNode: _overlayFocus,
-                autofocus: !_automaticCard,
-                onKeyEvent: (_, event) {
-                  if (event is KeyDownEvent &&
-                      event.logicalKey == LogicalKeyboardKey.escape) {
-                    _close();
-                    return KeyEventResult.handled;
-                  }
-                  return KeyEventResult.ignored;
-                },
-                child: Material(
-                  key: const ValueKey('terminal-reply-overlay'),
-                  elevation: 12,
-                  color: Theme.of(context).colorScheme.surface,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    side: BorderSide(color: Theme.of(context).dividerColor),
-                  ),
-                  clipBehavior: Clip.antiAlias,
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(
-                      maxHeight: math.max(
-                        0,
-                        math.min(400, constraints.maxHeight - 24),
-                      ),
+                clipBehavior: Clip.antiAlias,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: math.max(
+                      0,
+                      math.min(400, constraints.maxHeight - 24),
                     ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.only(left: 12, right: 4),
-                          child: Row(
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.only(left: 12, right: 4),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.auto_awesome_outlined, size: 16),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                controller.busy
+                                    ? '답변 제안 생성 중…'
+                                    : _applying
+                                    ? '답변 전송 중…'
+                                    : 'AI 답변 제안',
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: '제안 닫기',
+                              onPressed: _close,
+                              icon: const Icon(Icons.close, size: 18),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (_applying) const LinearProgressIndicator(),
+                      Flexible(
+                        child: SingleChildScrollView(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
                             children: [
-                              const Icon(Icons.auto_awesome_outlined, size: 16),
-                              const SizedBox(width: 6),
-                              Expanded(
-                                child: Text(
-                                  controller.busy
-                                      ? '답변 제안 생성 중…'
-                                      : _applying
-                                      ? '답변 전송 중…'
-                                      : 'AI 답변 제안',
+                              TerminalReplySuggestionPanel(
+                                controller: controller,
+                                showHeader: false,
+                                onSelected: (suggestion) =>
+                                    unawaited(_apply(suggestion)),
+                              ),
+                              if (interaction.error case final error?)
+                                Padding(
+                                  padding: const EdgeInsets.all(12),
+                                  child: Text(error),
                                 ),
-                              ),
-                              IconButton(
-                                tooltip: '제안 닫기',
-                                onPressed: _close,
-                                icon: const Icon(Icons.close, size: 18),
-                              ),
+                              if (!controller.busy && !_applying)
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    12,
+                                    0,
+                                    12,
+                                    8,
+                                  ),
+                                  child:
+                                      interaction.prompt?.kind ==
+                                          TerminalInteractionKind.collapsed
+                                      ? TextButton(
+                                          onPressed: interaction.busy
+                                              ? null
+                                              : () =>
+                                                    unawaited(_openQuestion()),
+                                          child: const Text('선택지 열고 제안 받기'),
+                                        )
+                                      : TextButton(
+                                          onPressed: controller.canRequest
+                                              ? () => unawaited(
+                                                  _request(controller),
+                                                )
+                                              : null,
+                                          child: const Text('현재 화면으로 다시 제안 받기'),
+                                        ),
+                                ),
                             ],
                           ),
                         ),
-                        if (_applying) const LinearProgressIndicator(),
-                        Flexible(
-                          child: SingleChildScrollView(
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                TerminalReplySuggestionPanel(
-                                  controller: controller,
-                                  showHeader: false,
-                                  onSelected: (suggestion) =>
-                                      unawaited(_apply(suggestion)),
-                                ),
-                                if (interaction.error case final error?)
-                                  Padding(
-                                    padding: const EdgeInsets.all(12),
-                                    child: Text(error),
-                                  ),
-                                if (!controller.busy && !_applying)
-                                  Padding(
-                                    padding: const EdgeInsets.fromLTRB(
-                                      12,
-                                      0,
-                                      12,
-                                      8,
-                                    ),
-                                    child:
-                                        interaction.prompt?.kind ==
-                                            TerminalInteractionKind.collapsed
-                                        ? TextButton(
-                                            onPressed: interaction.busy
-                                                ? null
-                                                : () => unawaited(
-                                                    _openQuestion(),
-                                                  ),
-                                            child: const Text('선택지 열고 제안 받기'),
-                                          )
-                                        : TextButton(
-                                            onPressed: controller.canRequest
-                                                ? () => unawaited(
-                                                    _request(controller),
-                                                  )
-                                                : null,
-                                            child: const Text(
-                                              '현재 화면으로 다시 제안 받기',
-                                            ),
-                                          ),
-                                  ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
                 ),
               ),
             ),
-        ],
-      );
-    },
-  );
+          ),
+      ],
+    );
+  }
 }

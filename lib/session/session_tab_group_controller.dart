@@ -13,12 +13,12 @@ import 'session_tab_layout.dart';
 ///   소속을 바꾸는 동작은 배치([SessionPlacement])를 계산해
 ///   [SessionManager.arrangeSessionsInGroup] 한 번으로 반영한다.
 /// - 멤버가 없어진 탭 그룹(세션 닫기·다른 작업공간 이동·그룹에서 제거)은
-///   [removeEmptyGroups]로 지운다. 세션 목록을 그리는 위젯이
-///   [listenSessionTabGroupCleanup]으로 세션 목록 변경마다 부른다.
+///   [removeEmptyGroups]로 지운다. [SessionManager]가 세션 목록을 바꿀 때마다
+///   부르므로 목록을 그리는 위젯이 없어도 지켜진다.
 ///
 /// 이 컨트롤러는 build에서 [sessionManagerProvider]를 구독하지 않는다.
-/// [SessionManager]가 복원 스냅샷을 저장할 때 이 provider를 읽기 때문에,
-/// 구독하면 순환 의존이 된다.
+/// [SessionManager]가 복원 스냅샷 저장·빈 그룹 정리에서 이 provider를 읽기
+/// 때문에, 구독하면 순환 의존이 된다.
 class SessionTabGroupController extends Notifier<SessionTabGroupState> {
   int _counter = 1;
 
@@ -67,12 +67,21 @@ class SessionTabGroupController extends Notifier<SessionTabGroupState> {
 
   // ── 세션 소속 ─────────────────────────────────────────────────────────
 
-  /// 세션을 새 탭 그룹에 넣는다. 새 그룹 id를 돌려주고, 세션이 없으면 null.
+  /// 세션을 새 탭 그룹에 넣는다. 새 그룹 id를 돌려주고, 세션이 없거나 배치가
+  /// 거절되면 null.
   String? addToNewGroup(String sessionId, {String? name}) {
     final session = _sessionById(sessionId);
     if (session == null) return null;
     final id = create(session.groupId, name: name);
-    _place(session, SessionDropTarget(anchorId: sessionId, tabGroupId: id));
+    if (!_place(
+      session,
+      SessionDropTarget(anchorId: sessionId, tabGroupId: id),
+    )) {
+      // 배치가 거절되면 세션 목록이 그대로라 빈 그룹 정리도 일어나지 않는다.
+      // 방금 만든 그룹만 지운다(재시도가 보류 중인 다른 빈 그룹은 건드리지 않음).
+      _remove(id);
+      return null;
+    }
     return id;
   }
 
@@ -108,11 +117,13 @@ class SessionTabGroupController extends Notifier<SessionTabGroupState> {
     );
   }
 
-  /// 탭 그룹을 해제한다. 세션은 그 자리에 그대로 남는다.
+  /// 탭 그룹을 해제한다. 세션은 그 자리에 그대로 남는다. 배치가 반영되지
+  /// 않으면 그룹도 지우지 않는다(같은 상태에서 바로 계산하므로 실제로는
+  /// 거절되지 않는다).
   void ungroup(String tabGroupId) {
     final group = state.byId(tabGroupId);
     if (group == null) return;
-    ref
+    final applied = ref
         .read(sessionManagerProvider.notifier)
         .arrangeSessionsInGroup(group.workspaceGroupId, [
           for (final placement in _placements(group.workspaceGroupId))
@@ -120,6 +131,9 @@ class SessionTabGroupController extends Notifier<SessionTabGroupState> {
                 ? SessionPlacement(placement.id, null)
                 : placement,
         ]);
+    // 거절되면 멤버가 그대로 이 그룹을 가리키므로 그룹도 남긴다. 같은 상태에서
+    // 동기로 계산한 배치라 실제로는 거절되지 않으므로 UI 안내는 두지 않는다.
+    if (!applied) return;
     _remove(tabGroupId);
     ref.read(sessionManagerProvider.notifier).persistLayoutSoon();
   }
@@ -186,9 +200,11 @@ class SessionTabGroupController extends Notifier<SessionTabGroupState> {
     ];
   }
 
-  void _place(SessionInfo session, SessionDropTarget target) {
+  /// 배치를 반영한다. 반영되면 세션 목록 변경으로 [SessionManager]가 빈 그룹을
+  /// 정리한다. 거절되면(그 사이 세션 목록이 바뀜) false.
+  bool _place(SessionInfo session, SessionDropTarget target) {
     final current = _placements(session.groupId);
-    ref
+    return ref
         .read(sessionManagerProvider.notifier)
         .arrangeSessionsInGroup(
           session.groupId,
@@ -215,15 +231,22 @@ class SessionTabGroupController extends Notifier<SessionTabGroupState> {
     );
   }
 
-  /// [sessions]에 멤버가 하나도 없는 탭 그룹을 지운다.
-  void removeEmptyGroups(List<SessionInfo> sessions) {
+  /// [sessions]에 멤버가 하나도 없는 탭 그룹을 지운다. [keep]의 그룹은
+  /// 비어 있어도 남긴다(재시도처럼 곧 멤버가 돌아오는 경우).
+  void removeEmptyGroups(
+    List<SessionInfo> sessions, {
+    Iterable<String> keep = const [],
+  }) {
     final used = <String>{
       for (final session in sessions)
         if (session.tabGroupId case final id?) '${session.groupId}/$id',
     };
+    final reserved = keep.toSet();
     final kept = [
       for (final group in state.groups)
-        if (used.contains('${group.workspaceGroupId}/${group.id}')) group,
+        if (reserved.contains(group.id) ||
+            used.contains('${group.workspaceGroupId}/${group.id}'))
+          group,
     ];
     if (kept.length == state.groups.length) return;
     state = SessionTabGroupState(groups: kept);
@@ -261,13 +284,3 @@ final sessionTabGroupProvider =
     NotifierProvider<SessionTabGroupController, SessionTabGroupState>(
       SessionTabGroupController.new,
     );
-
-/// 세션 목록이 바뀔 때마다 멤버 없는 탭 그룹을 지우도록 구독한다. 세션 목록을
-/// 그리는 위젯([SessionRail], 접힌 좌측 패널)의 build에서 부른다.
-void listenSessionTabGroupCleanup(WidgetRef ref) {
-  ref.listen<List<SessionInfo>>(
-    sessionManagerProvider,
-    (_, sessions) =>
-        ref.read(sessionTabGroupProvider.notifier).removeEmptyGroups(sessions),
-  );
-}

@@ -4,6 +4,20 @@ import 'dart:io';
 import 'dart:math';
 
 const daemonProtocolVersion = 1;
+
+/// 앱↔daemon loopback 소켓에서 Nagle 지연을 끈다. 키 입력·에코처럼 작은
+/// 프레임이 직전 프레임의 ACK를 기다리며 묶이지 않게 한다(SSH 소켓과 같은 정책).
+/// 일부 플랫폼·소켓 종류가 옵션을 거부해도 연결은 그대로 쓴다.
+void enableDaemonSocketNoDelay(Socket socket) {
+  try {
+    socket.setOption(SocketOption.tcpNoDelay, true);
+  } on SocketException {
+    // 옵션 미지원: 지연만 남고 동작은 같다.
+  } on OSError {
+    // 위와 같다.
+  }
+}
+
 String daemonToken() =>
     base64Url.encode(List.generate(32, (_) => Random.secure().nextInt(256)));
 
